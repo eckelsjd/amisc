@@ -1,0 +1,58 @@
+[project]
+name = "amisc"
+dynamic = ["version"]
+description = "Adaptive multi-index stochastic collocation (surrogates) for metamodeling of multidisciplinary systems"
+authors = [
+    {name = "Joshua Eckels", email = "eckelsjd@umich.edu"},
+]
+dependencies = [
+    "numpy>=1.26.2",
+]
+requires-python = ">=3.10"
+readme = "README.md"
+license = {file = "LICENSE"}
+keywords = ["surrogates", "multidisciplinary", "multifidelity", "adaptive", "collocation", "metamodeling"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Operating System :: POSIX :: Linux",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Intended Audience :: Science/Research"
+]
+
+[project.urls]
+Repository = "https://github.com/eckelsjd/amisc.git"
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.pylint.MASTER]
+ignore-paths = [ "^.venv/.*$", "^docs/*" ]
+
+[tool.pylint."MESSAGES CONTROL"]
+disable = '''
+missing-module-docstring,
+missing-class-docstring,
+missing-function-docstring
+'''
+
+[tool.pdm.version]
+source = "file"
+path = "src/amisc/__init__.py"
+
+[tool.pdm.dev-dependencies]
+dev = [
+    "pylint>=3.0.2",
+    "pytest>=7.4.3",
+    "pytest-cov>=4.1.0",
+    "mkdocs>=1.5.3",
+    "mkdocstrings[python]>=0.24.0",
+    "mkdocs-material>=9.4.14",
+]

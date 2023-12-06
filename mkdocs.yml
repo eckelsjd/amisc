@@ -1,0 +1,21 @@
+site_name: amisc Documentation
+
+theme:
+  name: "material"
+  logo: assets/amisc_logo.svg
+  favicon: assets/amisc_logo.svg
+
+plugins:
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: sphinx
+            docstring_section_style: list
+
+nav:
+  - Home: index.md
+  - tutorials.md
+  - How-to Guides: how-to-guides.md
+  - reference.md
+  - explanation.md
