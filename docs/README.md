@@ -6,6 +6,7 @@
 )
 ![docs](https://img.shields.io/github/actions/workflow/status/eckelsjd/amisc/docs.yml?logo=materialformkdocs&logoColor=%2523cccccc&label=docs)
 [![Algorithm description](https://img.shields.io/badge/DOI-10.1002/nme.6958-blue)](https://doi.org/10.1002/nme.6958)
+[![Coverage Status](https://coveralls.io/repos/github/eckelsjd/amisc/badge.svg?branch=main)](https://coveralls.io/github/eckelsjd/amisc?branch=main)
 
 Efficient framework for building surrogates of multidisciplinary systems. 
 Uses the adaptive multi-index stochastic collocation ([AMISC](https://onlinelibrary.wiley.com/doi/full/10.1002/nme.6958)) 

@@ -50,6 +50,7 @@ path = "src/amisc/__init__.py"
 
 [tool.pdm.scripts]
 release = "python release.py"
+test = "pytest --cov=amisc tests"
 
 [tool.pdm.dev-dependencies]
 dev = [
