@@ -3,4 +3,4 @@
 - Author - Joshua Eckels (eckelsjd@umich.edu)
 - License - GNU GPLv3
 """
-__version__ = "0.0.7"
+__version__ = "0.0.8"
