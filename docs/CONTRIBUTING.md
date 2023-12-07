@@ -14,12 +14,11 @@ We use [Github](https://guides.github.com/introduction/flow/index.html) to host 
 Pull requests are the best way to propose changes to the codebase (bug fixes, new features, docs, etc.)
 
 1. Fork the repo and create your branch from `main`. 
-2. Follow the general branch naming convention of `username-type-issue#` (e.g. `eckelsjd-bugfix-1`). "type" is something like `bugfix` or `feature`.
 3. If you are adding a feature or making major changes, first create the [issue](https://github.com/eckelsjd/amisc/issues). 
 4. If you've added code that should be tested, add a [test](https://github.com/eckelsjd/amisc/tests). 
 5. If you've made major changes, update the [documentation](https://github.com/eckelsjd/amisc/docs). 
-6. Ensure the test suite passes (coming soon). 
-7. Make sure your code lints (coming soon). 
+6. Ensure the test suite passes (`pdm run test`).
+7. Make sure your code passes lint checks (coming soon). 
 8. Follow [Conventional commits](https://www.conventionalcommits.org/en/v1.0.0/) guidelines when adding a commit message.
 9. Issue that pull request!
 
@@ -33,7 +32,7 @@ cd amisc
 pdm install  # Installs all dev and package dependencies (including amisc itself in -e mode) into local .venv
 git checkout -b <your-branch-name>
 # Make local changes
-# Make sure they past tests/linting (coming soon)
+pdm run test  # make sure tests pass
 git add -A
 git commit -m "Adding a bugfix or new feature"
 git push -u origin <your-branch-name>
