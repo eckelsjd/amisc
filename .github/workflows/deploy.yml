@@ -33,7 +33,7 @@ jobs:
     permissions:
       id-token: write  # trusted publishing
     steps:
-    - uses: actions/download-artifacts@v3
+    - uses: actions/download-artifact@v3
       with:
         name: python-package-distributions
         path: dist/
@@ -52,7 +52,7 @@ jobs:
       run: |
         git config user.name github-actions[bot]
         git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-    - uses: actions/download-artifacts@v3
+    - uses: actions/download-artifact@v3
       with:
         name: python-package-distributions
         path: dist/
