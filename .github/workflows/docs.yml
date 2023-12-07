@@ -1,4 +1,4 @@
-name: docs
+name: Build documentation
 on:
   push:
     branches:
@@ -27,3 +27,19 @@ jobs:
       # Build and push docs to gh-pages branch (triggers doc site publish action)
       - run: pdm sync
       - run: pdm run mkdocs gh-deploy --force
+
+  coverage-test:
+    name: Test coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up PDM
+        uses: pdm-project/setup-pdm@v3
+      - name: Install dependencies
+        run: pdm install
+      - name: Run tests
+        run: pdm run -v test
+      - name: Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
