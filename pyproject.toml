@@ -8,18 +8,14 @@ authors = [
 dependencies = [
     "numpy>=1.26.2",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 readme = "docs/README.md"
 license = {file = "LICENSE"}
 keywords = ["surrogates", "multidisciplinary", "multifidelity", "adaptive", "collocation", "metamodeling"]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Operating System :: Microsoft :: Windows :: Windows 10",
-    "Operating System :: Microsoft :: Windows :: Windows 11",
-    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Mathematics",
@@ -50,6 +46,7 @@ path = "src/amisc/__init__.py"
 
 [tool.pdm.scripts]
 release = "python release.py"
+test = "pytest --cov=amisc tests"
 
 [tool.pdm.dev-dependencies]
 dev = [
@@ -57,7 +54,7 @@ dev = [
     "pytest>=7.4.3",
     "pytest-cov>=4.1.0",
     "mkdocs>=1.5.3",
-    "mkdocstrings[python]>=0.24.0",
-    "mkdocs-material>=9.4.14",
     "GitPython>=3.1.40",
+    "mkdocstrings>=0.24.0",
+    "mkdocs-material>=9.5.0",
 ]
