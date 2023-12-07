@@ -1,4 +1,4 @@
-site_name: amisc Documentation
+site_name: Documentation for AMISC
 
 theme:
   name: "material"
@@ -14,8 +14,9 @@ plugins:
             docstring_section_style: list
 
 nav:
-  - Home: index.md
+  - Home: README.md
   - tutorials.md
   - How-to Guides: how-to-guides.md
   - reference.md
   - explanation.md
+  - Contributing: CONTRIBUTING.md

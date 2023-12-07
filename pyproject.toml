@@ -9,7 +9,7 @@ dependencies = [
     "numpy>=1.26.2",
 ]
 requires-python = ">=3.10"
-readme = "README.md"
+readme = "docs/README.md"
 license = {file = "LICENSE"}
 keywords = ["surrogates", "multidisciplinary", "multifidelity", "adaptive", "collocation", "metamodeling"]
 classifiers = [
@@ -28,6 +28,7 @@ classifiers = [
 
 [project.urls]
 Repository = "https://github.com/eckelsjd/amisc.git"
+Documentation = "https://eckelsjd.github.io/amisc"
 
 [build-system]
 requires = ["pdm-backend"]
