@@ -18,7 +18,7 @@ from amisc.examples.models import fire_sat_system
 
 # TODO: Include a swap and insert component test
 
-@pytest.mark.skipif(not sys.platform.startswith('linux'))
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='not sure why')
 def test_fire_sat(plots=True):
     """Test the fire satellite coupled system from Chaudhuri (2018)"""
     N = 1000
