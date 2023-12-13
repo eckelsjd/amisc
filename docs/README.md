@@ -39,8 +39,31 @@ pdm sync  # reads pdm.lock and sets up an identical venv
 ```
 
 ## Quickstart
-```python title="amisc.examples.tutorial.py"
---8<-- "amisc/examples/tutorial.py:simple"
+```python
+import numpy as np
+
+from amisc.system import SystemSurrogate, ComponentSpec
+from amisc.utils import UniformRV
+
+def fun1(x):
+    return dict(y=x * np.sin(np.pi * x))
+
+def fun2(x):
+    return dict(y=1 / (1 + 25 * x ** 2))
+
+x = UniformRV(0, 1, 'x')
+y = UniformRV(0, 1, 'y')
+z = UniformRV(0, 1, 'z')
+model1 = ComponentSpec(fun1, exo_in=x, coupling_out=y)
+model2 = ComponentSpec(fun2, coupling_in=y, coupling_out=z)
+
+inputs = x
+outputs = [y, z]
+system = SystemSurrogate([model1, model2], inputs, outputs)
+system.fit()
+
+x_test = system.sample_inputs(10)
+y_test = system.predict(x_test)
 ```
 
 ## Contributing
