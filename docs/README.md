@@ -18,6 +18,8 @@ technique.
 We highly recommend using [pdm](https://github.com/pdm-project/pdm):
 ```shell
 pip install --user pdm
+cd <your-project>
+pdm init
 pdm add amisc
 ```
 However, you can also install normally:
@@ -35,7 +37,7 @@ You can also quickly set up a dev environment with:
 ```shell
 git clone https://github.com/<your-username>/amisc.git
 cd amisc
-pdm sync  # reads pdm.lock and sets up an identical venv
+pdm install  # reads pdm.lock and sets up an identical venv
 ```
 
 ## Quickstart

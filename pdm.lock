@@ -5,7 +5,7 @@
 groups = ["default", "dev"]
 strategy = ["cross_platform"]
 lock_version = "4.4"
-content_hash = "sha256:bad2866334854360a4174574ed952149d5018f8759a3082f039fef97abab0d69"
+content_hash = "sha256:36dc42178755d18528a87db614c7e717871006c2e6053745508c035f98859533"
 
 [[package]]
 name = "astroid"
