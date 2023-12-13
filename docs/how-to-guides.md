@@ -43,7 +43,7 @@ to `ComponentSpec` and `SystemSurrogate`.
 
 !!! Example
     ```python
-    def wrapper_func(x, alpha, *args, output_dir=None, **kwargs):
+    def wrapper_func(x, *args, alpha=(0,), output_dir=None, **kwargs):
         print(x.shape)  # (..., x_dim)
 
         # Your code here, for example:
