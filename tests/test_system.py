@@ -8,6 +8,7 @@ from scipy.linalg import lapack
 from scipy.optimize import fsolve
 from scipy.stats import gaussian_kde
 import matplotlib.pyplot as plt
+import pytest
 
 from amisc.system import SystemSurrogate, ComponentSpec
 from amisc.rv import UniformRV
@@ -17,6 +18,7 @@ from amisc.examples.models import fire_sat_system
 
 # TODO: Include a swap and insert component test
 
+@pytest.mark.skipif(not sys.platform.startswith('linux'))
 def test_fire_sat(plots=True):
     """Test the fire satellite coupled system from Chaudhuri (2018)"""
     N = 1000
