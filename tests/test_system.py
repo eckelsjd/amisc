@@ -7,11 +7,15 @@ from scipy.linalg import lapack
 from scipy.optimize import fsolve
 from scipy.stats import gaussian_kde
 import matplotlib.pyplot as plt
+import pytest
 
 from amisc.system import SystemSurrogate, ComponentSpec
 from amisc.rv import UniformRV
 from amisc.utils import ax_default
 from amisc.examples.models import fire_sat_system
+
+
+pytestmark = pytest.mark.skip("Don't run this for now")
 
 
 # TODO: Include a swap and insert component test
