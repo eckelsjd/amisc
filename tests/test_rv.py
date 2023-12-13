@@ -1,10 +1,12 @@
 from amisc.rv import UniformRV, NormalRV, LogNormalRV, LogUniformRV, ScalarRV
 
 
+# TODO: make sure rvs are sampling correctly
+
 def test_loading_rvs():
     """Test random variable construction and methods."""
-    rvs = [UniformRV(0, 1, id='x'), NormalRV(0, 1, id='y'), LogUniformRV(1, 2, id='z'), LogNormalRV(2, 1, id='a'),
-           ScalarRV(id='h')]
+    rvs = [UniformRV(0, 1, 'x'), NormalRV(0, 1, 'y'), LogUniformRV(1, 2, 'z'), LogNormalRV(2, 1, 'a'),
+           ScalarRV('h')]
     samples_pdf = []
     samples_domain = []
     pdf_vals = []
@@ -16,8 +18,3 @@ def test_loading_rvs():
         pdf_vals.append(v.pdf(sample))
         labels.append(v.to_tex(symbol=False))
         v.update_bounds(*v.bds)
-
-
-def test_rv_sampling():
-    # TODO: make sure rvs are sampling and evaluating correctly
-    pass
