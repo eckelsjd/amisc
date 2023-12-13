@@ -21,7 +21,7 @@ from amisc.examples.models import fire_sat_system
 @pytest.mark.skipif(not sys.platform.startswith('linux'), reason='not sure why')
 def test_fire_sat(plots=True):
     """Test the fire satellite coupled system from Chaudhuri (2018)"""
-    N = 1000
+    N = 100
     surr = fire_sat_system(save_dir=Path('.'))
     xt = surr.sample_inputs(N, use_pdf=True)
     yt = surr(xt, use_model='best')

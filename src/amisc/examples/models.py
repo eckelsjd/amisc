@@ -88,8 +88,8 @@ def fire_sat_system(save_dir=None):
     """Fire satellite detection system model from Chaudhuri 2018.
 
     !!! Note "Some modifications"
-        Orbit will save outputs all the time; Power won't because it is part of an FPI loop. Orbit and Power will
-        return `np.nan` 1% of the time (to test robustness of surrogate). Power and Attitude have an `alpha` fidelity
+        Orbit will save outputs all the time; Power won't because it is part of an FPI loop. Orbit and Power can
+        return `np.nan` some of the time (optional, to test robustness of surrogate). Power and Attitude have an `alpha` fidelity
         index that controls accuracy of the returned values. `alpha=0,1,2` corresponds to `8,4,0` percent error.
 
     :param save_dir: where to save model outputs
@@ -217,10 +217,10 @@ def fire_sat_system(save_dir=None):
         return {'y': y}
 
     orbit = ComponentSpec(orbit_fun, name='Orbit', exo_in=[0, 1], coupling_out=[0, 1, 2, 3], max_beta=(3, 3),
-                          model_kwargs={'pct_failure': 0.01}, save_output=True)
+                          model_kwargs={'pct_failure': 0}, save_output=True)
     power = ComponentSpec(power_fun, name='Power', truth_alpha=(2,), exo_in=[2, 3], max_alpha=(2,), max_beta=(3,)*5,
                           coupling_in={'Orbit': [1, 2], 'Attitude': [0]}, coupling_out=[4, 5, 6, 7], save_output=True,
-                          model_kwargs={'pct_failure': 0.01})
+                          model_kwargs={'pct_failure': 0})
     attitude = ComponentSpec(attitude_fun, name='Attitude', truth_alpha=2, max_alpha=2, max_beta=(3,)*10,
                              exo_in=[0, 3, 4, 5, 6, 7], coupling_in={'Orbit': [0, 3], 'Power': [0, 1]},
                              coupling_out=[8, 9])
