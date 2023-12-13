@@ -8,7 +8,7 @@ import numpy as np
 from amisc.interpolator import BaseInterpolator
 from amisc.rv import BaseRV
 
-__version__ = "0.0.8"
+__version__ = "0.1.1"
 
 # Custom types that are used frequently
 IndexSet = list[tuple[tuple, tuple]]
