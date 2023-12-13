@@ -1,21 +1,18 @@
 import time
 import warnings
 from pathlib import Path
+import sys
 
 import numpy as np
 from scipy.linalg import lapack
 from scipy.optimize import fsolve
 from scipy.stats import gaussian_kde
 import matplotlib.pyplot as plt
-import pytest
 
 from amisc.system import SystemSurrogate, ComponentSpec
 from amisc.rv import UniformRV
 from amisc.utils import ax_default
 from amisc.examples.models import fire_sat_system
-
-
-pytestmark = pytest.mark.skip("Don't run this for now")
 
 
 # TODO: Include a swap and insert component test
@@ -30,7 +27,8 @@ def test_fire_sat(plots=True):
     xt = xt[use_idx, :]
     yt = yt[use_idx, :]
     test_set = {'xt': xt, 'yt': yt}
-    surr.fit(max_iter=15, max_tol=1e-2, max_runtime=1/12, test_set=test_set, n_jobs=-1,
+    n_jobs = -1 if sys.platform.startswith('linux') else 1  # parallel on VM runners on Github get stuck for non-linux
+    surr.fit(max_iter=15, max_tol=1e-2, max_runtime=1/12, test_set=test_set, n_jobs=n_jobs,
              num_refine=1000)
 
     ysurr = surr.predict(xt)
