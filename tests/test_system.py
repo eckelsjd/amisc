@@ -18,8 +18,8 @@ from amisc.examples.models import fire_sat_system
 
 # TODO: Include a swap and insert component test
 
-@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='not sure why')
-def test_fire_sat(plots=True):
+# @pytest.mark.skipif(not sys.platform.startswith('linux'), reason='not sure why')
+def test_fire_sat(plots=False):
     """Test the fire satellite coupled system from Chaudhuri (2018)"""
     N = 100
     surr = fire_sat_system(save_dir=Path('.'))
@@ -29,9 +29,7 @@ def test_fire_sat(plots=True):
     xt = xt[use_idx, :]
     yt = yt[use_idx, :]
     test_set = {'xt': xt, 'yt': yt}
-    n_jobs = -1 if sys.platform.startswith('linux') else 1  # parallel on VM runners on Github get stuck for non-linux
-    surr.fit(max_iter=15, max_tol=1e-2, max_runtime=1/12, test_set=test_set, n_jobs=n_jobs,
-             num_refine=1000)
+    surr.fit(max_iter=15, max_tol=1e-2, max_runtime=1/12, test_set=test_set, n_jobs=-1, num_refine=1000)
 
     ysurr = surr.predict(xt)
     l2_error = np.sqrt(np.nanmean((ysurr-yt)**2, axis=0)) / np.sqrt(np.nanmean(yt**2, axis=0))
