@@ -116,7 +116,7 @@ class ComponentSurrogate(ABC):
         self._model_kwargs = model_kwargs if model_kwargs is not None else {}
         self.truth_alpha = truth_alpha
         self.x_vars = x_vars if isinstance(x_vars, list) else [x_vars]
-        max_alpha = (2,)*len(truth_alpha) if max_alpha == () else max_alpha
+        max_alpha = truth_alpha if max_alpha == () else max_alpha
         max_beta = (2,)*len(self.x_vars) if max_beta == () else max_beta
         self.max_refine = list(max_alpha + max_beta)    # Max refinement indices
 
