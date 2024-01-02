@@ -42,6 +42,7 @@ import string
 import pickle
 from collections import UserDict
 from concurrent.futures import Executor
+import shutil
 
 import numpy as np
 import networkx as nx
@@ -154,7 +155,7 @@ class SystemSurrogate:
 
     def __init__(self, components: list[ComponentSpec] | ComponentSpec, exo_vars: list[BaseRV] | BaseRV,
                  coupling_vars: list[BaseRV] | BaseRV, est_bds: int = 0, save_dir: str | Path = None,
-                 executor: Executor = None, stdout: bool = True, init_surr: bool = True):
+                 executor: Executor = None, stdout: bool = True, init_surr: bool = True, logger_name: str = None):
         """Construct the MD system surrogate.
 
         !!! Warning
@@ -169,25 +170,21 @@ class SystemSurrogate:
         :param executor: an instance of a `concurrent.futures.Executor`, use to iterate new candidates in parallel
         :param stdout: whether to log to console
         :param init_surr: whether to initialize the surrogate immediately when constructing
+        :param logger_name: the name of the logger to use, if None then uses class name by default
         """
         # Setup root save directory
         if save_dir is not None:
             timestamp = datetime.datetime.now(tz=timezone.utc).isoformat().split('.')[0].replace(':', '.')
             save_dir = Path(save_dir) / ('amisc_' + timestamp)
             os.mkdir(save_dir)
-            self.root_dir = str(save_dir.resolve())
-            os.mkdir(Path(self.root_dir) / 'sys')
-            os.mkdir(Path(self.root_dir) / 'components')
-            fname = timestamp + 'UTC_sys.log'
-            self.log_file = str((Path(self.root_dir) / fname).resolve())
-        else:
-            self.root_dir = None
-            self.log_file = None
-        self.logger = get_logger(self.__class__.__name__, log_file=self.log_file, stdout=stdout)
+        self.root_dir = None
+        self.log_file = None
+        self.logger = None
         self.executor = executor
+        self.graph = nx.DiGraph()
+        self.set_root_directory(save_dir, stdout=stdout, logger_name=logger_name)
 
         # Store system info in a directed graph data structure
-        self.graph = nx.DiGraph()
         self.exo_vars = copy.deepcopy(exo_vars) if isinstance(exo_vars, list) else [exo_vars]
         self.coupling_vars = copy.deepcopy(coupling_vars) if isinstance(coupling_vars, list) else [coupling_vars]
         self.refine_level = 0
@@ -211,6 +208,8 @@ class SystemSurrogate:
             for neighbor in node_obj['local_in']:
                 self.graph.add_edge(neighbor, node)
 
+        self.set_logger(logger_name, stdout=stdout)  # Need to update component loggers
+
         # Estimate coupling variable bounds
         if est_bds > 0:
             self._estimate_coupling_bds(est_bds)
@@ -218,7 +217,7 @@ class SystemSurrogate:
         # Init system with most coarse fidelity indices in each component
         if init_surr:
             self.init_system()
-        self.save_to_file('sys_init.pkl')
+        self._save_progress('sys_init.pkl')
 
     def _build_component(self, component: ComponentSpec, nodes=None) -> tuple[dict, ComponentSurrogate]:
         """Build and return a `ComponentSurrogate` from a `dict` that describes the component model/connections.
@@ -475,7 +474,7 @@ class SystemSurrogate:
             try:
                 return func(self, *args, **kwargs)
             except:
-                self.save_to_file('sys_error.pkl')
+                self._save_progress('sys_error.pkl')
                 self.logger.critical(f'An error occurred during execution of {func.__name__}. Saving '
                                      f'SystemSurrogate object to sys_error.pkl', exc_info=True)
                 self.logger.info(f'Final system surrogate on exit: \n {self}')
@@ -559,7 +558,7 @@ class SystemSurrogate:
                                          ppool=ppool)
                 curr_error = refine_res[0]
                 if save_interval > 0 and self.refine_level % save_interval == 0:
-                    self.save_to_file(f'sys_iter_{self.refine_level}.pkl')
+                    self._save_progress(f'sys_iter_{self.refine_level}.pkl')
 
                 # Plot progress of error indicator
                 train_record.append(refine_res)
@@ -587,7 +586,7 @@ class SystemSurrogate:
                         t_fig.savefig(str(Path(self.root_dir) / 'test_set.png'), dpi=300, format='png')
                     self.build_metrics['test_stats'] = test_stats
 
-        self.save_to_file(f'sys_final.pkl')
+        self._save_progress(f'sys_final.pkl')
         self.logger.info(f'Final system surrogate: \n {self}')
 
     def get_allocation(self, idx: int = None):
@@ -734,8 +733,8 @@ class SystemSurrogate:
                         y_max = np.max(np.concatenate((y_max, ymax), axis=0), axis=0, keepdims=True)
                     alpha, beta = candidates[i]
                     error_indicator = d_error / d_work
-                    self.logger.info(f"Candidate multi-index: {(alpha, beta)}. Error indicator: "
-                                     f"{error_indicator}. L2 error: {d_error}")
+                    self.logger.info(f"Candidate multi-index: {(alpha, beta)}. L2 error: {d_error}. Error indicator: "
+                                     f"{error_indicator}.")
 
                     if error_indicator > error_max:
                         error_max = error_indicator
@@ -1216,7 +1215,7 @@ class SystemSurrogate:
             ax_default(ax, '', "Fraction of total cost" if k == 0 else '', legend=False)
             ax.set_xticks(x, xlabels)
             ax.set_xlim(left=-1, right=x[-1] + 1)
-        fig.set_size_inches(2.5*len(x), 4)
+        fig.set_size_inches(8, 4)
         fig.tight_layout()
 
         if self.root_dir is not None:
@@ -1236,17 +1235,22 @@ class SystemSurrogate:
         """Log an important message."""
         self.logger.info('-' * int(len(title_str)/2) + title_str + '-' * int(len(title_str)/2))
 
-    def save_to_file(self, filename: str, save_dir: str | Path = None):
-        """Save the SystemSurrogate object to a .pkl file.
+    def _save_progress(self, filename: str):
+        """Internal helper to save surrogate training progress (only if `root_dir` exists)
 
-        :param filename: filename of the .pkl file to save to
-        :param save_dir: overrides existing surrogate root directory if provided
+        :param filename: the name of the save file to `root/sys/filename.pkl`
         """
-        if self.root_dir is None and save_dir is None:
-            # Can't save to file if root_dir is None
-            return
+        if self.root_dir is not None:
+            self.save_to_file(filename)
 
-        save_dir = save_dir if save_dir is not None else str(Path(self.root_dir) / 'sys')
+    def save_to_file(self, filename: str, save_dir: str | Path = None):
+        """Save the `SystemSurrogate` object to a `.pkl` file.
+
+        :param filename: filename of the `.pkl` file to save to
+        :param save_dir: overrides existing surrogate root directory if provided, otherwise defaults to '.'
+        """
+        if save_dir is None:
+            save_dir = '.' if self.root_dir is None else str(Path(self.root_dir) / 'sys')
         if not Path(save_dir).is_dir():
             save_dir = '.'
 
@@ -1266,36 +1270,38 @@ class SystemSurrogate:
             if node in set_dict:
                 node_obj['surrogate']._set_output_dir(set_dict.get(node))
 
-    def set_root_directory(self, root_dir: str | Path, stdout: bool = True):
+    def set_root_directory(self, root_dir: str | Path = None, stdout: bool = True, logger_name: str = None):
         """Set the root to a new directory, for example if you move to a new filesystem.
 
-        :param root_dir: new root directory
+        :param root_dir: new root directory, don't save build products if None
         :param stdout: whether to connect the logger to console (default)
+        :param logger_name: the logger name to use, defaults to class name
         """
-        self.root_dir = str(Path(root_dir).resolve())
-        log_file = None
-        if not (Path(self.root_dir) / 'sys').is_dir():
-            os.mkdir(Path(self.root_dir) / 'sys')
-        if not (Path(self.root_dir) / 'components').is_dir():
-            os.mkdir(Path(self.root_dir) / 'components')
-        for f in os.listdir(self.root_dir):
-            if f.endswith('.log'):
-                log_file = str((Path(self.root_dir) / f).resolve())
-                break
-        if log_file is None:
-            fname = datetime.datetime.now(tz=timezone.utc).isoformat().split('.')[0].replace(':', '.') + 'UTC_sys.log'
-            log_file = str((Path(self.root_dir) / fname).resolve())
+        if root_dir is None:
+            self.root_dir = None
+            self.log_file = None
+        else:
+            self.root_dir = str(Path(root_dir).resolve())
+            log_file = None
+            if not (Path(self.root_dir) / 'sys').is_dir():
+                os.mkdir(Path(self.root_dir) / 'sys')
+            if not (Path(self.root_dir) / 'components').is_dir():
+                os.mkdir(Path(self.root_dir) / 'components')
+            for f in os.listdir(self.root_dir):
+                if f.endswith('.log'):
+                    log_file = str((Path(self.root_dir) / f).resolve())
+                    break
+            if log_file is None:
+                fname = datetime.datetime.now(tz=timezone.utc).isoformat().split('.')[0].replace(':', '.') + 'UTC_sys.log'
+                log_file = str((Path(self.root_dir) / fname).resolve())
+            self.log_file = log_file
 
-        # Setup the log file
-        self.log_file = log_file
-        self.logger = get_logger(self.__class__.__name__, log_file=log_file, stdout=stdout)
+        self.set_logger(logger_name, stdout=stdout)
 
         # Update model output directories
         for node, node_obj in self.graph.nodes.items():
             surr = node_obj['surrogate']
-            surr.logger = get_logger(surr.__class__.__name__, log_file=log_file, stdout=stdout)
-            surr.log_file = self.log_file
-            if surr.save_enabled():
+            if self.root_dir is not None and surr.save_enabled():
                 output_dir = str((Path(self.root_dir) / 'components' / node).resolve())
                 if not Path(output_dir).is_dir():
                     os.mkdir(output_dir)
@@ -1328,23 +1334,63 @@ class SystemSurrogate:
         for node, node_obj in self.graph.nodes.items():
             node_obj['surrogate'].executor = executor
 
+    def set_logger(self, name: str = None, log_file: str | Path = None, stdout: bool = True):
+        """Set a new `logging.Logger` object with the given unique `name`.
+
+        :param name: the name of the new logger object
+        :param stdout: whether to connect the logger to console (default)
+        :param log_file: log file (if provided)
+        """
+        if log_file is None:
+            log_file = self.log_file
+        if name is None:
+            name = self.__class__.__name__
+        self.log_file = log_file
+        self.logger = get_logger(name, log_file=log_file, stdout=stdout)
+
+        for node, node_obj in self.graph.nodes.items():
+            surr = node_obj['surrogate']
+            surr.logger = self.logger.getChild('Component')
+            surr.log_file = self.log_file
+
     @staticmethod
-    def load_from_file(filename: str | Path, root_dir: str | Path = None, executor: Executor = None):
-        """Load a `SystemSurrogate object` from file.
+    def load_from_file(filename: str | Path, root_dir: str | Path = None, executor: Executor = None,
+                       stdout: bool = True, logger_name: str = None):
+        """Load a `SystemSurrogate` object from file.
 
         :param filename: the .pkl file to load
-        :param root_dir: folder to use as the root directory, (uses file's second parent directory by default)
+        :param root_dir: if provided, an `amisc_timestamp` directory will be created at `root_dir`. Ignored if the
+                         `.pkl` file already resides in an `amisc`-like directory. If none, then the surrogate object
+                         is only loaded into memory and is not given a file directory for any save artifacts.
         :param executor: a `concurrent.futures.Executor` object to set; clears it if None
+        :param stdout: whether to log to console
+        :param logger_name: the name of the logger to use, if None then uses class name by default
         :returns: the `SystemSurrogate` object
         """
-        if root_dir is None:
-            root_dir = Path(filename).parent.parent     # Assume root/sys/filename.pkl
-
         with open(Path(filename), 'rb') as dill_file:
             sys_surr = dill.load(dill_file)
             sys_surr.set_executor(executor)
-            sys_surr.set_root_directory(root_dir)
-            sys_surr.logger.info(f'SystemSurrogate loaded from {Path(filename).resolve()}')
+
+        copy_flag = False
+        if root_dir is None:
+            parts = Path(filename).resolve().parts
+            if len(parts) > 2:
+                if parts[-3].startswith('amisc_'):
+                    root_dir = Path(filename).parent.parent  # Assumes amisc_root/sys/filename.pkl default structure
+        else:
+            if not Path(root_dir).is_dir():
+                root_dir = '.'
+            timestamp = datetime.datetime.now(tz=timezone.utc).isoformat().split('.')[0].replace(':', '.')
+            root_dir = Path(root_dir) / ('amisc_' + timestamp)
+            os.mkdir(root_dir)
+            copy_flag = True
+
+        sys_surr.set_root_directory(root_dir, stdout=stdout, logger_name=logger_name)
+
+        if copy_flag:
+            shutil.copyfile(Path(filename), root_dir / 'sys' / Path(filename).name)
+
+        sys_surr.logger.info(f'SystemSurrogate loaded from {Path(filename).resolve()}')
 
         return sys_surr
 
