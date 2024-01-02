@@ -28,7 +28,7 @@ from numpy.linalg.linalg import LinAlgError
 from amisc.rv import BaseRV, UniformRV, NormalRV, ScalarRV
 
 
-LOG_FORMATTER = logging.Formatter("%(asctime)s \u2014 [%(levelname)s] \u2014 %(name)-20s \u2014 %(message)s")
+LOG_FORMATTER = logging.Formatter("%(asctime)s \u2014 [%(levelname)s] \u2014 %(name)-25s \u2014 %(message)s")
 
 
 def load_variables(variables: list[str], file: Path | str) -> list[BaseRV]:
