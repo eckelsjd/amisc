@@ -265,6 +265,44 @@ class ComponentSurrogate(ABC):
 
         return y
 
+    def grad(self, x: np.ndarray | float | list, training: bool = False, index_set: IndexSet = None) -> np.ndarray:
+        """Evaluate the derivative/Jacobian of the MISC approximation at new points `x`.
+
+        :param x: `(..., x_dim)` the evaluation points, must be within input domain for accuracy
+        :param training: if `True`, then only compute with the active index set, otherwise use all candidates as well
+        :param index_set: a list of concatenated $(\\alpha, \\beta)$ to override `self.index_set` if given, else ignore
+        :returns: `(..., y_dim, x_dim)` the Jacobian of the surrogate approximation
+        """
+        index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
+
+        jac = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars)))
+        for alpha, beta in index_set:
+            comb_coeff = misc_coeff[str(alpha)][str(beta)]
+            if np.abs(comb_coeff) > 0:
+                interp = self.surrogates[str(alpha)][str(beta)]
+                jac += comb_coeff * interp.grad(x)
+
+        return jac
+
+    def hessian(self, x: np.ndarray | float | list, training: bool = False, index_set: IndexSet = None) -> np.ndarray:
+        """Evaluate the Hessian of the MISC approximation at new points `x`.
+
+        :param x: `(..., x_dim)` the evaluation points, must be within input domain for accuracy
+        :param training: if `True`, then only compute with the active index set, otherwise use all candidates as well
+        :param index_set: a list of concatenated $(\\alpha, \\beta)$ to override `self.index_set` if given, else ignore
+        :returns: `(..., y_dim, x_dim, x_dim)` the Hessian of the surrogate approximation
+        """
+        index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
+
+        hess = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars), len(self.x_vars)))
+        for alpha, beta in index_set:
+            comb_coeff = misc_coeff[str(alpha)][str(beta)]
+            if np.abs(comb_coeff) > 0:
+                interp = self.surrogates[str(alpha)][str(beta)]
+                hess += comb_coeff * interp.hessian(x)
+
+        return hess
+
     def __call__(self, *args, **kwargs):
         """Here for convenience so you can also do `ret = surrogate(x)`, just like the `BaseInterpolator`."""
         return self.predict(*args, **kwargs)
@@ -576,6 +614,40 @@ class SparseGridSurrogate(ComponentSurrogate):
 
         return y
 
+    # Override
+    def grad(self, x, training=False, index_set=None):
+        """Need to override `super()` to allow passing in interpolation grids `xi` and `yi`."""
+        index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
+
+        jac = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars)))
+        for alpha, beta in index_set:
+            comb_coeff = misc_coeff[str(alpha)][str(beta)]
+            if np.abs(comb_coeff) > 0:
+                # Gather the xi/yi interpolation points/qoi_ind for this sub tensor-product grid
+                interp = self.surrogates[str(alpha)][str(beta)]
+                xi, yi = self.get_tensor_grid(alpha, beta)
+
+                jac += comb_coeff * interp.grad(x, xi=xi, yi=yi)
+
+        return jac
+
+    # Override
+    def hessian(self, x, training=False, index_set=None):
+        """Need to override `super()` to allow passing in interpolation grids `xi` and `yi`."""
+        index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
+
+        hess = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars), len(self.x_vars)))
+        for alpha, beta in index_set:
+            comb_coeff = misc_coeff[str(alpha)][str(beta)]
+            if np.abs(comb_coeff) > 0:
+                # Gather the xi/yi interpolation points/qoi_ind for this sub tensor-product grid
+                interp = self.surrogates[str(alpha)][str(beta)]
+                xi, yi = self.get_tensor_grid(alpha, beta)
+
+                hess += comb_coeff * interp.hessian(x, xi=xi, yi=yi)
+
+        return hess
+
     def get_tensor_grid(self, alpha: tuple, beta: tuple, update_nan: bool = True) -> tuple[np.ndarray, np.ndarray]:
         """Construct the `xi/yi` sub tensor-product grids for a given $(\\alpha, \\beta)$ multi-index.
 
@@ -825,6 +897,27 @@ class AnalyticalSurrogate(ComponentSurrogate):
                                 f" you do so to avoid conflicts. Returning the value directly instead...")
 
         return ret['y'] if isinstance(ret, dict) else ret
+
+    # Override
+    def grad(self, x, training=False, index_set=None):
+        """Use auto-diff to compute derivative of an analytical model. Model must be implemented with `numpy`.
+
+        !!! Warning "Not implemented yet"
+            Hypothetically, auto-diff libraries like `jax` could be used to write a generic gradient function here for
+            analytical models implemented directly in Python/numpy. But there are a lot of quirks that should be worked
+            out first.
+        """
+        raise NotImplementedError('Need to implement a generic auto-diff function here, like using jax for example.')
+
+    def hessian(self, x, training=False, index_set=None):
+        """Use auto-diff to compute derivative of an analytical model. Model must be implemented with `numpy`.
+
+        !!! Warning "Not implemented yet"
+            Hypothetically, auto-diff libraries like `jax` could be used to write a generic Hessian function here for
+            analytical models implemented directly in Python/numpy. But there are a lot of quirks that should be worked
+            out first.
+        """
+        raise NotImplementedError('Need to implement a generic auto-diff function here, like using jax for example.')
 
     # Override
     def activate_index(self, *args):

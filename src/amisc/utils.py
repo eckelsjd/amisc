@@ -7,6 +7,7 @@ Includes
 - `load_variables`: convenience function for loading RVs from a .json config file
 - `get_logger`: logging utility with nice formatting
 - `ax_default`: plotting utility with nice formatting
+- `approx_jac`: finite difference approximation of the Jacobian
 - `approx_hess`: finite difference approximation of the Hessian
 - `batch_normal_sample`: helper function to sample from arbitrarily-sized Gaussian distribution(s)
 - `ndscatter`: plotting utility for n-dimensional data
@@ -94,21 +95,75 @@ def get_logger(name: str, stdout=True, log_file: str | Path = None) -> logging.L
     return logger
 
 
-def approx_hess(func: callable, theta: np.ndarray, pert=0.01) -> np.ndarray:
-    """Approximate Hessian of `func` at a specified `theta` location.
+def approx_jac(func: callable, theta: np.ndarray, pert=0.01) -> np.ndarray:
+    """Approximate Jacobian of `func` at a specified `theta` location using finite difference approximation.
 
-    :param func: expects to be called as `func(theta) -> (..., y_dim)`, where `y_dim=1` (scalar funcs only)
+    :param func: expects to be called as `func(theta) -> (..., y_dim)`
     :param theta: `(..., theta_dim)`, points to linearize model about
-    :param pert: perturbation for approximate partial derivatives
-    :returns H: `(..., theta_dim, theta_dim)`, the approximate Hessian `(theta_dim, theta_dim)` at all locations (...)
+    :param pert: perturbation pct for approximate partial derivatives
+    :returns J: `(..., y_dim, theta_dim)`, the approximate Jacobian `(y_dim, theta_dim)` at all locations `(...)`
     """
     theta = np.atleast_1d(theta)
     shape = theta.shape[:-1]                # (*)
     theta_dim = theta.shape[-1]             # Number of parameters
-    dtheta = pert * theta
+    dtheta = pert * np.abs(theta)
 
-    # Return the Hessians (..., theta_dim, theta_dim)
-    H = np.empty(shape + (theta_dim, theta_dim))
+    # Make sure dtheta is not 0 anywhere
+    for i in range(theta_dim):
+        zero_idx = np.isclose(dtheta[..., i], 0)
+        if np.any(zero_idx):
+            subs_dtheta = pert * np.abs(np.mean(theta[..., i]))
+            if np.isclose(subs_dtheta, 0):
+                subs_dtheta = pert
+            dtheta[zero_idx, i] = subs_dtheta
+
+    # Return the Jacobians (..., y_dim, theta_dim)
+    J, y_dim = None, None
+
+    for i in range(theta_dim):
+        theta_n1 = np.copy(theta)
+        theta_p1 = np.copy(theta)
+
+        # Perturbations to theta
+        theta_n1[..., i] -= dtheta[..., i]
+        theta_p1[..., i] += dtheta[..., i]
+        f_n1 = func(theta_n1)
+        f_p1 = func(theta_p1)
+
+        if J is None:
+            y_dim = f_p1.shape[-1]
+            J = np.empty(shape + (y_dim, theta_dim))
+
+        J[..., i] = (f_p1 - f_n1) / np.expand_dims(2 * dtheta[..., i], axis=-1)
+
+    return J
+
+
+def approx_hess(func: callable, theta: np.ndarray, pert=0.01) -> np.ndarray:
+    """Approximate Hessian of `func` at a specified `theta` location using finite difference approximation.
+
+    :param func: expects to be called as `func(theta) -> (..., y_dim)`
+    :param theta: `(..., theta_dim)`, points to linearize model about
+    :param pert: perturbation pct for approximate partial derivatives
+    :returns H: `(..., y_dim, theta_dim, theta_dim)`, the approximate Hessian `(theta_dim, theta_dim)` at all locations
+                `(...,)` for vector-valued function of dimension `y_dim`
+    """
+    theta = np.atleast_1d(theta)
+    shape = theta.shape[:-1]                # (*)
+    theta_dim = theta.shape[-1]             # Number of parameters
+    dtheta = pert * np.abs(theta)
+
+    # Make sure dtheta is not 0 anywhere
+    for i in range(theta_dim):
+        zero_idx = np.isclose(dtheta[..., i], 0)
+        if np.any(zero_idx):
+            subs_dtheta = pert * np.abs(np.mean(theta[..., i]))
+            if np.isclose(subs_dtheta, 0):
+                subs_dtheta = pert
+            dtheta[zero_idx, i] = subs_dtheta
+
+    # Return the Hessians (..., y_dim, theta_dim, theta_dim)
+    y_dim, H = None, None
 
     for i in range(theta_dim):
         for j in range(i, theta_dim):
@@ -135,12 +190,14 @@ def approx_hess(func: callable, theta: np.ndarray, pert=0.01) -> np.ndarray:
             theta_p1_n1[..., j] -= dtheta[..., j]
             f_p1_n1 = func(theta_p1_n1)
 
+            if H is None:
+                y_dim = f_p1_n1.shape[-1]
+                H = np.empty(shape + (y_dim, theta_dim, theta_dim))
+
             res = (f_n1_n1 + f_p1_p1 - f_n1_p1 - f_p1_n1) / np.expand_dims(4 * dtheta[..., i] * dtheta[..., j],
                                                                            axis=-1)
-
-            # Hessian only computed for scalar functions, y_dim=1 on last axis
-            H[..., i, j] = np.squeeze(res, axis=-1)
-            H[..., j, i] = np.squeeze(res, axis=-1)
+            H[..., i, j] = res
+            H[..., j, i] = res
 
     return H
 
