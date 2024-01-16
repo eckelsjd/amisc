@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 
 from amisc.interpolator import LagrangeInterpolator
 from amisc.rv import UniformRV
-from amisc.utils import ax_default
+from amisc.utils import ax_default, approx_jac, approx_hess
 from amisc.examples.models import tanh_func, nonlinear_wave
 
 
@@ -111,3 +111,56 @@ def test_tensor_product_2d(plots=False):
         fig.set_size_inches(15, 11)
         fig.tight_layout()
         plt.show()
+
+
+def test_grad():
+    f1 = lambda theta: 2 * theta[..., 0:1] ** 2 + 3 * theta[..., 0:1] * theta[..., 1:2] ** 3 + np.cos(theta[..., 2:3])
+    f2 = lambda theta: 4 * theta[..., 1:2] ** 2 + 2 * theta[..., 0:1] ** 3 * theta[..., 1:2] + np.sin(theta[..., 2:3]) * theta[..., 0:1]
+    fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
+
+    x1, x2, x3 = UniformRV(-2, 1), UniformRV(-1, 2), UniformRV(-np.pi, np.pi)
+    interp = LagrangeInterpolator((3, 2, 4), [x1, x2, x3], model=lambda x: dict(y=fun(x)))
+    interp.set_yi()
+
+    N = (10, 11, 1)
+    xtest = np.concatenate((x1.sample(N), x2.sample(N), x3.sample(N)), axis=-1)
+    jac_truth = approx_jac(fun, xtest)
+    jac_interp = interp.grad(xtest)
+    assert np.allclose(jac_truth, jac_interp, rtol=1e-2, atol=1e-2)
+
+    # Make sure interp gradient works directly at interpolation points as well
+    xtest = np.concatenate((x1.sample((10, 1)), x2.sample((10, 1)), x3.sample((10, 1))), axis=-1)
+    xtest = np.concatenate((xtest, interp.xi), axis=0)
+    idx = np.arange(0, xtest.shape[0])
+    np.random.shuffle(idx)
+    xtest = xtest[idx, :]
+    jac_truth = approx_jac(fun, xtest)
+    jac_interp = interp.grad(xtest)
+    assert np.allclose(jac_truth, jac_interp, rtol=1e-2, atol=1e-2)
+
+
+def test_hessian():
+    f1 = lambda theta: 2 * theta[..., 0:1] ** 2 + 3 * theta[..., 0:1] * theta[..., 1:2] ** 3 + np.cos(theta[..., 2:3])
+    f2 = lambda theta: theta[..., 1:2] ** 2 + theta[..., 0:1] ** 3 * theta[..., 1:2] + np.sin(
+        theta[..., 2:3]) * theta[..., 0:1]
+    fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
+
+    x1, x2, x3 = UniformRV(-2, 1), UniformRV(-1, 2), UniformRV(-np.pi, np.pi)
+    interp = LagrangeInterpolator((3, 4, 4), [x1, x2, x3], model=lambda x: dict(y=fun(x)))
+    interp.set_yi()
+
+    N = (10, 11, 1)
+    xtest = np.concatenate((x1.sample(N), x2.sample(N), x3.sample(N)), axis=-1)
+    hess_truth = approx_hess(fun, xtest)
+    hess_interp = interp.hessian(xtest)
+    assert np.allclose(hess_truth, hess_interp, rtol=1e-1, atol=1e-1)
+
+    # Make sure interp gradient works directly at interpolation points as well
+    xtest = np.concatenate((x1.sample((10, 1)), x2.sample((10, 1)), x3.sample((10, 1))), axis=-1)
+    xtest = np.concatenate((xtest, interp.xi), axis=0)
+    idx = np.arange(0, xtest.shape[0])
+    np.random.shuffle(idx)
+    xtest = xtest[idx, :]
+    hess_truth = approx_hess(fun, xtest)
+    hess_interp = interp.hessian(xtest)
+    assert np.allclose(hess_truth, hess_interp, rtol=1e-1, atol=3e-1)

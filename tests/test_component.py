@@ -1,9 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import itertools
 
 from amisc.component import SparseGridSurrogate
 from amisc.rv import UniformRV
-from amisc.utils import ax_default
+from amisc.utils import ax_default, approx_jac, approx_hess
 
 
 def test_sparse_grid(plots=False):
@@ -56,5 +57,48 @@ def test_sparse_grid(plots=False):
         ax_default(ax, r'$x$', r'$f(x)$', legend=True)
         plt.show()
 
+
+def test_comp_grad():
+    f1 = lambda theta: 2 * theta[..., 0:1] ** 2 * theta[..., 1:2] + np.cos(theta[..., 2:3])
+    f2 = lambda theta: np.exp(theta[..., 1:2]) * theta[..., 0:1] + np.sin(theta[..., 2:3]) * theta[..., 1:2]
+    fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
+
+    x1, x2, x3 = UniformRV(0, 2), UniformRV(-1, 1), UniformRV(-np.pi, np.pi)
+    max_beta = (4, 4, 5)
+    Ik = []
+    indices = [np.arange(beta) for beta in max_beta]
+    for i, j in enumerate(itertools.product(*indices)):
+        Ik.append(((), j))
+    del Ik[-1]
+
+    surr = SparseGridSurrogate([x1, x2, x3], lambda x: dict(y=fun(x)), multi_index=Ik)
+
+    N = (5, 6, 1)
+    xtest = np.concatenate((x1.sample(N), x2.sample(N), x3.sample(N)), axis=-1)
+    jac_truth = approx_jac(fun, xtest)
+    jac_surr = surr.grad(xtest)
+    assert np.allclose(jac_truth, jac_surr, rtol=1e-2, atol=1e-2)
+
+
+def test_comp_hessian():
+    f1 = lambda theta: 2 * theta[..., 0:1] ** 2 * theta[..., 1:2] + np.cos(theta[..., 2:3])
+    f2 = lambda theta: np.exp(theta[..., 1:2]) * theta[..., 0:1] + np.sin(theta[..., 2:3]) * theta[..., 1:2]
+    fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
+
+    x1, x2, x3 = UniformRV(0, 2), UniformRV(-1, 1), UniformRV(-np.pi, np.pi)
+    max_beta = (4, 4, 5)
+    Ik = []
+    indices = [np.arange(beta) for beta in max_beta]
+    for i, j in enumerate(itertools.product(*indices)):
+        Ik.append(((), j))
+    del Ik[-1]
+
+    surr = SparseGridSurrogate([x1, x2, x3], lambda x: dict(y=fun(x)), multi_index=Ik)
+
+    N = (5, 6, 1)
+    xtest = np.concatenate((x1.sample(N), x2.sample(N), x3.sample(N)), axis=-1)
+    hess_truth = approx_hess(fun, xtest)
+    hess_surr = surr.hessian(xtest)
+    assert np.allclose(hess_truth, hess_surr, rtol=1e-1, atol=1e-1)
 
 # TODO: add tests for testing parallel execution, writing output files, and refining surrogate

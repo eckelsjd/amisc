@@ -104,6 +104,21 @@ class BaseInterpolator(ABC):
         """
         return self._model_kwargs.get('output_dir') is not None
 
+    def _fmt_input(self, x: float | list | np.ndarray) -> tuple[bool, np.ndarray]:
+        """Helper function to make sure input `x` is an ndarray of shape `(..., xdim)`.
+
+        :param x: if 1d-like as (n,), then converted to 2d as (1, n) if n==xdim or (n, 1) if xdim==1
+        :returns: `x` as at least a 2d array `(..., xdim)`, and whether `x` was originally 1d-like
+        """
+        x = np.atleast_1d(x)
+        shape_1d = len(x.shape) == 1
+        if shape_1d:
+            if x.shape[0] != self.xdim() and self.xdim() > 1:
+                raise ValueError(f'Input x shape {x.shape} is incompatible with xdim of {self.xdim()}')
+            x = np.expand_dims(x, axis=0 if x.shape[0] == self.xdim() else 1)
+
+        return shape_1d, x
+
     def set_yi(self, yi: np.ndarray = None, model: callable = None,
                x_new: tuple[list[int | tuple], np.ndarray] = ()) -> dict[str: np.ndarray] | None:
         """Set the training data; if `yi=None`, then compute from the model.
@@ -207,6 +222,26 @@ class BaseInterpolator(ABC):
         :returns y: `(..., y_dim)`, the interpolated function values
         """
         pass
+
+    @abstractmethod
+    def grad(self, x: np.ndarray | float | list, xi: np.ndarray = None, yi: np.ndarray = None) -> np.ndarray:
+        """Evaluate the gradient/Jacobian at points `x` using the interpolator.
+
+        :param x: `(..., xdim)`, the evaluation points, must be within domain of `self.xi` for accuracy
+        :param xi: `(Ni, xdim)` optional, interpolation grid points to use (e.g. if `self.reduced=True`)
+        :param yi: `(Ni, ydim)` optional, function values at xi to use (e.g. if `self.reduced=True`)
+        :returns jac: `(..., ydim, xdim)`, the Jacobian at points `x`
+        """
+
+    @abstractmethod
+    def hessian(self, x: np.ndarray | float | list, xi: np.ndarray = None, yi: np.ndarray = None) -> np.ndarray:
+        """Evaluate the Hessian at points `x` using the interpolator.
+
+        :param x: `(..., xdim)`, the evaluation points, must be within domain of `self.xi` for accuracy
+        :param xi: `(Ni, xdim)` optional, interpolation grid points to use (e.g. if `self.reduced=True`)
+        :param yi: `(Ni, ydim)` optional, function values at xi to use (e.g. if `self.reduced=True`)
+        :returns hess: `(..., ydim, xdim, xdim)`, the Hessian at points `x`
+        """
 
 
 class LagrangeInterpolator(BaseInterpolator):
@@ -385,11 +420,69 @@ class LagrangeInterpolator(BaseInterpolator):
         :param yi: `(Ni, ydim)` optional, function values at xi to use (e.g. if `self.reduced=True`)
         :returns y: `(..., ydim)`, the interpolated function values
         """
-        x = np.atleast_1d(x)
+        shape_1d, x = self._fmt_input(x)
         if yi is None:
             yi = self.yi.copy()
         if xi is None:
             xi = self.xi.copy()
+        xdim = xi.shape[-1]
+        ydim = yi.shape[-1]
+        dims = list(np.arange(xdim))
+
+        nan_idx = np.any(np.isnan(yi), axis=-1)
+        if np.any(nan_idx):
+            # Use a simple linear regression fit to impute missing values (may have resulted from bad model outputs)
+            imputer = Pipeline([('scaler', MaxAbsScaler()), ('model', Ridge(alpha=1))])
+            imputer.fit(xi[~nan_idx, :], yi[~nan_idx, :])
+            yi[nan_idx, :] = imputer.predict(xi[nan_idx, :])
+
+        # Create ragged edge matrix of interpolation pts and weights
+        grid_sizes = self.get_grid_sizes(self.beta)     # For example:
+        x_j = np.empty((xdim, max(grid_sizes)))         # A= [#####--
+        w_j = np.empty((xdim, max(grid_sizes)))               #######
+        x_j[:] = np.nan                                       ###----]
+        w_j[:] = np.nan
+        for n in range(xdim):
+            x_j[n, :grid_sizes[n]] = self.x_grids[n]
+            w_j[n, :grid_sizes[n]] = self.weights[n]
+        diff = x[..., np.newaxis] - x_j
+        div_zero_idx = np.isclose(diff, 0, rtol=1e-4, atol=1e-8)
+        diff[div_zero_idx] = 1
+        quotient = w_j / diff                   # (..., xdim, Nx)
+        qsum = np.nansum(quotient, axis=-1)     # (..., xdim)
+
+        # Loop over multi-indices and compute tensor-product lagrange polynomials
+        y = np.zeros(x.shape[:-1] + (ydim,))    # (..., ydim)
+        indices = [np.arange(grid_sizes[n]) for n in range(xdim)]
+        for i, j in enumerate(itertools.product(*indices)):
+            L_j = quotient[..., dims, j] / qsum  # (..., xdim)
+            other_pts = np.copy(div_zero_idx)
+            other_pts[div_zero_idx[..., dims, j]] = False
+
+            # Set L_j(x==x_j)=1 for the current j and set L_j(x==x_j)=0 for x_j = x_i, i != j
+            L_j[div_zero_idx[..., dims, j]] = 1
+            L_j[np.any(other_pts, axis=-1)] = 0
+
+            # Add multivariate basis polynomial contribution to interpolation output
+            L_j = np.prod(L_j, axis=-1, keepdims=True)      # (..., 1)
+            y += L_j * yi[i, :]
+
+        return np.atleast_1d(np.squeeze(y)) if shape_1d else y
+
+    def grad(self, x: np.ndarray | float | list, xi: np.ndarray = None, yi: np.ndarray = None) -> np.ndarray:
+        """Evaluate the gradient/Jacobian at points `x` using the interpolator.
+
+        :param x: `(..., xdim)`, the evaluation points, must be within domain of `self.xi` for accuracy
+        :param xi: `(Ni, xdim)` optional, interpolation grid points to use (e.g. if `self.reduced=True`)
+        :param yi: `(Ni, ydim)` optional, function values at xi to use (e.g. if `self.reduced=True`)
+        :returns jac: `(..., ydim, xdim)`, the Jacobian at points `x`
+        """
+        shape_1d, x = self._fmt_input(x)
+        if yi is None:
+            yi = self.yi.copy()
+        if xi is None:
+            xi = self.xi.copy()
+        xdim = xi.shape[-1]
         ydim = yi.shape[-1]
         nan_idx = np.any(np.isnan(yi), axis=-1)
         if np.any(nan_idx):
@@ -398,35 +491,178 @@ class LagrangeInterpolator(BaseInterpolator):
             imputer.fit(xi[~nan_idx, :], yi[~nan_idx, :])
             yi[nan_idx, :] = imputer.predict(xi[nan_idx, :])
 
-        # Loop over multi-indices and compute tensor-product lagrange polynomials
-        grid_sizes = self.get_grid_sizes(self.beta)
-        y = np.zeros(x.shape[:-1] + (ydim,))    # (..., ydim)
+        # Create ragged edge matrix of interpolation pts and weights
+        grid_sizes = self.get_grid_sizes(self.beta)     # For example:
+        x_j = np.empty((xdim, max(grid_sizes)))         # A= [#####--
+        w_j = np.empty((xdim, max(grid_sizes)))               #######
+        x_j[:] = np.nan                                       ###----]
+        w_j[:] = np.nan
+        for n in range(xdim):
+            x_j[n, :grid_sizes[n]] = self.x_grids[n]
+            w_j[n, :grid_sizes[n]] = self.weights[n]
+
+        # Compute values ahead of time that will be needed for the gradient
+        diff = x[..., np.newaxis] - x_j
+        div_zero_idx = np.isclose(diff, 0, rtol=1e-4, atol=1e-8)
+        diff[div_zero_idx] = 1
+        quotient = w_j / diff                           # (..., xdim, Nx)
+        qsum = np.nansum(quotient, axis=-1)             # (..., xdim)
+        sqsum = np.nansum(w_j / diff ** 2, axis=-1)     # (..., xdim)
+
+        # Loop over multi-indices and compute derivative of tensor-product lagrange polynomials
+        jac = np.zeros(x.shape[:-1] + (ydim, xdim))  # (..., ydim, xdim)
         indices = [np.arange(grid_sizes[n]) for n in range(self.xdim())]
-        for i, j in enumerate(itertools.product(*indices)):
-            L_j = np.empty(x.shape)             # (..., xdim)
-
-            # Compute univariate Lagrange polynomials in each dimension
-            for n in range(self.xdim()):
-                x_n = x[..., n, np.newaxis]     # (..., 1)
-                x_j = self.x_grids[n]           # (Nx,)
-                w_j = self.weights[n]           # (Nx,)
-
-                # Compute the jth Lagrange basis polynomial L_j(x_n) for this x dimension (in barycentric form)
-                c = x_n - x_j
-                div_zero_idx = np.abs(c) <= 1e-4 * np.abs(x_j) + 1e-8   # Track where x is at an interpolation pnt x_j
-                c[div_zero_idx] = 1                             # Temporarily set to 1 to avoid divide by zero error
-                c = w_j / c
-                L_j[..., n] = c[..., j[n]] / np.sum(c, axis=-1)  # (...) same size as original x
+        for k in range(xdim):
+            dims = [idx for idx in np.arange(xdim) if idx != k]
+            for i, j in enumerate(itertools.product(*indices)):
+                j_dims = [j[idx] for idx in dims]
+                L_j = quotient[..., dims, j_dims] / qsum[..., dims]  # (..., xdim-1)
+                other_pts = np.copy(div_zero_idx)
+                other_pts[div_zero_idx[..., list(np.arange(xdim)), j]] = False
 
                 # Set L_j(x==x_j)=1 for the current j and set L_j(x==x_j)=0 for x_j = x_i, i != j
-                L_j[div_zero_idx[..., j[n]], n] = 1
-                L_j[np.any(div_zero_idx[..., [idx for idx in range(grid_sizes[n]) if idx != j[n]]], axis=-1), n] = 0
+                L_j[div_zero_idx[..., dims, j_dims]] = 1
+                L_j[np.any(other_pts[..., dims, :], axis=-1)] = 0
 
-            # Add multivariate basis polynomial contribution to interpolation output
-            L_j = np.prod(L_j, axis=-1, keepdims=True)      # (..., 1)
-            y += L_j * yi[i, :]
+                # Partial derivative of L_j with respect to x_k
+                dLJ_dx = ((w_j[k, j[k]] / (qsum[..., k] * diff[..., k, j[k]])) *
+                          (sqsum[..., k] / qsum[..., k] - 1 / diff[..., k, j[k]]))
 
-        return y
+                # Set derivatives when x is at the interpolation points (i.e. x==x_j)
+                p_idx = [idx for idx in np.arange(grid_sizes[k]) if idx != j[k]]
+                w_j_large = np.broadcast_to(w_j[k, :], x.shape[:-1] + w_j.shape[-1:]).copy()
+                curr_j_idx = div_zero_idx[..., k, j[k]]
+                other_j_idx = np.any(other_pts[..., k, :], axis=-1)
+                dLJ_dx[curr_j_idx] = -np.nansum((w_j[k, p_idx] / w_j[k, j[k]]) /
+                                                (x[curr_j_idx, k, np.newaxis] - x_j[k, p_idx]), axis=-1)
+                dLJ_dx[other_j_idx] = ((w_j[k, j[k]] / w_j_large[other_pts[..., k, :]]) /
+                                       (x[other_j_idx, k] - x_j[k, j[k]]))
+
+                dLJ_dx = np.expand_dims(dLJ_dx, axis=-1) * np.prod(L_j, axis=-1, keepdims=True)  # (..., 1)
+
+                # Add contribution to the Jacobian
+                jac[..., k] += dLJ_dx * yi[i, :]
+
+        return np.atleast_1d(np.squeeze(jac)) if shape_1d else jac
+
+    def hessian(self, x: np.ndarray | float | list, xi: np.ndarray = None, yi: np.ndarray = None) -> np.ndarray:
+        """Evaluate the Hessian at points `x` using the interpolator.
+
+        :param x: `(..., xdim)`, the evaluation points, must be within domain of `self.xi` for accuracy
+        :param xi: `(Ni, xdim)` optional, interpolation grid points to use (e.g. if `self.reduced=True`)
+        :param yi: `(Ni, ydim)` optional, function values at xi to use (e.g. if `self.reduced=True`)
+        :returns hess: `(..., ydim, xdim, xdim)`, the vector Hessian at points `x`
+        """
+        shape_1d, x = self._fmt_input(x)
+        if yi is None:
+            yi = self.yi.copy()
+        if xi is None:
+            xi = self.xi.copy()
+        xdim = xi.shape[-1]
+        ydim = yi.shape[-1]
+        nan_idx = np.any(np.isnan(yi), axis=-1)
+        if np.any(nan_idx):
+            # Use a simple linear regression fit to impute missing values (may have resulted from bad model outputs)
+            imputer = Pipeline([('scaler', MaxAbsScaler()), ('model', Ridge(alpha=1))])
+            imputer.fit(xi[~nan_idx, :], yi[~nan_idx, :])
+            yi[nan_idx, :] = imputer.predict(xi[nan_idx, :])
+
+        # Create ragged edge matrix of interpolation pts and weights
+        grid_sizes = self.get_grid_sizes(self.beta)     # For example:
+        x_j = np.empty((xdim, max(grid_sizes)))         # A= [#####--
+        w_j = np.empty((xdim, max(grid_sizes)))               #######
+        x_j[:] = np.nan                                       ###----]
+        w_j[:] = np.nan
+        for n in range(xdim):
+            x_j[n, :grid_sizes[n]] = self.x_grids[n]
+            w_j[n, :grid_sizes[n]] = self.weights[n]
+
+        # Compute values ahead of time that will be needed for the gradient
+        diff = x[..., np.newaxis] - x_j
+        div_zero_idx = np.isclose(diff, 0, rtol=1e-4, atol=1e-8)
+        diff[div_zero_idx] = 1
+        quotient = w_j / diff                               # (..., xdim, Nx)
+        qsum = np.nansum(quotient, axis=-1)                 # (..., xdim)
+        qsum_p = -np.nansum(w_j / diff ** 2, axis=-1)       # (..., xdim)
+        qsum_pp = 2 * np.nansum(w_j / diff ** 3, axis=-1)   # (..., xdim)
+
+        # Loop over multi-indices and compute 2nd derivative of tensor-product lagrange polynomials
+        hess = np.zeros(x.shape[:-1] + (ydim, xdim, xdim))  # (..., ydim, xdim, xdim)
+        indices = [np.arange(grid_sizes[n]) for n in range(self.xdim())]
+        for m in range(xdim):
+            for n in range(m, xdim):
+                dims = [idx for idx in np.arange(xdim) if idx not in [m, n]]
+                for i, j in enumerate(itertools.product(*indices)):
+                    j_dims = [j[idx] for idx in dims]
+                    L_j = quotient[..., dims, j_dims] / qsum[..., dims]  # (..., xdim-2)
+                    other_pts = np.copy(div_zero_idx)
+                    other_pts[div_zero_idx[..., list(np.arange(xdim)), j]] = False
+
+                    # Set L_j(x==x_j)=1 for the current j and set L_j(x==x_j)=0 for x_j = x_i, i != j
+                    L_j[div_zero_idx[..., dims, j_dims]] = 1
+                    L_j[np.any(other_pts[..., dims, :], axis=-1)] = 0
+
+                    # Cross-terms in Hessian
+                    if m != n:
+                        # Partial derivative of L_j with respect to x_m and x_n
+                        d2LJ_dx2 = np.ones(x.shape[:-1])
+                        for k in [m, n]:
+                            dLJ_dx = ((w_j[k, j[k]] / (qsum[..., k] * diff[..., k, j[k]])) *
+                                      (-qsum_p[..., k] / qsum[..., k] - 1 / diff[..., k, j[k]]))
+
+                            # Set derivatives when x is at the interpolation points (i.e. x==x_j)
+                            p_idx = [idx for idx in np.arange(grid_sizes[k]) if idx != j[k]]
+                            w_j_large = np.broadcast_to(w_j[k, :], x.shape[:-1] + w_j.shape[-1:]).copy()
+                            curr_j_idx = div_zero_idx[..., k, j[k]]
+                            other_j_idx = np.any(other_pts[..., k, :], axis=-1)
+                            dLJ_dx[curr_j_idx] = -np.nansum((w_j[k, p_idx] / w_j[k, j[k]]) /
+                                                            (x[curr_j_idx, k, np.newaxis] - x_j[k, p_idx]), axis=-1)
+                            dLJ_dx[other_j_idx] = ((w_j[k, j[k]] / w_j_large[other_pts[..., k, :]]) /
+                                                   (x[other_j_idx, k] - x_j[k, j[k]]))
+
+                            d2LJ_dx2 *= dLJ_dx
+
+                        d2LJ_dx2 = np.expand_dims(d2LJ_dx2, axis=-1) * np.prod(L_j, axis=-1, keepdims=True)  # (..., 1)
+                        hess[..., m, n] += d2LJ_dx2 * yi[i, :]
+                        hess[..., n, m] += d2LJ_dx2 * yi[i, :]
+
+                    # Diagonal terms in Hessian:
+                    else:
+                        front_term = w_j[m, j[m]] / (qsum[..., m] * diff[..., m, j[m]])
+                        first_term = (-qsum_pp[..., m] / qsum[..., m]) + 2*(qsum_p[..., m] / qsum[..., m]) ** 2
+                        second_term = 2*(qsum_p[..., m] / (qsum[..., m] * diff[..., m, j[m]])) + 2 / diff[..., m, j[m]] ** 2
+                        d2LJ_dx2 = front_term * (first_term + second_term)
+
+                        # Set derivatives when x is at the interpolation points (i.e. x==x_j)
+                        curr_j_idx = div_zero_idx[..., m, j[m]]
+                        other_j_idx = np.any(other_pts[..., m, :], axis=-1)
+                        if np.any(curr_j_idx) or np.any(other_j_idx):
+                            p_idx = [idx for idx in np.arange(grid_sizes[m]) if idx != j[m]]
+                            w_j_large = np.broadcast_to(w_j[m, :], x.shape[:-1] + w_j.shape[-1:]).copy()
+                            x_j_large = np.broadcast_to(x_j[m, :], x.shape[:-1] + x_j.shape[-1:]).copy()
+
+                            # if these points are at the current j interpolation point
+                            d2LJ_dx2[curr_j_idx] = (2 * np.nansum((w_j[m, p_idx] / w_j[m, j[m]]) /
+                                                                 (x[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]), axis=-1) ** 2 +
+                                                    2 * np.nansum((w_j[m, p_idx] / w_j[m, j[m]]) /
+                                                                  (x[curr_j_idx, m, np.newaxis] - x_j[m, p_idx])**2, axis=-1))
+
+                            # if these points are at any other interpolation point
+                            other_pts_inv = other_pts.copy()
+                            other_pts_inv[other_j_idx, m, :grid_sizes[m]] = np.invert(other_pts[other_j_idx, m, :grid_sizes[m]])
+                            curr_x_j = x_j_large[other_pts[..., m, :]].reshape((-1, 1))
+                            other_x_j = x_j_large[other_pts_inv[..., m, :]].reshape((-1, len(p_idx)))
+                            curr_w_j = w_j_large[other_pts[..., m, :]].reshape((-1, 1))
+                            other_w_j = w_j_large[other_pts_inv[..., m, :]].reshape((-1, len(p_idx)))
+                            curr_div = w_j[m, j[m]] / np.squeeze(curr_w_j, axis=-1)
+                            curr_diff = np.squeeze(curr_x_j, axis=-1) - x_j[m, j[m]]
+                            d2LJ_dx2[other_j_idx] = ((-2*curr_div / curr_diff) * (np.nansum(
+                                (other_w_j / curr_w_j) / (curr_x_j - other_x_j), axis=-1) + 1 / curr_diff))
+
+                        d2LJ_dx2 = np.expand_dims(d2LJ_dx2, axis=-1) * np.prod(L_j, axis=-1, keepdims=True)  # (..., 1)
+                        hess[..., m, n] += d2LJ_dx2 * yi[i, :]
+
+        return np.atleast_1d(np.squeeze(hess)) if shape_1d else hess
 
     @staticmethod
     def get_grid_sizes(beta: tuple, k: int = 2) -> list[int]:
