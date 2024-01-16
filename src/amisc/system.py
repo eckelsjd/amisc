@@ -792,6 +792,8 @@ class SystemSurrogate:
         valid_idx = ~np.isnan(x[..., 0])  # Keep track of valid samples (set to False if FPI fails)
         t1 = 0
         output_dir = None
+        qoi_ind = self._get_qoi_ind(qoi_ind)
+        is_computed = np.full(ydim, False)
 
         # Interpret which model fidelities to use for each component (if specified)
         if use_model is not None:
@@ -810,6 +812,9 @@ class SystemSurrogate:
 
         # Compute component models in topological order
         for supernode in nx.topological_sort(dag):
+            if np.all(is_computed[qoi_ind]):
+                break  # Exit early if all qois of interest are computed
+
             scc = [n for n in dag.nodes[supernode]['members']]
 
             # Compute single component feedforward output (no FPI needed)
@@ -835,6 +840,7 @@ class SystemSurrogate:
                                                     model_dir=output_dir, training=training, index_set=indices)
                 for local_i, global_i in enumerate(node_obj['global_out']):
                     y[valid_idx, global_i] = comp_output[..., local_i]
+                    is_computed[global_i] = True
                 node_obj['is_computed'] = True
 
                 if verbose:
@@ -936,10 +942,10 @@ class SystemSurrogate:
                     global_idx = self.graph.nodes[node]['global_out']
                     for global_i in global_idx:
                         y[valid_idx, global_i] = x_couple_next[valid_idx, global_i]
+                        is_computed[global_i] = True
                     self.graph.nodes[node]['is_computed'] = True
 
-        # Return all component outputs (..., Nqoi), samples that didn't converge during FPI are left as np.nan
-        qoi_ind = self._get_qoi_ind(qoi_ind)
+        # Return all component outputs (..., Nqoi); samples that didn't converge during FPI are left as np.nan
         return y[..., qoi_ind]
 
     def __call__(self, *args, **kwargs):
@@ -1389,8 +1395,6 @@ class SystemSurrogate:
 
         if copy_flag:
             shutil.copyfile(Path(filename), root_dir / 'sys' / Path(filename).name)
-
-        sys_surr.logger.info(f'SystemSurrogate loaded from {Path(filename).resolve()}')
 
         return sys_surr
 
