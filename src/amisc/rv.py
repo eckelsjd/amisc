@@ -202,6 +202,7 @@ class UniformRV(BaseRV):
         :param nominal: center location for relative uniform rvs
         :returns: the evaluated PDF at `x`
         """
+        x = np.atleast_1d(x)
         bds = self.get_uniform_bounds(nominal)
         den = bds[1] - bds[0]
         den = 1 if np.isclose(den, 0) else den
@@ -331,6 +332,7 @@ class NormalRV(BaseRV):
         return self.id if self.is_custom_id else f'N({self.mu}, {self.std})'
 
     def pdf(self, x):
+        x = np.atleast_1d(x)
         return (1 / (np.sqrt(2 * np.pi) * self.std)) * np.exp(-0.5 * ((x - self.mu) / self.std) ** 2)
 
     def sample(self, shape, nominal=None):

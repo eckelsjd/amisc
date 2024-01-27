@@ -452,7 +452,7 @@ class LagrangeInterpolator(BaseInterpolator):
         qsum = np.nansum(quotient, axis=-1)     # (..., xdim)
 
         # Loop over multi-indices and compute tensor-product lagrange polynomials
-        y = np.zeros(x.shape[:-1] + (ydim,))    # (..., ydim)
+        y = np.zeros(x.shape[:-1] + (ydim,), dtype=x.dtype)    # (..., ydim)
         indices = [np.arange(grid_sizes[n]) for n in range(xdim)]
         for i, j in enumerate(itertools.product(*indices)):
             L_j = quotient[..., dims, j] / qsum  # (..., xdim)
@@ -510,7 +510,7 @@ class LagrangeInterpolator(BaseInterpolator):
         sqsum = np.nansum(w_j / diff ** 2, axis=-1)     # (..., xdim)
 
         # Loop over multi-indices and compute derivative of tensor-product lagrange polynomials
-        jac = np.zeros(x.shape[:-1] + (ydim, xdim))  # (..., ydim, xdim)
+        jac = np.zeros(x.shape[:-1] + (ydim, xdim), dtype=x.dtype)  # (..., ydim, xdim)
         indices = [np.arange(grid_sizes[n]) for n in range(self.xdim())]
         for k in range(xdim):
             dims = [idx for idx in np.arange(xdim) if idx != k]
@@ -587,7 +587,7 @@ class LagrangeInterpolator(BaseInterpolator):
         qsum_pp = 2 * np.nansum(w_j / diff ** 3, axis=-1)   # (..., xdim)
 
         # Loop over multi-indices and compute 2nd derivative of tensor-product lagrange polynomials
-        hess = np.zeros(x.shape[:-1] + (ydim, xdim, xdim))  # (..., ydim, xdim, xdim)
+        hess = np.zeros(x.shape[:-1] + (ydim, xdim, xdim), dtype=x.dtype)  # (..., ydim, xdim, xdim)
         indices = [np.arange(grid_sizes[n]) for n in range(self.xdim())]
         for m in range(xdim):
             for n in range(m, xdim):

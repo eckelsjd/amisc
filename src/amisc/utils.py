@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 import logging
 import sys
+import time
 
 import matplotlib.pyplot as plt
 import matplotlib
@@ -165,6 +166,7 @@ def approx_hess(func: callable, theta: np.ndarray, pert=0.01) -> np.ndarray:
     # Return the Hessians (..., y_dim, theta_dim, theta_dim)
     y_dim, H = None, None
 
+    t1 = time.time()
     for i in range(theta_dim):
         for j in range(i, theta_dim):
             # Allocate space at 4 grid points (n1=-1, p1=+1)
@@ -196,6 +198,7 @@ def approx_hess(func: callable, theta: np.ndarray, pert=0.01) -> np.ndarray:
 
             res = (f_n1_n1 + f_p1_p1 - f_n1_p1 - f_p1_n1) / np.expand_dims(4 * dtheta[..., i] * dtheta[..., j],
                                                                            axis=-1)
+            print(f'Time: {(time.time() - t1) / 60:.2f} min, i: {i}, j: {j}, out of {theta_dim}, res: {res}')
             H[..., i, j] = res
             H[..., j, i] = res
 
@@ -211,12 +214,12 @@ def batch_normal_sample(mean: np.ndarray | float, cov: np.ndarray | float, size:
     :returns samples: `(*size, ..., dim)`, samples from multivariate distributions
     """
     mean = np.atleast_1d(mean)
-    cov = np.atleast_2d(cov)
+    cov = np.atleast_2d(cov).astype(mean.dtype)
 
     if isinstance(size, int):
         size = (size, )
     shape = size + np.broadcast_shapes(mean.shape, cov.shape[:-1])
-    x_normal = np.random.standard_normal((*shape, 1)).astype(np.float32)
+    x_normal = np.random.standard_normal((*shape, 1)).astype(mean.dtype)
     samples = np.squeeze(np.linalg.cholesky(cov) @ x_normal, axis=-1) + mean
     return samples
 
@@ -300,11 +303,13 @@ def ndscatter(samples: np.ndarray, labels: list[str] = None, tick_fmts: list[str
         cb_label = 'Performance metric'
 
     def tick_format_func(value, pos):
-        if value > 1:
+        if np.isclose(value, 0):
             return f'{value:.2f}'
-        if value > 0.01:
+        if abs(value) > 1:
+            return f'{value:.2f}'
+        if abs(value) > 0.01:
             return f'{value:.4f}'
-        if value < 0.01:
+        if abs(value) < 0.01:
             return f'{value:.2E}'
     default_ticks = FuncFormatter(tick_format_func)
     # if tick_fmts is None:
@@ -349,7 +354,7 @@ def ndscatter(samples: np.ndarray, labels: list[str] = None, tick_fmts: list[str
                     ax.plot(x, kernel(x), ls='-', c=c, lw=1.5)
                 else:
                     ax.hist(samples[:, i], edgecolor='black', color=c, density=True, alpha=0.5,
-                            linewidth=1.2, bins='auto')
+                            linewidth=1.2, bins='auto', histtype='step')
             if j < i:                       # 2d marginals (lower triangle)
                 ax.set_xlim([x_min[j], x_max[j]])
                 ax.set_ylim([x_min[i], x_max[i]])
