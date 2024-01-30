@@ -12,6 +12,7 @@ dependencies = [
     "dill>=0.3.7",
     "scipy>=1.11.4",
     "matplotlib>=3.8.2",
+    "uqtils>=0.1.0",
 ]
 requires-python = ">=3.11"
 readme = "docs/README.md"
@@ -66,6 +67,6 @@ dev = [
     "pytest-cov>=4.1.0",
     "mkdocs>=1.5.3",
     "GitPython>=3.1.40",
-    "mkdocs-material>=9.5.0",
+    "mkdocs-material>=9.5.5",
     "mkdocstrings[python]>=0.24.0",
 ]

@@ -251,17 +251,18 @@ class ComponentSurrogate(ABC):
         :param index_set: a list of concatenated $(\\alpha, \\beta)$ to override `self.index_set` if given, else ignore
         :returns y: `(..., y_dim)` the surrogate approximation of the function (or the function itself if `use_model`)
         """
+        x = np.atleast_1d(x)
         if use_model is not None:
             return self._bypass_surrogate(x, use_model, model_dir)
 
         index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
 
-        y = np.zeros(x.shape[:-1] + (self.ydim,))
+        y = np.zeros(x.shape[:-1] + (self.ydim,), dtype=x.dtype)
         for alpha, beta in index_set:
             comb_coeff = misc_coeff[str(alpha)][str(beta)]
             if np.abs(comb_coeff) > 0:
                 func = self.surrogates[str(alpha)][str(beta)]
-                y += comb_coeff * func(x)
+                y += int(comb_coeff) * func(x)
 
         return y
 
@@ -273,14 +274,15 @@ class ComponentSurrogate(ABC):
         :param index_set: a list of concatenated $(\\alpha, \\beta)$ to override `self.index_set` if given, else ignore
         :returns: `(..., y_dim, x_dim)` the Jacobian of the surrogate approximation
         """
+        x = np.atleast_1d(x)
         index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
 
-        jac = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars)))
+        jac = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars)), dtype=x.dtype)
         for alpha, beta in index_set:
             comb_coeff = misc_coeff[str(alpha)][str(beta)]
             if np.abs(comb_coeff) > 0:
                 interp = self.surrogates[str(alpha)][str(beta)]
-                jac += comb_coeff * interp.grad(x)
+                jac += int(comb_coeff) * interp.grad(x)
 
         return jac
 
@@ -292,14 +294,15 @@ class ComponentSurrogate(ABC):
         :param index_set: a list of concatenated $(\\alpha, \\beta)$ to override `self.index_set` if given, else ignore
         :returns: `(..., y_dim, x_dim, x_dim)` the Hessian of the surrogate approximation
         """
+        x = np.atleast_1d(x)
         index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
 
-        hess = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars), len(self.x_vars)))
+        hess = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars), len(self.x_vars)), x.dtype)
         for alpha, beta in index_set:
             comb_coeff = misc_coeff[str(alpha)][str(beta)]
             if np.abs(comb_coeff) > 0:
                 interp = self.surrogates[str(alpha)][str(beta)]
-                hess += comb_coeff * interp.hessian(x)
+                hess += int(comb_coeff) * interp.hessian(x)
 
         return hess
 
@@ -596,12 +599,13 @@ class SparseGridSurrogate(ComponentSurrogate):
     # Override
     def predict(self, x, use_model=None, model_dir=None, training=False, index_set=None):
         """Need to override `super()` to allow passing in interpolation grids `xi` and `yi`."""
+        x = np.atleast_1d(x)
         if use_model is not None:
             return self._bypass_surrogate(x, use_model, model_dir)
 
         index_set, misc_coeff = self._combination(index_set, training)
 
-        y = np.zeros(x.shape[:-1] + (self.ydim,))
+        y = np.zeros(x.shape[:-1] + (self.ydim,), dtype=x.dtype)
         for alpha, beta in index_set:
             comb_coeff = misc_coeff[str(alpha)][str(beta)]
             if np.abs(comb_coeff) > 0:
@@ -610,16 +614,17 @@ class SparseGridSurrogate(ComponentSurrogate):
                 xi, yi = self.get_tensor_grid(alpha, beta)
 
                 # Add this sub tensor-product grid to the MISC approximation
-                y += comb_coeff * interp(x, xi=xi, yi=yi)
+                y += int(comb_coeff) * interp(x, xi=xi, yi=yi)
 
         return y
 
     # Override
     def grad(self, x, training=False, index_set=None):
         """Need to override `super()` to allow passing in interpolation grids `xi` and `yi`."""
+        x = np.atleast_1d(x)
         index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
 
-        jac = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars)))
+        jac = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars)), dtype=x.dtype)
         for alpha, beta in index_set:
             comb_coeff = misc_coeff[str(alpha)][str(beta)]
             if np.abs(comb_coeff) > 0:
@@ -627,16 +632,17 @@ class SparseGridSurrogate(ComponentSurrogate):
                 interp = self.surrogates[str(alpha)][str(beta)]
                 xi, yi = self.get_tensor_grid(alpha, beta)
 
-                jac += comb_coeff * interp.grad(x, xi=xi, yi=yi)
+                jac += int(comb_coeff) * interp.grad(x, xi=xi, yi=yi)
 
         return jac
 
     # Override
     def hessian(self, x, training=False, index_set=None):
         """Need to override `super()` to allow passing in interpolation grids `xi` and `yi`."""
+        ax = np.atleast_1d(x)
         index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
 
-        hess = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars), len(self.x_vars)))
+        hess = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars), len(self.x_vars)), dtype=x.dtype)
         for alpha, beta in index_set:
             comb_coeff = misc_coeff[str(alpha)][str(beta)]
             if np.abs(comb_coeff) > 0:
@@ -644,7 +650,7 @@ class SparseGridSurrogate(ComponentSurrogate):
                 interp = self.surrogates[str(alpha)][str(beta)]
                 xi, yi = self.get_tensor_grid(alpha, beta)
 
-                hess += comb_coeff * interp.hessian(x, xi=xi, yi=yi)
+                hess += int(comb_coeff) * interp.hessian(x, xi=xi, yi=yi)
 
         return hess
 

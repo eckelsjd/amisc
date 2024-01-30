@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 
 from amisc.interpolator import LagrangeInterpolator
 from amisc.rv import UniformRV
-from amisc.utils import ax_default, approx_jac, approx_hess
+from uqtils import ax_default, approx_jac, approx_hess
 from amisc.examples.models import tanh_func, nonlinear_wave
 
 

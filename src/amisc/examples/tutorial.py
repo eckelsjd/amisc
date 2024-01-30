@@ -4,7 +4,7 @@
 def single_component():
     # --8<-- [start:single]
     from amisc.system import SystemSurrogate, ComponentSpec
-    from amisc.utils import UniformRV
+    from amisc.rv import UniformRV
 
     def fun(x):
         return dict(y=x ** 2)
@@ -24,7 +24,7 @@ def simple():
     import numpy as np
 
     from amisc.system import SystemSurrogate, ComponentSpec
-    from amisc.utils import UniformRV
+    from amisc.rv import UniformRV
 
     def fun1(x):
         return dict(y=x * np.sin(np.pi * x))

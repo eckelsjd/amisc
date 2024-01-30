@@ -53,8 +53,9 @@ from joblib.externals.loky import set_loky_pickler
 
 from amisc.component import SparseGridSurrogate, ComponentSurrogate, AnalyticalSurrogate
 from amisc import IndicesRV, IndexSet
-from amisc.utils import ax_default, get_logger
+from amisc.utils import get_logger
 from amisc.rv import BaseRV
+from uqtils import ax_default
 
 
 class ComponentSpec(UserDict):
@@ -186,6 +187,7 @@ class SystemSurrogate:
 
         # Store system info in a directed graph data structure
         self.exo_vars = copy.deepcopy(exo_vars) if isinstance(exo_vars, list) else [exo_vars]
+        self.x_vars = self.exo_vars     # Create an alias to be consistent with components
         self.coupling_vars = copy.deepcopy(coupling_vars) if isinstance(coupling_vars, list) else [coupling_vars]
         self.refine_level = 0
         self.build_metrics = dict()     # Save refinement error metrics during training
@@ -788,7 +790,7 @@ class SystemSurrogate:
         # Allocate space for all system outputs (just save all coupling vars)
         x = np.atleast_1d(x)
         ydim = len(self.coupling_vars)
-        y = np.zeros(x.shape[:-1] + (ydim,))
+        y = np.zeros(x.shape[:-1] + (ydim,), dtype=x.dtype)
         valid_idx = ~np.isnan(x[..., 0])  # Keep track of valid samples (set to False if FPI fails)
         t1 = 0
         output_dir = None
@@ -850,7 +852,7 @@ class SystemSurrogate:
             else:
                 # Set the initial guess for all coupling vars (middle of domain)
                 coupling_bds = [rv.bounds() for rv in self.coupling_vars]
-                x_couple = np.array([(bds[0] + bds[1]) / 2 for bds in coupling_bds])
+                x_couple = np.array([(bds[0] + bds[1]) / 2 for bds in coupling_bds]).astype(x.dtype)
                 x_couple = np.broadcast_to(x_couple, x.shape[:-1] + x_couple.shape).copy()
 
                 adj_nodes = []
@@ -1235,7 +1237,8 @@ class SystemSurrogate:
         :param comp_name: name of the component to return
         :returns: the `ComponentSurrogate` object
         """
-        return self.graph.nodes[comp_name]['surrogate']
+        comp = self if comp_name == 'System' else self.graph.nodes[comp_name]['surrogate']
+        return comp
 
     def _print_title_str(self, title_str: str):
         """Log an important message."""
@@ -1376,6 +1379,7 @@ class SystemSurrogate:
         with open(Path(filename), 'rb') as dill_file:
             sys_surr = dill.load(dill_file)
             sys_surr.set_executor(executor)
+            sys_surr.x_vars = sys_surr.exo_vars     # backwards compatible v0.2.0
 
         copy_flag = False
         if root_dir is None:
