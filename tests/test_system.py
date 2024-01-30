@@ -12,7 +12,7 @@ import pytest
 
 from amisc.system import SystemSurrogate, ComponentSpec
 from amisc.rv import UniformRV
-from amisc.utils import ax_default
+from uqtils import ax_default
 from amisc.examples.models import fire_sat_system
 
 

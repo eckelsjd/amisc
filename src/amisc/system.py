@@ -53,8 +53,9 @@ from joblib.externals.loky import set_loky_pickler
 
 from amisc.component import SparseGridSurrogate, ComponentSurrogate, AnalyticalSurrogate
 from amisc import IndicesRV, IndexSet
-from amisc.utils import ax_default, get_logger
+from amisc.utils import get_logger
 from amisc.rv import BaseRV
+from uqtils import ax_default
 
 
 class ComponentSpec(UserDict):
