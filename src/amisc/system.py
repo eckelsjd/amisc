@@ -764,7 +764,8 @@ class SystemSurrogate:
 
     def predict(self, x: np.ndarray | float, max_fpi_iter: int = 100, anderson_mem: int = 10, fpi_tol: float = 1e-10,
                 use_model: str | tuple | dict = None, model_dir: str | Path = None, verbose: bool = False,
-                training: bool = False, index_set: dict[str: IndexSet] = None, qoi_ind: IndicesRV = None) -> np.ndarray:
+                training: bool = False, index_set: dict[str: IndexSet] = None, qoi_ind: IndicesRV = None,
+                ppool=None) -> np.ndarray:
         """Evaluate the system surrogate at exogenous inputs `x`.
 
         !!! Warning
@@ -785,6 +786,7 @@ class SystemSurrogate:
         :param training: whether to call the system surrogate in training or evaluation mode, ignored if `use_model`
         :param index_set: `dict(node=[indices])` to override default index set for a node (only useful for parallel)
         :param qoi_ind: list of qoi indices to return, defaults to returning all system `coupling_vars`
+        :param ppool: a joblib `Parallel` instance to pass to each component to loop over multi-indices in parallel
         :returns y: `(..., y_dim)` the surrogate approximation of the system QoIs
         """
         # Allocate space for all system outputs (just save all coupling vars)
@@ -839,7 +841,8 @@ class SystemSurrogate:
                     output_dir = Path(model_dir) / scc[0]
                     os.mkdir(output_dir)
                 comp_output = node_obj['surrogate'](comp_input[valid_idx, :], use_model=use_model.get(scc[0]),
-                                                    model_dir=output_dir, training=training, index_set=indices)
+                                                    model_dir=output_dir, training=training, index_set=indices,
+                                                    ppool=ppool)
                 for local_i, global_i in enumerate(node_obj['global_out']):
                     y[valid_idx, global_i] = comp_output[..., local_i]
                     is_computed[global_i] = True
@@ -890,7 +893,8 @@ class SystemSurrogate:
                         # Compute component outputs (just don't do this FPI with the real models, please..)
                         indices = index_set.get(node, None) if index_set is not None else None
                         comp_output = node_obj['surrogate'](comp_input[valid_idx, :], use_model=use_model.get(node),
-                                                            model_dir=None, training=training, index_set=indices)
+                                                            model_dir=None, training=training, index_set=indices,
+                                                            ppool=ppool)
                         global_idx = node_obj['global_out']
                         for local_i, global_i in enumerate(global_idx):
                             x_couple_next[valid_idx, global_i] = comp_output[..., local_i]

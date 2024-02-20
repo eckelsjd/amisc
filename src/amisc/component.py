@@ -17,11 +17,14 @@ import ast
 from pathlib import Path
 from abc import ABC, abstractmethod
 from concurrent.futures import Executor, ALL_COMPLETED, wait
+import tempfile
+import os
 
 import numpy as np
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MaxAbsScaler
+from joblib import delayed
 
 from amisc.utils import get_logger
 from amisc.rv import BaseRV
@@ -237,7 +240,7 @@ class ComponentSurrogate(ABC):
             del self.index_set[-1]
 
     def predict(self, x: np.ndarray | float, use_model: str | tuple = None, model_dir: str | Path = None,
-                training: bool = False, index_set: IndexSet = None) -> np.ndarray:
+                training: bool = False, index_set: IndexSet = None, ppool=None) -> np.ndarray:
         """Evaluate the MISC approximation at new points `x`.
 
         !!! Note
@@ -249,6 +252,7 @@ class ComponentSurrogate(ABC):
         :param model_dir: directory to save output files if `use_model` is specified, ignored otherwise
         :param training: if `True`, then only compute with the active index set, otherwise use all candidates as well
         :param index_set: a list of concatenated $(\\alpha, \\beta)$ to override `self.index_set` if given, else ignore
+        :param ppool: a joblib `Parallel` pool to loop over multi-indices in parallel
         :returns y: `(..., y_dim)` the surrogate approximation of the function (or the function itself if `use_model`)
         """
         x = np.atleast_1d(x)
@@ -257,12 +261,25 @@ class ComponentSurrogate(ABC):
 
         index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
 
-        y = np.zeros(x.shape[:-1] + (self.ydim,), dtype=x.dtype)
-        for alpha, beta in index_set:
+        def run_batch(alpha, beta, y):
             comb_coeff = misc_coeff[str(alpha)][str(beta)]
             if np.abs(comb_coeff) > 0:
                 func = self.surrogates[str(alpha)][str(beta)]
                 y += int(comb_coeff) * func(x)
+
+        if ppool is not None:
+            with tempfile.NamedTemporaryFile(suffix='.dat', mode='w+b', delete=False) as y_fd:
+                pass
+            y_ret = np.memmap(y_fd.name, dtype=x.dtype, mode='r+', shape=x.shape[:-1] + (self.ydim,))
+            res = ppool(delayed(run_batch)(alpha, beta, y_ret) for alpha, beta in index_set)
+            y = np.empty(y_ret.shape, dtype=x.dtype)
+            y[:] = y_ret[:]
+            del y_ret
+            os.unlink(y_fd.name)
+        else:
+            y = np.zeros(x.shape[:-1] + (self.ydim,), dtype=x.dtype)
+            for alpha, beta in index_set:
+                run_batch(alpha, beta, y)
 
         return y
 
@@ -597,7 +614,7 @@ class SparseGridSurrogate(ComponentSurrogate):
         super().__init__(*args, **kwargs)
 
     # Override
-    def predict(self, x, use_model=None, model_dir=None, training=False, index_set=None):
+    def predict(self, x, use_model=None, model_dir=None, training=False, index_set=None, ppool=None):
         """Need to override `super()` to allow passing in interpolation grids `xi` and `yi`."""
         x = np.atleast_1d(x)
         if use_model is not None:
@@ -605,8 +622,7 @@ class SparseGridSurrogate(ComponentSurrogate):
 
         index_set, misc_coeff = self._combination(index_set, training)
 
-        y = np.zeros(x.shape[:-1] + (self.ydim,), dtype=x.dtype)
-        for alpha, beta in index_set:
+        def run_batch(alpha, beta, y):
             comb_coeff = misc_coeff[str(alpha)][str(beta)]
             if np.abs(comb_coeff) > 0:
                 # Gather the xi/yi interpolation points/qoi_ind for this sub tensor-product grid
@@ -615,6 +631,20 @@ class SparseGridSurrogate(ComponentSurrogate):
 
                 # Add this sub tensor-product grid to the MISC approximation
                 y += int(comb_coeff) * interp(x, xi=xi, yi=yi)
+
+        if ppool is not None:
+            with tempfile.NamedTemporaryFile(suffix='.dat', mode='w+b', delete=False) as y_fd:
+                pass
+            y_ret = np.memmap(y_fd.name, dtype=x.dtype, mode='r+', shape=x.shape[:-1] + (self.ydim,))
+            res = ppool(delayed(run_batch)(alpha, beta, y_ret) for alpha, beta in index_set)
+            y = np.empty(y_ret.shape, dtype=x.dtype)
+            y[:] = y_ret[:]
+            del y_ret
+            os.unlink(y_fd.name)
+        else:
+            y = np.zeros(x.shape[:-1] + (self.ydim,), dtype=x.dtype)
+            for alpha, beta in index_set:
+                run_batch(alpha, beta, y)
 
         return y
 
