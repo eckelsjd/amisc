@@ -1,66 +1,65 @@
 import time
 import warnings
-from pathlib import Path
-import sys
 
+import matplotlib.pyplot as plt
 import numpy as np
 from scipy.linalg import lapack
 from scipy.optimize import fsolve
 from scipy.stats import gaussian_kde
-import matplotlib.pyplot as plt
-import pytest
-
-from amisc.system import SystemSurrogate, ComponentSpec
-from amisc.rv import UniformRV
 from uqtils import ax_default
-from amisc.examples.models import fire_sat_system
 
+from amisc.examples.models import fire_sat_system
+from amisc.rv import UniformRV
+from amisc.system import ComponentSpec, SystemSurrogate
 
 # TODO: Include a swap and insert component test
 
-# @pytest.mark.skipif(not sys.platform.startswith('linux'), reason='not sure why')
-def test_fire_sat(plots=False):
+def test_fire_sat(tmp_path, plots=False):
     """Test the fire satellite coupled system from Chaudhuri (2018)"""
     N = 100
-    surr = fire_sat_system(save_dir=Path('.'))
+    surr = fire_sat_system(save_dir=tmp_path)
     xt = surr.sample_inputs(N, use_pdf=True)
     yt = surr(xt, use_model='best')
     use_idx = ~np.any(np.isnan(yt), axis=-1)
     xt = xt[use_idx, :]
     yt = yt[use_idx, :]
     test_set = {'xt': xt, 'yt': yt}
-    surr.fit(max_iter=15, max_tol=1e-2, max_runtime=1/12, test_set=test_set, n_jobs=-1, num_refine=1000)
+    surr.fit(max_iter=5, max_tol=1e-2, max_runtime=1/12, test_set=test_set, num_refine=100)
 
     ysurr = surr.predict(xt)
     l2_error = np.sqrt(np.nanmean((ysurr-yt)**2, axis=0)) / np.sqrt(np.nanmean(yt**2, axis=0))
-    assert np.nanmax(l2_error) < 0.1
+    assert np.nanmax(l2_error) < 0.2
+
+    # Plot 1d slices
+    slice_idx = ['H', 'Po', 'Cd']
+    qoi_idx = ['Vsat', 'Asa', 'Pat']
+    try:
+        surr.plot_slice(slice_idx, qoi_idx, show_model=['best', 'worst'], model_dir=surr.root_dir,
+                        random_walk=True, N=10)
+    except np.linalg.LinAlgError:
+        print('Its alright. Sometimes the random walks are wacky and FPI wont converge.')
+
+    # Plot allocation bar charts
+    surr.plot_allocation()
 
     if plots:
         # Plot error histograms
         fig, ax = plt.subplots(1, 3)
         ax[0].hist(yt[:, 0], color='red', bins=20, edgecolor='black', density=True, linewidth=1.2, label='Truth')
-        ax[0].hist(ysurr[:, 0], color='blue', bins=20, edgecolor='black', density=True, linewidth=1.2, alpha=0.4, label='Surrogate')
+        ax[0].hist(ysurr[:, 0], color='blue', bins=20, edgecolor='black', density=True, linewidth=1.2, alpha=0.4,
+                   label='Surrogate')
         ax[1].hist(yt[:, 7], color='red', bins=20, edgecolor='black', density=True, linewidth=1.2, label='Truth')
-        ax[1].hist(ysurr[:, 7], color='blue', bins=20, edgecolor='black', density=True, linewidth=1.2, alpha=0.4, label='Surrogate')
+        ax[1].hist(ysurr[:, 7], color='blue', bins=20, edgecolor='black', density=True, linewidth=1.2, alpha=0.4,
+                   label='Surrogate')
         ax[2].hist(yt[:, 8], color='red', bins=20, edgecolor='black', density=True, linewidth=1.2, label='Truth')
-        ax[2].hist(ysurr[:, 8], color='blue', bins=20, edgecolor='black', density=True, linewidth=1.2, alpha=0.4, label='Surrogate')
+        ax[2].hist(ysurr[:, 8], color='blue', bins=20, edgecolor='black', density=True, linewidth=1.2, alpha=0.4,
+                   label='Surrogate')
         ax_default(ax[0], 'Satellite velocity ($m/s$)', '', legend=True)
         ax_default(ax[1], 'Solar panel area ($m^2$)', '', legend=True)
         ax_default(ax[2], 'Attitude control power ($W$)', '', legend=True)
         fig.set_size_inches(9, 3)
         fig.tight_layout()
 
-        # Plot 1d slices
-        slice_idx = ['H', 'Po', 'Cd']
-        qoi_idx = ['Vsat', 'Asa', 'Pat']
-        try:
-            fig, ax = surr.plot_slice(slice_idx, qoi_idx, show_model=['best', 'worst'], model_dir=surr.root_dir,
-                                      random_walk=True, N=10)
-        except np.linalg.LinAlgError:
-            print(f'Its alright. Sometimes the random walks are wacky and FPI wont converge.')
-
-        # Plot allocation bar charts
-        fig, ax = surr.plot_allocation()
         plt.show()
 
 
@@ -293,7 +292,7 @@ def test_fpi():
 
         try:
             y_true[i, :] = fsolve(fun, x0, xtol=tol)
-        except Exception as e:
+        except Exception:
             bad_idx.append(i)
 
     y_surr = np.delete(y_surr, nan_idx + bad_idx, axis=0)

@@ -1,3 +1,0 @@
-# Package utilities
-
-::: amisc.utils

@@ -1,12 +1,12 @@
 """Providing some example test functions"""
-from pathlib import Path
 import pickle
 import uuid
+from pathlib import Path
 
 import numpy as np
 
+from amisc.rv import NormalRV, UniformRV
 from amisc.system import ComponentSpec, SystemSurrogate
-from amisc.rv import UniformRV, NormalRV
 
 
 def tanh_func(x, *args, A=2, L=1, frac=4, **kwargs):
@@ -89,8 +89,9 @@ def fire_sat_system(save_dir=None):
 
     !!! Note "Some modifications"
         Orbit will save outputs all the time; Power won't because it is part of an FPI loop. Orbit and Power can
-        return `np.nan` some of the time (optional, to test robustness of surrogate). Power and Attitude have an `alpha` fidelity
-        index that controls accuracy of the returned values. `alpha=0,1,2` corresponds to `8,4,0` percent error.
+        return `np.nan` some of the time (optional, to test robustness of surrogate). Power and Attitude have an
+        `alpha` fidelity index that controls accuracy of the returned values. `alpha=0,1,2` corresponds to `8,4,0`
+        percent error.
 
     :param save_dir: where to save model outputs
     :returns: a `SystemSurrogate` object for the fire sat MD example system

@@ -1,19 +1,16 @@
-"""`utils.py`
+"""Provides some basic utilities for the package.
 
-Provides some basic utilities for the package.
+Includes:
 
-Includes
---------
 - `load_variables`: convenience function for loading RVs from a .json config file
 - `get_logger`: logging utility with nice formatting
 """
 import json
-from pathlib import Path
 import logging
 import sys
+from pathlib import Path
 
-from amisc.rv import BaseRV, UniformRV, NormalRV, ScalarRV
-
+from amisc.rv import BaseRV, NormalRV, ScalarRV, UniformRV
 
 LOG_FORMATTER = logging.Formatter("%(asctime)s \u2014 [%(levelname)s] \u2014 %(name)-25s \u2014 %(message)s")
 
@@ -49,7 +46,7 @@ def load_variables(variables: list[str], file: Path | str) -> list[BaseRV]:
                     # Make a plain stand-in scalar RV object (no uncertainty)
                     rvs.append(ScalarRV(**kwargs))
                 case other:
-                    raise NotImplementedError(f'RV type "{var_info.get("rv_type")}" is not known.')
+                    raise NotImplementedError(f'RV type "{other}" is not known.')
         else:
             raise ValueError(f'You have requested the variable {str_id}, but it was not found in {file}. '
                              f'Please add a definition of {str_id} to {file} or construct it on your own.')

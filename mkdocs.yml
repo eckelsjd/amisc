@@ -3,24 +3,32 @@ site_url: https://eckelsjd.github.io/amisc/
 site_author: Joshua Eckels
 repo_name: eckelsjd/amisc
 repo_url: https://github.com/eckelsjd/amisc
-copyright: Copyright &copy 2023 Joshua Eckels
+copyright: Copyright &copy 2024 Joshua Eckels
+watch: [mkdocs.yml, README.md, CONTRIBUTING.md, CHANGELOG.md, src]
 
 theme:
   name: material
   logo: assets/amisc_logo.svg
   favicon: assets/amisc_logo.svg
   palette:
-    primary: light blue
+    primary: light blue     # https://squidfunk.github.io/mkdocs-material/setup/changing-the-colors/
     accent: red
   font:
     text: Roboto
     code: Roboto Mono
+  icon:
+    annotation: material/plus-circle
   features:
     - content.code.annotate
     - content.code.copy
+    - content.code.select
+    - content.tabs.link
+    - content.tooltips
     - navigation.footer
     - navigation.instant
-    - navigation.tabs
+    - navigation.tabs       # Tab navigation at top of page
+    - navigation.sections   # Extra layer in the left navigation panel
+    - navigation.indexes    # Allow section titles to be clickable with an "index.md" file
     - navigation.top
     - navigation.tracking
     - search.highlight
@@ -31,7 +39,7 @@ theme:
 plugins:
   - search:
       separator: '[\s\u200b\-_,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
-  - mkdocstrings:
+  - mkdocstrings:           # Autodoc for mkdocs -- pull docstrings from Python files and insert into mkdocs site
       handlers:
         python:
           paths: [src]
@@ -40,24 +48,52 @@ plugins:
             docstring_section_style: spacy
             merge_init_into_class: true
             filters: ["!^_"]
-            show_symbol_type_heading: true  # not available to public right now
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
             group_by_category: true
+            show_root_heading: true
+            heading_level: 1
+  - coverage:
+      html_report_dir: htmlcov
+  - git-committers:
+      repository: eckelsjd/amisc
+      branch: main
+      exclude:
+        - reference/*
+        - abbreviations.md
+        - coverage.md
+        - changelog.md
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: timeago
+      exclude:
+        - reference/*
+        - abbreviations.md
+        - coverage.md
+        - changelog.md
+  - markdown-exec           # Execute code inside a pymdownx.superfence block and display in md (useful for ```tree```)
+  - gen-files:              # Programmatically add pages to mkdocs site at runtime
+      scripts:
+        - docs/gen_ref_pages.py
+  - literate-nav:
+      nav_file: SUMMARY.md  # Allow wildcard and generated navigation instructions
+  - redirects:
+      redirect_maps:
+        index.md: start.md  # Force index page to be the "getting started" page, which is actually the README
 
 nav:
   - Home:
-      - Getting started: README.md
+      - Getting started: start.md
       - Tutorials: tutorials.md
       - How-to Guides: how-to-guides.md
-      - Contributing: CONTRIBUTING.md
-  - API Reference:
-      - Overview: reference/overview.md
-      - System: reference/system.md
-      - Components: reference/components.md
-      - Interpolators: reference/interpolators.md
-      - Variables: reference/variables.md
-      - Utilities: reference/utilities.md
+      - Contributing: contributing.md
+      - Coverage report: coverage.md
+      - Changelog: changelog.md
+  - API reference: reference/  # literate-nav + gen-files
   - Theory:
-      - Home: theory.md
+      - Overview: theory.md
+
+exclude_docs: abbreviations.md
 
 extra:
   social:
@@ -67,15 +103,21 @@ extra:
       link: https://pypi.org/project/amisc/
 
 extra_javascript:
-  - javascripts/mathjax.js
+  - javascript/mathjax.js     # For displaying latex equations with $$ notation
   - https://polyfill.io/v3/polyfill.min.js?features=es6
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
-#extra_css:
-#  - css/extra.css
+extra_css:
+  - styles/extra.css
 
 markdown_extensions:
+  - abbr                      # Abbreviations
   - admonition
+  - attr_list                 # Add HTML/CSS attributes to markdown elements
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
@@ -88,6 +130,13 @@ markdown_extensions:
   - pymdownx.arithmatex:
       generic: true
   - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
   - pymdownx.snippets:
       dedent_subsections: true
       base_path: ['.', './src']
+      auto_append:
+        - docs/abbreviations.md

@@ -1,8 +1,8 @@
 import numpy as np
 
 from amisc.examples.models import borehole_func, wing_weight_func
-from amisc.system import SystemSurrogate, ComponentSpec
 from amisc.rv import UniformRV
+from amisc.system import ComponentSpec, SystemSurrogate
 
 
 def converge(system='Borehole', N=1000):

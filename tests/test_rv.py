@@ -1,5 +1,4 @@
-from amisc.rv import UniformRV, NormalRV, LogNormalRV, LogUniformRV, ScalarRV
-
+from amisc.rv import LogNormalRV, LogUniformRV, NormalRV, ScalarRV, UniformRV
 
 # TODO: make sure rvs are sampling correctly
 

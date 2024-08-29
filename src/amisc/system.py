@@ -1,6 +1,4 @@
-"""`system.py`
-
-The `SystemSurrogate` is a framework for multidisciplinary models. It manages multiple single discipline component
+"""The `SystemSurrogate` is a framework for multidisciplinary models. It manages multiple single discipline component
 models and the connections between them. It provides a top-level interface for constructing and evaluating surrogates.
 
 Features
@@ -18,8 +16,8 @@ Features
 !!! Info "Model specification"
     Models are callable Python wrapper functions of the form `ret = model(x, *args, **kwargs)`, where `x` is an
     `np.ndarray` of model inputs (and `*args, **kwargs` allow passing any other required configurations for your model).
-    The return value is a Python dictionary of the form `ret = {'y': y, 'files': files, 'cost': cost, etc.}`.
-    In the return dictionary, you specify the raw model output `y` as an `np.ndarray` at a _minimum_. Optionally, you can
+    The return value is a Python dictionary of the form `ret = {'y': y, 'files': files, 'cost': cost, etc.}`. In the
+    return dictionary, you specify the raw model output `y` as an `np.ndarray` at a _minimum_. Optionally, you can
     specify paths to output files and the average model cost (in seconds of cpu time), and anything else you want. Your
     `model()` function can do anything it wants in order to go from `x` &rarr; `y`. Python has the flexibility to call
     virtually any external codes, or to implement the function natively with `numpy`.
@@ -30,32 +28,33 @@ Features
     `model` and its connections to other models within the multidisciplinary system. The limiting case is a single
     component model, for which the configuration is simply `component = ComponentSpec(model)`.
 """
-import os
-import time
+# ruff: noqa: E702
+import copy
 import datetime
 import functools
-import copy
-from datetime import timezone
-from pathlib import Path
-import random
-import string
+import os
 import pickle
+import random
+import shutil
+import string
+import time
 from collections import UserDict
 from concurrent.futures import Executor
-import shutil
+from datetime import timezone
+from pathlib import Path
 
-import numpy as np
-import networkx as nx
 import dill
 import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
 from joblib import Parallel, delayed
 from joblib.externals.loky import set_loky_pickler
-
-from amisc.component import SparseGridSurrogate, ComponentSurrogate, AnalyticalSurrogate
-from amisc import IndicesRV, IndexSet
-from amisc.utils import get_logger
-from amisc.rv import BaseRV
 from uqtils import ax_default
+
+from amisc import IndexSet, IndicesRV
+from amisc.component import AnalyticalSurrogate, ComponentSurrogate, SparseGridSurrogate
+from amisc.rv import BaseRV
+from amisc.utils import get_logger
 
 
 class ComponentSpec(UserDict):
@@ -296,7 +295,7 @@ class SystemSurrogate:
             global_in = sorted(coupling_in)
             for node, node_obj in nodes.items():
                 if node != component['name']:
-                    l = list()
+                    l = list()  # noqa: E741
                     for i in global_in:
                         try:
                             l.append(global_out[node].index(i))
@@ -328,7 +327,7 @@ class SystemSurrogate:
                 case 'analytical':
                     surr_class = AnalyticalSurrogate
                 case other:
-                    raise NotImplementedError(f"Surrogate type '{surr_class}' is not known at this time.")
+                    raise NotImplementedError(f"Surrogate type '{other}' is not known at this time.")
 
         # Check for an override of model fidelity indices (to enable just single-fidelity evaluation)
         if kwargs.get('hf_override', False):
@@ -544,7 +543,7 @@ class SystemSurrogate:
                     self._print_title_str(f'Termination criteria reached: Max iteration {self.refine_level}/{max_iter}')
                     break
                 if curr_error == -np.inf:
-                    self._print_title_str(f'Termination criteria reached: No candidates left to refine')
+                    self._print_title_str('Termination criteria reached: No candidates left to refine')
                     break
                 if curr_error < max_tol:
                     self._print_title_str(f'Termination criteria reached: L2 error {curr_error} < tol {max_tol}')
@@ -588,7 +587,7 @@ class SystemSurrogate:
                         t_fig.savefig(str(Path(self.root_dir) / 'test_set.png'), dpi=300, format='png')
                     self.build_metrics['test_stats'] = test_stats
 
-        self._save_progress(f'sys_final.pkl')
+        self._save_progress('sys_final.pkl')
         self.logger.info(f'Final system surrogate: \n {self}')
 
     def get_allocation(self, idx: int = None):
@@ -1138,7 +1137,8 @@ class SystemSurrogate:
                     c = np.array([[0, 0, 0, 1], [0.5, 0.5, 0.5, 1]]) if len(show_model) <= 2 else (
                         plt.get_cmap('jet')(np.linspace(0, 1, len(show_model))))
                     for k in range(len(show_model)):
-                        model_str = str(show_model[k]).replace('{', '').replace('}', '').replace(':', '=').replace("'", '')
+                        model_str = (str(show_model[k]).replace('{', '').replace('}', '')
+                                     .replace(':', '=').replace("'", ''))
                         model_ret = ys_model[k]
                         y_model = model_ret[:, j, qoi_idx[i]]
                         label = {'best': 'High-fidelity' if len(show_model) > 1 else 'Model',
@@ -1305,7 +1305,8 @@ class SystemSurrogate:
                     log_file = str((Path(self.root_dir) / f).resolve())
                     break
             if log_file is None:
-                fname = datetime.datetime.now(tz=timezone.utc).isoformat().split('.')[0].replace(':', '.') + 'UTC_sys.log'
+                fname = (datetime.datetime.now(tz=timezone.utc).isoformat().split('.')[0].replace(':', '.') +
+                         'UTC_sys.log')
                 log_file = str((Path(self.root_dir) / fname).resolve())
             self.log_file = log_file
 

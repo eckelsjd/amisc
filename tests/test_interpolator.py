@@ -1,10 +1,10 @@
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+from uqtils import approx_hess, approx_jac, ax_default
 
+from amisc.examples.models import nonlinear_wave, tanh_func
 from amisc.interpolator import LagrangeInterpolator
 from amisc.rv import UniformRV
-from uqtils import ax_default, approx_jac, approx_hess
-from amisc.examples.models import tanh_func, nonlinear_wave
 
 
 def test_tensor_product_1d(plots=False):
@@ -84,7 +84,7 @@ def test_tensor_product_2d(plots=False):
         plt.colorbar(c1, ax=ax[0, 0])
         ax[0, 0].set_title('True function')
         ax_default(ax[0, 0], r'$x_1$', r'$x_2$', legend=False)
-        c2 = ax[0, 1].contourf(xg.squeeze(), yg.squeeze(), z_interp.squeeze(), 60, cmap='coolwarm', vmin=vmin, vmax=vmax)
+        c2 = ax[0, 1].contourf(xg.squeeze(), yg.squeeze(), z_interp.squeeze(), 60, cmap='coolwarm', vmin=vmin,vmax=vmax)
         ax[0, 1].plot(interp.xi[:, 0], interp.xi[:, 1], 'o', markersize=6, markerfacecolor='green')
         plt.colorbar(c2, ax=ax[0, 1])
         ax[0, 1].set_title('Interpolant')
@@ -98,7 +98,7 @@ def test_tensor_product_2d(plots=False):
         plt.colorbar(c1, ax=ax[1, 0])
         ax[1, 0].set_title('True function')
         ax_default(ax[1, 0], r'$x_1$', r'$x_2$', legend=False)
-        c2 = ax[1, 1].contourf(xg.squeeze(), yg.squeeze(), z2_interp.squeeze(), 60, cmap='coolwarm', vmin=vmin, vmax=vmax)
+        c2 = ax[1, 1].contourf(xg.squeeze(), yg.squeeze(), z2_interp.squeeze(), 60, cmap='coolwarm',vmin=vmin,vmax=vmax)
         ax[1, 1].plot(interp2.xi[:, 0], interp2.xi[:, 1], 'o', markersize=6, markerfacecolor='green')
         plt.colorbar(c2, ax=ax[1, 1])
         ax[1, 1].set_title('Refined')
@@ -115,7 +115,8 @@ def test_tensor_product_2d(plots=False):
 
 def test_grad():
     f1 = lambda theta: 2 * theta[..., 0:1] ** 2 + 3 * theta[..., 0:1] * theta[..., 1:2] ** 3 + np.cos(theta[..., 2:3])
-    f2 = lambda theta: 4 * theta[..., 1:2] ** 2 + 2 * theta[..., 0:1] ** 3 * theta[..., 1:2] + np.sin(theta[..., 2:3]) * theta[..., 0:1]
+    f2 = lambda theta: (4 * theta[..., 1:2] ** 2 + 2 * theta[..., 0:1] ** 3 * theta[..., 1:2] +
+                        np.sin(theta[..., 2:3]) * theta[..., 0:1])
     fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
 
     x1, x2, x3 = UniformRV(-2, 1), UniformRV(-1, 2), UniformRV(-np.pi, np.pi)

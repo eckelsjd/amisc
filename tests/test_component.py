@@ -1,10 +1,11 @@
-import numpy as np
-import matplotlib.pyplot as plt
 import itertools
+
+import matplotlib.pyplot as plt
+import numpy as np
+from uqtils import approx_hess, approx_jac, ax_default
 
 from amisc.component import SparseGridSurrogate
 from amisc.rv import UniformRV
-from uqtils import ax_default, approx_jac, approx_hess
 
 
 def test_sparse_grid(plots=False):
@@ -35,9 +36,9 @@ def test_sparse_grid(plots=False):
             for beta in range(3):
                 ax = axs[2-alpha, beta]
                 surr = comp.get_sub_surrogate((alpha,), (beta,), include_grid=True)
-                s = f'$\hat{{f}}_{{{alpha}, {beta}}}$'
+                s = rf'$\hat{{f}}_{{{alpha}, {beta}}}$'
                 ax.plot(xg, surr(xg), '--k', label=r'{}'.format(s), linewidth=1.5)
-                s = f'$\hat{{f}}_{alpha}$'
+                s = rf'$\hat{{f}}_{alpha}$'
                 ax.plot(xg, model(xg, alpha)['y'], '--b', label=r'{}'.format(s), linewidth=2)
                 ax.plot(xg, yt, '-r', label=r'$f$', linewidth=2)
                 ax.plot(surr.xi, surr.yi, 'or')
@@ -46,7 +47,8 @@ def test_sparse_grid(plots=False):
                 ax_default(ax, xlabel, ylabel, legend=True)
 
         fig.text(0.5, 0.02, r'Increasing surrogate fidelity ($\beta$) $\rightarrow$', ha='center', fontweight='bold')
-        fig.text(0.02, 0.5, r'Increasing model fidelity ($\alpha$) $\rightarrow$', va='center', fontweight='bold', rotation='vertical')
+        fig.text(0.02, 0.5, r'Increasing model fidelity ($\alpha$) $\rightarrow$', va='center', fontweight='bold',
+                 rotation='vertical')
         fig.set_size_inches(3 * 3, 3 * 3)
         fig.tight_layout(pad=3, w_pad=1, h_pad=1)
         plt.show()

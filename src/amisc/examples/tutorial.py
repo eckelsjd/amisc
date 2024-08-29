@@ -1,10 +1,10 @@
 """Examples to get started."""
-
+# ruff: noqa: F841
 
 def single_component():
     # --8<-- [start:single]
-    from amisc.system import SystemSurrogate, ComponentSpec
     from amisc.rv import UniformRV
+    from amisc.system import ComponentSpec, SystemSurrogate
 
     def fun(x):
         return dict(y=x ** 2)
@@ -23,8 +23,8 @@ def simple():
     # --8<-- [start:simple]
     import numpy as np
 
-    from amisc.system import SystemSurrogate, ComponentSpec
     from amisc.rv import UniformRV
+    from amisc.system import ComponentSpec, SystemSurrogate
 
     def fun1(x):
         return dict(y=x * np.sin(np.pi * x))
@@ -51,7 +51,6 @@ def simple():
 def fire_sat():
     # --8<-- [start:fire_sat]
     import numpy as np
-    import matplotlib.pyplot as plt
 
     from amisc.examples.models import fire_sat_system
 
@@ -74,7 +73,6 @@ def fire_sat():
     output_vars = ['Vsat', 'Asa']
     system.plot_allocation()
     system.plot_slice(input_vars, output_vars, show_model=['best', 'worst'], random_walk=True, N=10)
-    plt.show()
     # --8<-- [end:fire_sat]
 
 

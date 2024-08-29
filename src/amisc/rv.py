@@ -1,9 +1,7 @@
-"""`rv.py`
+"""Provides small classes for random variables.
 
-Provides small classes for random variables.
+Includes:
 
-Includes
---------
 - `BaseRV`: Abstract wrapper class of a random variable
 - `UniformRV`: a uniformly-distributed random variable
 - `NormalRV`: a normally-distributed random variable
@@ -11,9 +9,9 @@ Includes
 - `LogUniformRV`: base 10 log-uniform
 - `LogNormalRV`: base 10 log-normal
 """
-from abc import ABC, abstractmethod
 import random
 import string
+from abc import ABC, abstractmethod
 
 import numpy as np
 
@@ -193,7 +191,7 @@ class UniformRV(BaseRV):
                     return self.bds
                 return nominal - self.value, nominal + self.value
             case other:
-                raise NotImplementedError(f'self.type = {self.type} not known. Choose from ["pct, "tol", "bds"]')
+                raise NotImplementedError(f'self.type = {other} not known. Choose from ["pct, "tol", "bds"]')
 
     def pdf(self, x: np.ndarray, nominal: float = None) -> np.ndarray:
         """Compute the pdf for a uniform distribution.

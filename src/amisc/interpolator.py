@@ -1,15 +1,13 @@
-"""`interpolator.py`
+"""Provides interpolator classes. Interpolators manage training data and specify how to refine/gather more data.
 
-Provides interpolator classes. Interpolators manage training data and specify how to refine/gather more data.
+Includes:
 
-Includes
---------
 - `BaseInterpolator`: Abstract class providing basic structure of an interpolator
 - `LagrangeInterpolator`: Concrete implementation for tensor-product barycentric Lagrange interpolation
 """
-from abc import ABC, abstractmethod
-import itertools
 import copy
+import itertools
+from abc import ABC, abstractmethod
 
 import numpy as np
 from scipy.optimize import direct
@@ -17,8 +15,8 @@ from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MaxAbsScaler
 
-from amisc.utils import get_logger
 from amisc.rv import BaseRV
+from amisc.utils import get_logger
 
 
 class BaseInterpolator(ABC):
@@ -361,9 +359,9 @@ class LagrangeInterpolator(BaseInterpolator):
                 if self.save_enabled():
                     interp.output_files = [None] * np.prod(new_grid_sizes)
 
-            old_indices = [np.arange(old_grid_sizes[n]) for n in range(self.xdim())]
+            old_indices = [list(range(old_grid_sizes[n])) for n in range(self.xdim())]
             old_indices = list(itertools.product(*old_indices))
-            new_indices = [np.arange(new_grid_sizes[n]) for n in range(self.xdim())]
+            new_indices = [list(range(new_grid_sizes[n])) for n in range(self.xdim())]
             new_indices = list(itertools.product(*new_indices))
             for i in range(len(new_indices)):
                 # Get the new grid coordinate/index and physical x location/point
@@ -397,15 +395,14 @@ class LagrangeInterpolator(BaseInterpolator):
             # Evaluate the model at new interpolation points
             interp.model_cost = self.model_cost
             if self._model is None:
-                self.logger.warning(f'No model available to evaluate new interpolation points, returning the points '
-                                    f'to you instead...')
+                self.logger.warning('No model available to evaluate new interpolation points, returning the points '
+                                    'to you instead...')
                 return x_new_idx, x_new, interp
             elif not auto or self.reduced:
                 return x_new_idx, x_new, interp
             else:
                 interp.set_yi(x_new=(x_new_idx, x_new))
                 return interp
-
         except Exception as e:
             import traceback
             tb_str = str(traceback.format_exception(e))
@@ -427,7 +424,7 @@ class LagrangeInterpolator(BaseInterpolator):
             xi = self.xi.copy()
         xdim = xi.shape[-1]
         ydim = yi.shape[-1]
-        dims = list(np.arange(xdim))
+        dims = list(range(xdim))
 
         nan_idx = np.any(np.isnan(yi), axis=-1)
         if np.any(nan_idx):
@@ -630,7 +627,8 @@ class LagrangeInterpolator(BaseInterpolator):
                     else:
                         front_term = w_j[m, j[m]] / (qsum[..., m] * diff[..., m, j[m]])
                         first_term = (-qsum_pp[..., m] / qsum[..., m]) + 2*(qsum_p[..., m] / qsum[..., m]) ** 2
-                        second_term = 2*(qsum_p[..., m] / (qsum[..., m] * diff[..., m, j[m]])) + 2 / diff[..., m, j[m]] ** 2
+                        second_term = (2*(qsum_p[..., m] / (qsum[..., m] * diff[..., m, j[m]]))
+                                       + 2 / diff[..., m, j[m]] ** 2)
                         d2LJ_dx2 = front_term * (first_term + second_term)
 
                         # Set derivatives when x is at the interpolation points (i.e. x==x_j)
@@ -643,13 +641,13 @@ class LagrangeInterpolator(BaseInterpolator):
 
                             # if these points are at the current j interpolation point
                             d2LJ_dx2[curr_j_idx] = (2 * np.nansum((w_j[m, p_idx] / w_j[m, j[m]]) /
-                                                                 (x[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]), axis=-1) ** 2 +
+                                                                 (x[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]), axis=-1) ** 2 +  # noqa: E501
                                                     2 * np.nansum((w_j[m, p_idx] / w_j[m, j[m]]) /
-                                                                  (x[curr_j_idx, m, np.newaxis] - x_j[m, p_idx])**2, axis=-1))
+                                                                  (x[curr_j_idx, m, np.newaxis] - x_j[m, p_idx])**2, axis=-1))  # noqa: E501
 
                             # if these points are at any other interpolation point
                             other_pts_inv = other_pts.copy()
-                            other_pts_inv[other_j_idx, m, :grid_sizes[m]] = np.invert(other_pts[other_j_idx, m, :grid_sizes[m]])
+                            other_pts_inv[other_j_idx, m, :grid_sizes[m]] = np.invert(other_pts[other_j_idx, m, :grid_sizes[m]])  # noqa: E501
                             curr_x_j = x_j_large[other_pts[..., m, :]].reshape((-1, 1))
                             other_x_j = x_j_large[other_pts_inv[..., m, :]].reshape((-1, len(p_idx)))
                             curr_w_j = w_j_large[other_pts[..., m, :]].reshape((-1, 1))

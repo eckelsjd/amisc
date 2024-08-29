@@ -1,35 +1,33 @@
-"""`component.py`
-
-A Component is an `amisc` wrapper around a single discipline model. It manages surrogate construction and optionally
+"""A Component is an `amisc` wrapper around a single discipline model. It manages surrogate construction and optionally
 a hierarchy of modeling fidelities that may be available. Concrete component classes all inherit from the base
 `ComponentSurrogate` class provided here. Components manage an array of `BaseInterpolator` objects to form a
 multifidelity hierarchy.
 
-Includes
---------
+Includes:
+
 - `ComponentSurrogate`: the base class that is fundamental to the adaptive multi-index stochastic collocation strategy
 - `SparseGridSurrogate`: an AMISC component that manages a hierarchy of `LagrangeInterpolator` objects
 - `AnalyticalSurrogate`: a light wrapper around a single discipline model that does not require surrogate approximation
 """
-import itertools
-import copy
 import ast
-from pathlib import Path
-from abc import ABC, abstractmethod
-from concurrent.futures import Executor, ALL_COMPLETED, wait
-import tempfile
+import copy
+import itertools
 import os
+import tempfile
+from abc import ABC, abstractmethod
+from concurrent.futures import ALL_COMPLETED, Executor, wait
+from pathlib import Path
 
 import numpy as np
+from joblib import delayed
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MaxAbsScaler
-from joblib import delayed
 
-from amisc.utils import get_logger
-from amisc.rv import BaseRV
-from amisc import IndexSet, MiscTree, InterpResults
+from amisc import IndexSet, InterpResults, MiscTree
 from amisc.interpolator import BaseInterpolator, LagrangeInterpolator
+from amisc.rv import BaseRV
+from amisc.utils import get_logger
 
 
 class ComponentSurrogate(ABC):
@@ -146,6 +144,7 @@ class ComponentSurrogate(ABC):
         :param beta: A multi-index specifying surrogate fidelity
         """
         # User is responsible for making sure index set is downward-closed
+        alpha, beta = tuple([int(i) for i in alpha]), tuple([int(i) for i in beta])  # Make sure these are python ints
         self.add_surrogate(alpha, beta)
         ele = (alpha, beta)
         if ele in self.index_set:
@@ -271,7 +270,7 @@ class ComponentSurrogate(ABC):
             with tempfile.NamedTemporaryFile(suffix='.dat', mode='w+b', delete=False) as y_fd:
                 pass
             y_ret = np.memmap(y_fd.name, dtype=x.dtype, mode='r+', shape=x.shape[:-1] + (self.ydim,))
-            res = ppool(delayed(run_batch)(alpha, beta, y_ret) for alpha, beta in index_set)
+            ppool(delayed(run_batch)(alpha, beta, y_ret) for alpha, beta in index_set)
             y = np.empty(y_ret.shape, dtype=x.dtype)
             y[:] = y_ret[:]
             del y_ret
@@ -354,7 +353,7 @@ class ComponentSurrogate(ABC):
             idx = np.any(idx, axis=-1)                                      # (2**Nij,)
             ij_use = self.ij[idx, :]                                        # (*, Nij)
             l1_norm = np.sum(np.abs(ij_use), axis=-1)                       # (*,)
-            coeff = np.sum((-1) ** l1_norm)                                 # float
+            coeff = np.sum((-1.) ** l1_norm)                                # float
 
             # Save misc coeff to a dict() tree structure
             if misc_coeff.get(str(alpha)) is None:
@@ -381,7 +380,7 @@ class ComponentSurrogate(ABC):
         """
         try:
             return self.costs[str(alpha)][str(beta)]
-        except:
+        except Exception:
             return 0.0
 
     def update_input_bds(self, idx: int, bds: tuple):
@@ -537,7 +536,8 @@ class ComponentSurrogate(ABC):
         pass
 
     @abstractmethod
-    def update_interpolator(self, x_new_idx: list[int | tuple | str], x_new: np.ndarray, interp: BaseInterpolator) -> float:
+    def update_interpolator(self, x_new_idx: list[int | tuple | str],
+                            x_new: np.ndarray, interp: BaseInterpolator) -> float:
         """Secondary method to actually compute and save model evaluations within the interpolator.
 
         !!! Note
@@ -636,7 +636,7 @@ class SparseGridSurrogate(ComponentSurrogate):
             with tempfile.NamedTemporaryFile(suffix='.dat', mode='w+b', delete=False) as y_fd:
                 pass
             y_ret = np.memmap(y_fd.name, dtype=x.dtype, mode='r+', shape=x.shape[:-1] + (self.ydim,))
-            res = ppool(delayed(run_batch)(alpha, beta, y_ret) for alpha, beta in index_set)
+            ppool(delayed(run_batch)(alpha, beta, y_ret) for alpha, beta in index_set)
             y = np.empty(y_ret.shape, dtype=x.dtype)
             y[:] = y_ret[:]
             del y_ret
@@ -669,7 +669,7 @@ class SparseGridSurrogate(ComponentSurrogate):
     # Override
     def hessian(self, x, training=False, index_set=None):
         """Need to override `super()` to allow passing in interpolation grids `xi` and `yi`."""
-        ax = np.atleast_1d(x)
+        x = np.atleast_1d(x)
         index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
 
         hess = np.zeros(x.shape[:-1] + (self.ydim, len(self.x_vars), len(self.x_vars)), dtype=x.dtype)
@@ -695,7 +695,7 @@ class SparseGridSurrogate(ComponentSurrogate):
         """
         interp = self.surrogates[str(alpha)][str(beta)]
         grid_sizes = interp.get_grid_sizes(beta)
-        coords = [np.arange(grid_sizes[n]) for n in range(interp.xdim())]
+        coords = [list(range(grid_sizes[n])) for n in range(interp.xdim())]
         xi = np.zeros((np.prod(grid_sizes), interp.xdim()), dtype=np.float32)
         yi = np.zeros((np.prod(grid_sizes), self.ydim), dtype=np.float32)
         for i, coord in enumerate(itertools.product(*coords)):
@@ -804,7 +804,7 @@ class SparseGridSurrogate(ComponentSurrogate):
         for beta_old_str in list(self.surrogates[str(alpha)].keys()):
             beta_old = ast.literal_eval(beta_old_str)
             if self.is_one_level_refinement(beta_old, beta):
-                idx_refine = int(np.nonzero(np.array(beta, dtype=int) - np.array(beta_old, dtype=int))[0])
+                idx_refine = int(np.nonzero(np.array(beta, dtype=int) - np.array(beta_old, dtype=int))[0][0])
                 refine_level = beta[idx_refine]
                 if refine_level > self.curr_max_beta[str(alpha)][idx_refine]:
                     # Generate next refinement grid and save (refine_tup = tuple(x_new_idx, x_new, interp))
