@@ -1,58 +1,73 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
-         <loc>https://eckelsjd.github.io/amisc/</loc>
-         <lastmod>2024-05-14</lastmod>
+         <loc>https://eckelsjd.github.io/amisc/changelog/</loc>
+         <lastmod>2024-08-29</lastmod>
          <changefreq>daily</changefreq>
     </url>
     <url>
-         <loc>https://eckelsjd.github.io/amisc/CONTRIBUTING/</loc>
-         <lastmod>2024-05-14</lastmod>
+         <loc>https://eckelsjd.github.io/amisc/contributing/</loc>
+         <lastmod>2024-08-29</lastmod>
+         <changefreq>daily</changefreq>
+    </url>
+    <url>
+         <loc>https://eckelsjd.github.io/amisc/coverage/</loc>
+         <lastmod>2024-08-29</lastmod>
          <changefreq>daily</changefreq>
     </url>
     <url>
          <loc>https://eckelsjd.github.io/amisc/how-to-guides/</loc>
-         <lastmod>2024-05-14</lastmod>
+         <lastmod>2024-08-29</lastmod>
+         <changefreq>daily</changefreq>
+    </url>
+    <url>
+         <loc>https://eckelsjd.github.io/amisc/start/</loc>
+         <lastmod>2024-08-29</lastmod>
          <changefreq>daily</changefreq>
     </url>
     <url>
          <loc>https://eckelsjd.github.io/amisc/theory/</loc>
-         <lastmod>2024-05-14</lastmod>
+         <lastmod>2024-08-29</lastmod>
          <changefreq>daily</changefreq>
     </url>
     <url>
          <loc>https://eckelsjd.github.io/amisc/tutorials/</loc>
-         <lastmod>2024-05-14</lastmod>
+         <lastmod>2024-08-29</lastmod>
          <changefreq>daily</changefreq>
     </url>
     <url>
-         <loc>https://eckelsjd.github.io/amisc/reference/components/</loc>
-         <lastmod>2024-05-14</lastmod>
+         <loc>https://eckelsjd.github.io/amisc/reference/</loc>
+         <lastmod>2024-08-29</lastmod>
          <changefreq>daily</changefreq>
     </url>
     <url>
-         <loc>https://eckelsjd.github.io/amisc/reference/interpolators/</loc>
-         <lastmod>2024-05-14</lastmod>
+         <loc>https://eckelsjd.github.io/amisc/reference/SUMMARY/</loc>
+         <lastmod>2024-08-29</lastmod>
          <changefreq>daily</changefreq>
     </url>
     <url>
-         <loc>https://eckelsjd.github.io/amisc/reference/overview/</loc>
-         <lastmod>2024-05-14</lastmod>
+         <loc>https://eckelsjd.github.io/amisc/reference/component/</loc>
+         <lastmod>2024-08-29</lastmod>
+         <changefreq>daily</changefreq>
+    </url>
+    <url>
+         <loc>https://eckelsjd.github.io/amisc/reference/interpolator/</loc>
+         <lastmod>2024-08-29</lastmod>
+         <changefreq>daily</changefreq>
+    </url>
+    <url>
+         <loc>https://eckelsjd.github.io/amisc/reference/rv/</loc>
+         <lastmod>2024-08-29</lastmod>
          <changefreq>daily</changefreq>
     </url>
     <url>
          <loc>https://eckelsjd.github.io/amisc/reference/system/</loc>
-         <lastmod>2024-05-14</lastmod>
+         <lastmod>2024-08-29</lastmod>
          <changefreq>daily</changefreq>
     </url>
     <url>
-         <loc>https://eckelsjd.github.io/amisc/reference/utilities/</loc>
-         <lastmod>2024-05-14</lastmod>
-         <changefreq>daily</changefreq>
-    </url>
-    <url>
-         <loc>https://eckelsjd.github.io/amisc/reference/variables/</loc>
-         <lastmod>2024-05-14</lastmod>
+         <loc>https://eckelsjd.github.io/amisc/reference/utils/</loc>
+         <lastmod>2024-08-29</lastmod>
          <changefreq>daily</changefreq>
     </url>
 </urlset>
