@@ -26,8 +26,8 @@ from sklearn.preprocessing import MaxAbsScaler
 
 from amisc import IndexSet, InterpResults, MiscTree
 from amisc.interpolator import BaseInterpolator, LagrangeInterpolator
-from amisc.rv import BaseRV
 from amisc.utils import get_logger
+from amisc.variable import Variable
 
 
 class ComponentSurrogate(ABC):
@@ -60,7 +60,7 @@ class ComponentSurrogate(ABC):
 
     :vartype index_set: IndexSet
     :vartype candidate_set: IndexSet
-    :vartype x_vars: list[BaseRV]
+    :vartype x_vars: list[Variable]
     :vartype ydim: int
     :vartype _model: callable[np.ndarray] -> dict
     :vartype _model_args: tuple
@@ -72,7 +72,7 @@ class ComponentSurrogate(ABC):
     :vartype misc_coeff: MiscTree
     """
 
-    def __init__(self, x_vars: list[BaseRV] | BaseRV, model: callable,
+    def __init__(self, x_vars: list[Variable] | Variable, model: callable,
                  multi_index: IndexSet = None,
                  truth_alpha: tuple = (), max_alpha: tuple = (), max_beta: tuple = (),
                  log_file: str | Path = None, executor: Executor = None,
@@ -389,7 +389,7 @@ class ComponentSurrogate(ABC):
         :param idx: the index of the input variable to update
         :param bds: the new bounds
         """
-        self.x_vars[int(idx)].update_bounds(*bds)
+        self.x_vars[int(idx)].update(domain=bds)
 
         # Update the bounds in all associated surrogates
         for alpha in self.surrogates:

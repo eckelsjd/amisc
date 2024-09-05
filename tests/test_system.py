@@ -9,8 +9,8 @@ from scipy.stats import gaussian_kde
 from uqtils import ax_default
 
 from amisc.examples.models import fire_sat_system
-from amisc.rv import UniformRV
 from amisc.system import ComponentSpec, SystemSurrogate
+from amisc.variable import Variable
 
 # TODO: Include a swap and insert component test
 
@@ -73,8 +73,8 @@ def test_system_refine(plots=False):
         return f1, f2
 
     f1, f2 = coupled_system()
-    exo_vars = [UniformRV(0, 1)]
-    coupling_vars = [UniformRV(0, 1), UniformRV(0, 1)]
+    exo_vars = [Variable(dist='U(0, 1)')]
+    coupling_vars = [Variable(dist='U(0, 1)'), Variable(dist='U(0, 1)')]
     comp1 = ComponentSpec(f1, name='Model1', exo_in=0, coupling_out=0)
     comp2 = ComponentSpec(f2, name='Model2', coupling_in=0, coupling_out=1)
     surr = SystemSurrogate([comp1, comp2], exo_vars, coupling_vars, init_surr=True)
@@ -160,8 +160,8 @@ def test_feedforward(plots=False):
         return f1, f2, f
 
     f1, f2, f = coupled_system()
-    x_in = UniformRV(0, 1)
-    y1, y2 = UniformRV(0, 1), UniformRV(0, 1)
+    x_in = Variable(dist='U(0, 1)')
+    y1, y2 = Variable(dist='U(0, 1)'), Variable(dist='U(0, 1)')
     comp1 = ComponentSpec(f1, exo_in=x_in, coupling_out=y1)
     comp2 = ComponentSpec(f2, coupling_in=y1, coupling_out=y2)
     surr = SystemSurrogate([comp1, comp2], x_in, [y1, y2], init_surr=False)
@@ -234,8 +234,8 @@ def test_system_surrogate(plots=False):
                           coupling_out=list(np.arange(Q1, Q1+Q2)))
     comp3 = ComponentSpec(f3, name='Plume', truth_alpha=alpha, exo_in=list(np.arange(0, D1)), max_alpha=5,
                           coupling_in={'Thruster': list(np.arange(0, Q2))}, coupling_out=Q1+Q2, max_beta=(3,)*(D1+Q2))
-    exo_vars = [UniformRV(0, 1) for i in range(D1+D2)]
-    coupling_vars = [UniformRV(0, 1) for i in range(Q1+Q2+1)]
+    exo_vars = [Variable(dist='U(0, 1)') for i in range(D1+D2)]
+    coupling_vars = [Variable(dist='U(0, 1)') for i in range(Q1+Q2+1)]
     surr = SystemSurrogate([comp1, comp2, comp3], exo_vars, coupling_vars, init_surr=False)
 
     # Test example
@@ -268,8 +268,8 @@ def test_fpi():
     f2 = lambda x: {'y': 3*x[..., 0:1]**2 + 4 * x[..., 1:2]**(-2)}
     comp1 = ComponentSpec(f1, exo_in=[0], coupling_in={'m2': [0]}, coupling_out=[0], max_beta=(5,), name='m1')
     comp2 = ComponentSpec(f2, exo_in=[0], coupling_in={'m1': [0]}, coupling_out=[1], max_beta=(5,), name='m2')
-    exo_vars = UniformRV(0, 4)
-    coupling_vars = [UniformRV(1, 10), UniformRV(1, 10)]
+    exo_vars = Variable(dist='U(0, 4)')
+    coupling_vars = [Variable(dist='U(1, 10)'), Variable(dist='U(1, 10)')]
     surr = SystemSurrogate([comp1, comp2], exo_vars, coupling_vars, init_surr=False)
 
     # Test on random x against scipy.fsolve
