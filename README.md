@@ -6,7 +6,7 @@
 ![build](https://img.shields.io/github/actions/workflow/status/eckelsjd/amisc/deploy.yml?logo=github)
 ![docs](https://img.shields.io/github/actions/workflow/status/eckelsjd/amisc/docs.yml?logo=materialformkdocs&logoColor=%2523cccccc&label=docs)
 ![tests](https://img.shields.io/github/actions/workflow/status/eckelsjd/amisc/tests.yml?logo=github&logoColor=%2523cccccc&label=tests)
-![Code Coverage](https://img.shields.io/badge/coverage-81%25-yellowgreen?logo=codecov)
+![Code Coverage](https://img.shields.io/badge/coverage-82%25-yellowgreen?logo=codecov)
 [![Algorithm description](https://img.shields.io/badge/DOI-10.1002/nme.6958-blue)](https://doi.org/10.1002/nme.6958)
 
 Efficient framework for building surrogates of multidisciplinary systems using the adaptive multi-index stochastic collocation ([AMISC](https://onlinelibrary.wiley.com/doi/full/10.1002/nme.6958))  technique.
@@ -28,7 +28,7 @@ pdm add -e ./amisc --dev
 import numpy as np
 
 from amisc.system import SystemSurrogate, ComponentSpec
-from amisc.rv import UniformRV
+from amisc.variable import Variable
 
 def fun1(x):
     return dict(y=x * np.sin(np.pi * x))
@@ -36,9 +36,10 @@ def fun1(x):
 def fun2(x):
     return dict(y=1 / (1 + 25 * x ** 2))
 
-x = UniformRV(0, 1, 'x')
-y = UniformRV(0, 1, 'y')
-z = UniformRV(0, 1, 'z')
+dist = 'Uniform(0, 1)'
+x = Variable(dist)
+y = Variable(dist)
+z = Variable(dist)
 model1 = ComponentSpec(fun1, exo_in=x, coupling_out=y)
 model2 = ComponentSpec(fun2, coupling_in=y, coupling_out=z)
 

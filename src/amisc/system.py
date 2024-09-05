@@ -53,8 +53,8 @@ from uqtils import ax_default
 
 from amisc import IndexSet, IndicesRV
 from amisc.component import AnalyticalSurrogate, ComponentSurrogate, SparseGridSurrogate
-from amisc.rv import BaseRV
 from amisc.utils import get_logger
+from amisc.variable import Variable
 
 
 class ComponentSpec(UserDict):
@@ -143,8 +143,8 @@ class SystemSurrogate:
     :ivar executor: manages parallel execution for the system
     :ivar graph: the internal graph data structure of the MD system
 
-    :vartype exo_vars: list[BaseRV]
-    :vartype coupling_vars: list[BaseRV]
+    :vartype exo_vars: list[Variable]
+    :vartype coupling_vars: list[Variable]
     :vartype refine_level: int
     :vartype build_metrics: dict
     :vartype root_dir: str
@@ -153,8 +153,8 @@ class SystemSurrogate:
     :vartype graph: nx.DiGraph
     """
 
-    def __init__(self, components: list[ComponentSpec] | ComponentSpec, exo_vars: list[BaseRV] | BaseRV,
-                 coupling_vars: list[BaseRV] | BaseRV, est_bds: int = 0, save_dir: str | Path = None,
+    def __init__(self, components: list[ComponentSpec] | ComponentSpec, exo_vars: list[Variable] | Variable,
+                 coupling_vars: list[Variable] | Variable, est_bds: int = 0, save_dir: str | Path = None,
                  executor: Executor = None, stdout: bool = True, init_surr: bool = True, logger_name: str = None):
         """Construct the MD system surrogate.
 
@@ -257,7 +257,7 @@ class SystemSurrogate:
 
         # Get exogenous input indices (might already be a list of ints, otherwise convert list of vars to indices)
         if len(exo_in) > 0:
-            if isinstance(exo_in[0], str | BaseRV):
+            if isinstance(exo_in[0], str | Variable):
                 exo_in = [self.exo_vars.index(var) for var in exo_in]
 
         # Get global coupling output indices for all nodes (convert list of vars to list of indices if necessary)
@@ -268,7 +268,7 @@ class SystemSurrogate:
             coupling_out = [] if coupling_out is None else coupling_out
             coupling_out = [coupling_out] if not isinstance(coupling_out, list) else coupling_out
             global_out[node] = [self.coupling_vars.index(var) for var in coupling_out] if isinstance(
-                coupling_out[0], str | BaseRV) else coupling_out
+                coupling_out[0], str | Variable) else coupling_out
 
         # Refactor coupling inputs into both local and global index formats
         local_in = dict()  # e.g. {'Cathode': [0, 1, 2], 'Thruster': [0,], etc...}
@@ -277,7 +277,7 @@ class SystemSurrogate:
             # If already a dict, get local connection indices from each neighbor
             for node, connections in coupling_in.items():
                 conn_list = [connections] if not isinstance(connections, list) else connections
-                if isinstance(conn_list[0], str | BaseRV):
+                if isinstance(conn_list[0], str | Variable):
                     global_ind = [self.coupling_vars.index(var) for var in conn_list]
                     local_in[node] = sorted([global_out[node].index(i) for i in global_ind])
                 else:
@@ -290,7 +290,7 @@ class SystemSurrogate:
         else:
             # Otherwise, convert a list of global indices or vars into a dict of local indices
             if len(coupling_in) > 0:
-                if isinstance(coupling_in[0], str | BaseRV):
+                if isinstance(coupling_in[0], str | Variable):
                     coupling_in = [self.coupling_vars.index(var) for var in coupling_in]
             global_in = sorted(coupling_in)
             for node, node_obj in nodes.items():
@@ -347,8 +347,8 @@ class SystemSurrogate:
                           model_args=component.get('model_args'), model_kwargs=kwargs)
         return connections, surr
 
-    def swap_component(self, component: ComponentSpec, exo_add: BaseRV | list[BaseRV] = None,
-                       exo_remove: IndicesRV = None, qoi_add: BaseRV | list[BaseRV] = None,
+    def swap_component(self, component: ComponentSpec, exo_add: Variable | list[Variable] = None,
+                       exo_remove: IndicesRV = None, qoi_add: Variable | list[Variable] = None,
                        qoi_remove: IndicesRV = None):
         """Swap a new component into the system, updating all connections/inputs.
 
@@ -367,7 +367,7 @@ class SystemSurrogate:
             exo_remove = []
         exo_remove = [exo_remove] if not isinstance(exo_remove, list) else exo_remove
         exo_remove = [self.exo_vars.index(var) for var in exo_remove] if exo_remove and isinstance(
-            exo_remove[0], str | BaseRV) else exo_remove
+            exo_remove[0], str | Variable) else exo_remove
 
         exo_remove = sorted(exo_remove)
         for j, exo_var_idx in enumerate(exo_remove):
@@ -443,8 +443,8 @@ class SystemSurrogate:
                                                                 'global_out': indices['global_out'],
                                                                 'surrogate': surr, 'is_computed': False}})
 
-    def insert_component(self, component: ComponentSpec, exo_add: BaseRV | list[BaseRV] = None,
-                         qoi_add: BaseRV | list[BaseRV] = None):
+    def insert_component(self, component: ComponentSpec, exo_add: Variable | list[Variable] = None,
+                         qoi_add: Variable | list[Variable] = None):
         """Insert a new component into the system.
 
         :param component: specs of new component model
@@ -579,7 +579,7 @@ class SystemSurrogate:
                         ax = t_ax if Nqoi == 1 else t_ax[i]
                         ax.clear(); ax.grid(); ax.set_yscale('log')
                         ax.plot(test_stats[:, 1, i], '-k')
-                        ax.set_title(self.coupling_vars[qoi_ind[i]].to_tex(units=True))
+                        ax.set_title(self.coupling_vars[qoi_ind[i]].get_tex(units=True))
                         ax_default(ax, 'Iteration', r'Relative $L_2$ error', legend=False)
                     t_fig.set_size_inches(3.5*Nqoi, 3.5)
                     t_fig.tight_layout()
@@ -673,7 +673,7 @@ class SystemSurrogate:
             qoi_ind = list(np.arange(0, len(self.coupling_vars)))
         qoi_ind = [qoi_ind] if not isinstance(qoi_ind, list) else qoi_ind
         qoi_ind = [self.coupling_vars.index(var) for var in qoi_ind] if qoi_ind and isinstance(
-            qoi_ind[0], str | BaseRV) else qoi_ind
+            qoi_ind[0], str | Variable) else qoi_ind
 
         return qoi_ind
 
@@ -853,7 +853,7 @@ class SystemSurrogate:
             # Handle FPI for SCCs with more than one component
             else:
                 # Set the initial guess for all coupling vars (middle of domain)
-                coupling_bds = [rv.bounds() for rv in self.coupling_vars]
+                coupling_bds = [rv.get_domain() for rv in self.coupling_vars]
                 x_couple = np.array([(bds[0] + bds[1]) / 2 for bds in coupling_bds]).astype(x.dtype)
                 x_couple = np.broadcast_to(x_couple, x.shape[:-1] + x_couple.shape).copy()
 
@@ -985,10 +985,10 @@ class SystemSurrogate:
         """
         offset = buffer * (bds[1] - bds[0])
         offset_bds = (bds[0] - offset, bds[1] + offset)
-        coupling_bds = [rv.bounds() for rv in self.coupling_vars]
+        coupling_bds = [rv.get_domain() for rv in self.coupling_vars]
         new_bds = offset_bds if init else (min(coupling_bds[global_idx][0], offset_bds[0]),
                                            max(coupling_bds[global_idx][1], offset_bds[1]))
-        self.coupling_vars[global_idx].update_bounds(*new_bds)
+        self.coupling_vars[global_idx].update(domain=new_bds)
 
         # Iterate over all components and update internal coupling variable bounds
         for node_name, node_obj in self.graph.nodes.items():
@@ -1019,12 +1019,12 @@ class SystemSurrogate:
         x = np.empty((*size, len(x_vars)))
         for i, var in enumerate(x_vars):
             # Set a constant value for this variable
-            if var.param_type in constants or var in constants:
+            if var.category in constants or var in constants:
                 x[..., i] = nominal.get(var, var.nominal)  # Defaults to variable's nominal value if not specified
 
             # Sample from this variable's pdf or randomly within its domain bounds (reject if outside bounds)
             else:
-                lb, ub = var.bounds()
+                lb, ub = var.get_domain()
                 x_sample = var.sample(size, nominal=nominal.get(var, None)) if use_pdf \
                     else var.sample_domain(size)
                 good_idx = (x_sample < ub) & (x_sample > lb)
@@ -1076,14 +1076,14 @@ class SystemSurrogate:
             nominal = dict()
         slice_idx = list(np.arange(0, min(3, len(self.exo_vars)))) if slice_idx is None else slice_idx
         qoi_idx = list(np.arange(0, min(3, len(self.coupling_vars)))) if qoi_idx is None else qoi_idx
-        if isinstance(slice_idx[0], str | BaseRV):
+        if isinstance(slice_idx[0], str | Variable):
             slice_idx = [self.exo_vars.index(var) for var in slice_idx]
-        if isinstance(qoi_idx[0], str | BaseRV):
+        if isinstance(qoi_idx[0], str | Variable):
             qoi_idx = [self.coupling_vars.index(var) for var in qoi_idx]
 
-        exo_bds = [var.bounds() for var in self.exo_vars]
-        xlabels = [self.exo_vars[idx].to_tex(units=True) for idx in slice_idx]
-        ylabels = [self.coupling_vars[idx].to_tex(units=True) for idx in qoi_idx]
+        exo_bds = [var.get_domain() for var in self.exo_vars]
+        xlabels = [self.exo_vars[idx].get_tex(units=True) for idx in slice_idx]
+        ylabels = [self.coupling_vars[idx].get_tex(units=True) for idx in qoi_idx]
 
         # Construct slice model inputs (if not provided)
         if xs is None:

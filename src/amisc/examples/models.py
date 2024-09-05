@@ -4,8 +4,8 @@ import uuid
 from pathlib import Path
 
 import numpy as np
+import yaml
 
-from amisc.rv import NormalRV, UniformRV
 from amisc.system import ComponentSpec, SystemSurrogate
 
 
@@ -226,13 +226,10 @@ def fire_sat_system(save_dir=None):
                              exo_in=[0, 3, 4, 5, 6, 7], coupling_in={'Orbit': [0, 3], 'Power': [0, 1]},
                              coupling_out=[8, 9])
 
-    exo_vars = [NormalRV(18e6, 1e6, 'H'), NormalRV(235e3, 10e3, '\u03D5'), NormalRV(1000, 50, 'Po'),
-                NormalRV(1400, 20, 'Fs'), NormalRV(2, 0.4, 'Lsp'), NormalRV(0.5, 0.1, 'q'),
-                NormalRV(2, 0.4, 'La'), NormalRV(1, 0.2, 'Cd')]
-    coupling_vars = [UniformRV(2000, 6000, 'Vsat'), UniformRV(20000, 60000, 'To'), UniformRV(1000, 5000, 'Te'),
-                     UniformRV(0, 4, 'Slew'), UniformRV(0, 12000, 'Imin'), UniformRV(0, 12000, 'Imax'),
-                     UniformRV(0, 10000, 'Ptot'), UniformRV(0, 50, 'Asa'), UniformRV(0, 100, 'Pat'),
-                     UniformRV(0, 5, 'tau_tot')]
+    with open(Path(__file__).parent / 'fire-sat.yml', 'r') as fd:
+        data = yaml.load(fd, yaml.Loader)
+        exo_vars = data['exo']
+        coupling_vars = data['coupling']
     surr = SystemSurrogate([orbit, power, attitude], exo_vars, coupling_vars, est_bds=500, save_dir=save_dir)
 
     return surr

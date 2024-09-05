@@ -4,12 +4,12 @@ from uqtils import approx_hess, approx_jac, ax_default
 
 from amisc.examples.models import nonlinear_wave, tanh_func
 from amisc.interpolator import LagrangeInterpolator
-from amisc.rv import UniformRV
+from amisc.variable import Variable
 
 
 def test_tensor_product_1d(plots=False):
     beta = (3,)
-    x_var = UniformRV(0, 1)
+    x_var = Variable(dist='U(0, 1)')
     x_grid = np.linspace(0, 1, 100).reshape((100, 1))
     y_grid = tanh_func(x_grid)['y']
     interp = LagrangeInterpolator(beta, x_var, model=tanh_func)
@@ -45,7 +45,7 @@ def test_tensor_product_1d(plots=False):
 def test_tensor_product_2d(plots=False):
     bb_2d_func = lambda x: nonlinear_wave(x, env_var=0.2**2, wave_amp=0.3)
     beta = (3, 3)
-    x_vars = [UniformRV(0, 1), UniformRV(0, 1)]
+    x_vars = [Variable(dist='U(0, 1)'), Variable(dist='U(0, 1)')]
     N = 50
     x_grid = np.linspace(0, 1, N)
     xg, yg = np.meshgrid(x_grid, x_grid)
@@ -119,7 +119,7 @@ def test_grad():
                         np.sin(theta[..., 2:3]) * theta[..., 0:1])
     fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
 
-    x1, x2, x3 = UniformRV(-2, 1), UniformRV(-1, 2), UniformRV(-np.pi, np.pi)
+    x1, x2, x3 = Variable(dist='U(-2, 1)'), Variable('U(-1, 2)'), Variable('U(-3.14, 3.14)')
     interp = LagrangeInterpolator((3, 2, 4), [x1, x2, x3], model=lambda x: dict(y=fun(x)))
     interp.set_yi()
 
@@ -146,7 +146,7 @@ def test_hessian():
         theta[..., 2:3]) * theta[..., 0:1]
     fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
 
-    x1, x2, x3 = UniformRV(-2, 1), UniformRV(-1, 2), UniformRV(-np.pi, np.pi)
+    x1, x2, x3 = Variable(dist='U(-2, 1)'), Variable('U(-1, 2)'), Variable('U(-3.14, 3.14)')
     interp = LagrangeInterpolator((3, 4, 4), [x1, x2, x3], model=lambda x: dict(y=fun(x)))
     interp.set_yi()
 

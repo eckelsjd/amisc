@@ -5,7 +5,7 @@ import numpy as np
 from uqtils import approx_hess, approx_jac, ax_default
 
 from amisc.component import SparseGridSurrogate
-from amisc.rv import UniformRV
+from amisc.variable import Variable
 
 
 def test_sparse_grid(plots=False):
@@ -19,7 +19,7 @@ def test_sparse_grid(plots=False):
     # Construct MISC surrogate from an index set
     Ik = [((0,), (0,)), ((0,), (1,)), ((1,), (0,)), ((2,), (0,)), ((1,), (1,)), ((0,), (2,)), ((1,), (2,)),
           ((2,), (1,)), ((2,), (2,))]
-    x_vars = UniformRV(-1, 1)
+    x_vars = Variable(dist='U(-1, 1)')
     truth_alpha = (15,)
     comp = SparseGridSurrogate(x_vars, model, multi_index=Ik, truth_alpha=truth_alpha)
     N = 100
@@ -65,7 +65,7 @@ def test_comp_grad():
     f2 = lambda theta: np.exp(theta[..., 1:2]) * theta[..., 0:1] + np.sin(theta[..., 2:3]) * theta[..., 1:2]
     fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
 
-    x1, x2, x3 = UniformRV(0, 2), UniformRV(-1, 1), UniformRV(-np.pi, np.pi)
+    x1, x2, x3 = Variable(dist='U(0, 2)'), Variable(dist='U(-1, 1)'), Variable(dist='U(-3.14, 3.14)')
     max_beta = (4, 4, 5)
     Ik = []
     indices = [np.arange(beta) for beta in max_beta]
@@ -87,7 +87,7 @@ def test_comp_hessian():
     f2 = lambda theta: np.exp(theta[..., 1:2]) * theta[..., 0:1] + np.sin(theta[..., 2:3]) * theta[..., 1:2]
     fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
 
-    x1, x2, x3 = UniformRV(0, 2), UniformRV(-1, 1), UniformRV(-np.pi, np.pi)
+    x1, x2, x3 = Variable(dist='U(0, 2)'), Variable(dist='U(-1, 1)'), Variable(dist='U(-3.14, 3.14)')
     max_beta = (4, 4, 5)
     Ik = []
     indices = [np.arange(beta) for beta in max_beta]

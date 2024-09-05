@@ -1,0 +1,22 @@
+exo:
+  !Variable
+  - var_id: rw
+    dist: U(0.05, 0.15)
+  - var_id: r
+    dist: U(100, 50000)
+  - var_id: Tu
+    dist: U(63070, 115600)
+  - var_id: Hu
+    dist: U(990, 1110)
+  - var_id: Tl
+    dist: U(63.1, 116)
+  - var_id: Hl
+    dist: U(700, 820)
+  - var_id: L
+    dist: U(1120, 1680)
+  - var_id: Kw
+    dist: U(9855, 12045)
+coupling:
+  !Variable
+  - var_id: vdot
+    dist: U(0, 1000)

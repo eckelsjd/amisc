@@ -30,8 +30,8 @@ def check_pytest_status():
     """Fail if there are some new source code changes that have not been tested yet, or if latest tests failed."""
     # Get list of all added/modified/renamed/deleted/untracked files, both staged or unstaged from src/ and test/
     changed_files = [shlex.split(line)[-1] for line in run_git_command('git status --porcelain').stdout.splitlines()]
-    check_files = [(f, (PROJECT_DIR / f).lstat().st_mtime) for f in changed_files if f.startswith('src/') or
-                   f.startswith('tests/') and Path(f).exists()]
+    check_files = [(f, (PROJECT_DIR / f).lstat().st_mtime) for f in changed_files if Path(f).exists() and (
+            f.startswith('src/') or f.startswith('tests/'))]
 
     # If there are no changes in src/ or test/ then there is no need to check pytest
     if len(check_files) == 0:

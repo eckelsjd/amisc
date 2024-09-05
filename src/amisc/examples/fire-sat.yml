@@ -1,0 +1,40 @@
+exo:
+  !Variable
+  - var_id: H
+    dist: N(18e6, 1e6)
+  - var_id: Φ
+    dist: N(235e3, 10e3)
+  - var_id: Po
+    dist: N(1000, 50)
+  - var_id: Fs
+    dist: N(1400, 20)
+  - var_id: Lsp
+    dist: N(2, 0.4)
+  - var_id: q
+    dist: N(0.5, 0.1)
+  - var_id: La
+    dist: N(2, 0.4)
+  - var_id: Cd
+    dist: N(1, 0.2)
+coupling:
+  !Variable
+  - var_id: Vsat
+    dist: U(2000, 6000)
+  - var_id: To
+    dist: U(20000, 60000)
+  - var_id: Te
+    dist: U(1000, 5000)
+  - var_id: Slew
+    dist: U(0, 4)
+  - var_id: Imin
+    dist: U(0, 12000)
+  - var_id: Imax
+    dist: U(0, 12000)
+  - var_id: Ptot
+    dist: U(0, 10000)
+  - var_id: Asa
+    dist: U(0, 50)
+  - var_id: Pat
+    dist: U(0, 100)
+  - var_id: tau_tot
+    dist: U(0, 5)

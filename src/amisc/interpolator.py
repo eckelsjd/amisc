@@ -15,8 +15,8 @@ from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MaxAbsScaler
 
-from amisc.rv import BaseRV
 from amisc.utils import get_logger
+from amisc.variable import Variable
 
 
 class BaseInterpolator(ABC):
@@ -43,7 +43,7 @@ class BaseInterpolator(ABC):
     :ivar logger: a logging utility reference
 
     :vartype beta: tuple[int, ...]
-    :vartype x_vars: list[BaseRV]
+    :vartype x_vars: list[Variable]
     :vartype xi: np.ndarray
     :vartype yi: np.ndarray
     :vartype _model: callable[np.ndarray] -> dict
@@ -54,7 +54,7 @@ class BaseInterpolator(ABC):
     :vartype logger: logging.Logger
     """
 
-    def __init__(self, beta: tuple, x_vars: BaseRV | list[BaseRV], xi=None, yi=None,
+    def __init__(self, beta: tuple, x_vars: Variable | list[Variable], xi=None, yi=None,
                  model=None, model_args=(), model_kwargs=None):
         """Construct the interpolator.
 
@@ -75,7 +75,7 @@ class BaseInterpolator(ABC):
         self.xi = xi                                        # Interpolation points
         self.yi = yi                                        # Function values at interpolation points
         self.beta = beta                                    # Refinement level indices
-        self.x_vars = x_vars                                # BaseRV() objects for each input
+        self.x_vars = x_vars                                # Variable objects for each input
         self.model_cost = None                              # Total cpu time to evaluate model once (s)
 
     def update_input_bds(self, idx: int, bds: tuple):
@@ -84,7 +84,7 @@ class BaseInterpolator(ABC):
         :param idx: the index of the input variable to update
         :param bds: the new bounds for the variable
         """
-        self.x_vars[idx].update_bounds(*bds)
+        self.x_vars[idx].update(domain=bds)
 
     def xdim(self):
         """Get the dimension of the input domain."""
@@ -259,7 +259,7 @@ class LagrangeInterpolator(BaseInterpolator):
     :vartype reduced: bool
     """
 
-    def __init__(self, beta: tuple, x_vars: BaseRV | list[BaseRV], init_grids=True, reduced=False, **kwargs):
+    def __init__(self, beta: tuple, x_vars: Variable | list[Variable], init_grids=True, reduced=False, **kwargs):
         """Initialize a Lagrange tensor-product grid interpolator.
 
         :param beta: refinement level indices for each input dimension
@@ -276,12 +276,12 @@ class LagrangeInterpolator(BaseInterpolator):
         if init_grids:
             # Construct 1d univariate Leja sequences in each dimension
             grid_sizes = self.get_grid_sizes(self.beta)
-            self.x_grids = [self.leja_1d(grid_sizes[n], self.x_vars[n].bounds(),
+            self.x_grids = [self.leja_1d(grid_sizes[n], self.x_vars[n].get_domain(),
                                          wt_fcn=self.x_vars[n].pdf).astype(np.float32) for n in range(self.xdim())]
 
             for n in range(self.xdim()):
                 Nx = grid_sizes[n]
-                bds = self.x_vars[n].bounds()
+                bds = self.x_vars[n].get_domain()
                 grid = self.x_grids[n]
                 C = (bds[1] - bds[0]) / 4.0  # Interval capacity (see Berrut and Trefethen 2004)
                 xj = grid.reshape((Nx, 1))
@@ -328,7 +328,7 @@ class LagrangeInterpolator(BaseInterpolator):
             # Add points to leja grid in this dimension
             interp.x_grids = copy.deepcopy(self.x_grids)
             xi = copy.deepcopy(x_refine) if x_refine is not None else self.leja_1d(num_new_pts,
-                                                                                   interp.x_vars[dim_refine].bounds(),
+                                                                                   interp.x_vars[dim_refine].get_domain(),
                                                                                    z_pts=interp.x_grids[dim_refine],
                                                                                    wt_fcn=interp.x_vars[dim_refine].pdf)
             interp.x_grids[dim_refine] = xi.astype(np.float32)
@@ -340,7 +340,7 @@ class LagrangeInterpolator(BaseInterpolator):
             old_wts = copy.deepcopy(self.weights[dim_refine])
             new_wts = np.zeros(Nx_new, dtype=np.float32)
             new_wts[:Nx_old] = old_wts
-            bds = interp.x_vars[dim_refine].bounds()
+            bds = interp.x_vars[dim_refine].get_domain()
             C = (bds[1] - bds[0]) / 4.0  # Interval capacity
             xi = interp.x_grids[dim_refine]
             for j in range(Nx_old, Nx_new):

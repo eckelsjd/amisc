@@ -3,14 +3,14 @@
 
 def single_component():
     # --8<-- [start:single]
-    from amisc.rv import UniformRV
     from amisc.system import ComponentSpec, SystemSurrogate
+    from amisc.variable import Variable
 
     def fun(x):
         return dict(y=x ** 2)
 
-    x = UniformRV(-1, 1)
-    y = UniformRV(0, 1)
+    x = Variable(dist='U(-1, 1)')
+    y = Variable(dist='U(0, 1)')
     component = ComponentSpec(fun)
     system = SystemSurrogate([component], x, y)
 
@@ -23,8 +23,8 @@ def simple():
     # --8<-- [start:simple]
     import numpy as np
 
-    from amisc.rv import UniformRV
     from amisc.system import ComponentSpec, SystemSurrogate
+    from amisc.variable import Variable
 
     def fun1(x):
         return dict(y=x * np.sin(np.pi * x))
@@ -32,9 +32,9 @@ def simple():
     def fun2(x):
         return dict(y=1 / (1 + 25 * x ** 2))
 
-    x = UniformRV(0, 1, 'x')
-    y = UniformRV(0, 1, 'y')
-    z = UniformRV(0, 1, 'z')
+    x = Variable(dist='U(0, 1)')
+    y = Variable(dist='U(0, 1)')
+    z = Variable(dist='U(0, 1)')
     model1 = ComponentSpec(fun1, exo_in=x, coupling_out=y)
     model2 = ComponentSpec(fun2, coupling_in=y, coupling_out=z)
 

@@ -27,8 +27,8 @@ Here is a class diagram summary of this workflow:
 classDiagram
     namespace Core {
         class SystemSurrogate {
-          +list[BaseRV] exo_vars
-          +list[BaseRV] coupling_vars
+          +list[Variable] exo_vars
+          +list[Variable] coupling_vars
           +int refine_level
           +fit()
           +predict(x)
@@ -39,7 +39,7 @@ classDiagram
           <<abstract>>
           +IndexSet index_set
           +IndexSet candidate_set
-          +list[BaseRV] x_vars
+          +list[Variable] x_vars
           +dict[str: BaseInterpolator] surrogates
           +dict[str: float] misc_coeff
           +predict(x)
@@ -50,7 +50,7 @@ classDiagram
         class BaseInterpolator {
           <<abstract>>
           +tuple beta
-          +list[BaseRV] x_vars
+          +list[Variable] x_vars
           +np.ndarray xi
           +np.ndarray yi
           +set_yi()
@@ -70,17 +70,16 @@ classDiagram
       +get_grid_sizes()
       +leja_1d()
     }
-    class BaseRV {
-      <<abstract>>
-      +tuple bounds
+    class Variable {
+      +str var_id
+      +tuple domain
       +str units
+      +str dist
       +float nominal
       +pdf(x)
       +sample(size)
-    }
-    class UniformRV {
-      +str type
-      +get_uniform_bounds(nominal)
+      +normalize()
+      +compress()
     }
     SystemSurrogate o-- "1..n" ComponentSurrogate
     ComponentSurrogate o-- "1..n" BaseInterpolator
@@ -88,24 +87,28 @@ classDiagram
     ComponentSurrogate <|-- SparseGridSurrogate
     BaseInterpolator <|-- LagrangeInterpolator
     SparseGridSurrogate ..> LagrangeInterpolator
-    BaseRV <|-- UniformRV
+    Variable
 ```
 Note how the `SystemSurrogate` aggregates the `ComponentSurrogate`, which aggregates the `BaseInterpolator`. In other
 words, interpolators can act independently of components, and components can act independently of systems. All three
-make use of the random variables (these connections and some RVs are not shown for visual clarity). Currently, the only
+make use of the `Variable` objects (these connections are not shown for visual clarity). Currently, the only
 underlying surrogate method that is implemented here is Lagrange polynomial interpolation (i.e. the
 `LagrangeInterpolator`). If one wanted to use neural networks instead, the only change required is a new
 implementation of `BaseInterpolator`.
 """
 import numpy as np
+import yaml
 
 from amisc.interpolator import BaseInterpolator
-from amisc.rv import BaseRV
+from amisc.variable import Variable
 
 __version__ = "0.3.0"
+
+yaml.add_representer(Variable, Variable._yaml_representer)
+yaml.add_constructor(Variable.yaml_tag, Variable._yaml_constructor)
 
 # Custom types that are used frequently
 IndexSet = list[tuple[tuple, tuple]]
 MiscTree = dict[str: dict[str: float | BaseInterpolator]]
 InterpResults = BaseInterpolator | tuple[list[int | tuple | str], np.ndarray, BaseInterpolator]
-IndicesRV = list[int | str | BaseRV] | int | str | BaseRV
+IndicesRV = list[int | str | Variable] | int | str | Variable
