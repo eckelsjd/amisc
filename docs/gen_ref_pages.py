@@ -70,7 +70,7 @@ for path in sorted(src.rglob("*.py")):
         if python_parts[-1] == 'interpolator':
             fd.write(f'    options:\n')
             fd.write(f'      filters: [""]\n')
-        if python_parts[-1] == 'component':
+        if python_parts[-1] in ['component', 'variable']:
             fd.write(f'    options:\n')
             fd.write(f'      members_order: source\n')
     fd.close()

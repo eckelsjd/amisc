@@ -3,14 +3,14 @@ import numpy as np
 import yaml
 
 from amisc.utils import relative_error
-from amisc.variable import Variable
+from amisc.variable import Variable, VariableList
 
 
 def test_load_and_dump_variables(tmp_path):
     variables = [Variable(var_id='a', description='Altitude', units='m', dist='U(0, 1)'),
                  Variable(var_id=u'Φ', description='Base width', units='m', dist='N(0, 1)'),
                  Variable(var_id='p', description='Pressure', units='Pa', domain=(1e6, 2e6),
-                          field={'compress_method': 'SVD', 'interp_args': {'kernel': 'gaussian', 'neighbors': 10},
+                          field={'compress_method': 'svd', 'interp_args': {'kernel': 'gaussian', 'neighbors': 10},
                                  'compress_args': {'rank': 10, 'energy_tol': 0.95}})
                  ]
     with open(tmp_path / 'variables.yml', 'w') as fd:
@@ -72,14 +72,14 @@ def test_many_norms():
 
 def test_nominal_and_domain():
     variable = Variable(dist='U(1, 10)', norm='log10')
-    nominal, norm_nominal = variable.get_nominal(norm=False), variable.get_nominal(norm=True)
-    bds, norm_bds = variable.get_domain(norm=False), variable.get_domain(norm=True)
+    nominal, norm_nominal = variable.get_nominal(), variable.get_nominal(transform=True)
+    bds, norm_bds = variable.get_domain(), variable.get_domain(transform=True)
     assert nominal == (10 + 1)/2 and norm_nominal == (0 + 1)/2
     assert bds == (1, 10) and norm_bds == (0, 1)
 
     variable = Variable(dist='N(5, 1)', norm='minmax')
-    nominal, norm_nominal = variable.get_nominal(norm=False), variable.get_nominal(norm=True)
-    bds, norm_bds = variable.get_domain(norm=False), variable.get_domain(norm=True)
+    nominal, norm_nominal = variable.get_nominal(), variable.get_nominal(transform=True)
+    bds, norm_bds = variable.get_domain(), variable.get_domain(transform=True)
     assert nominal == 5 and norm_nominal == 0.5
     assert bds == (2, 8) and norm_bds == (0, 1)
 
@@ -87,9 +87,11 @@ def test_nominal_and_domain():
 def test_compression_1d(tmp_path):
     """Test svd compression for a single-input, single-output, 1d field quantity."""
     svd_file = tmp_path / 'pressure_svd.h5'
+    with h5py.File(svd_file, 'w'):
+        pass  # Make sure the file exists to pass data validation
     A = Variable(var_id='A', dist='U(-5, 5)')
-    p = Variable(var_id='p', field={'compress_method': 'SVD', 'compress_datapath': str(svd_file.resolve()),
-                                    'compress_args': {'energy_tol': 0.99}})
+    p = Variable(var_id='p', field={'compress_method': 'svd', 'compress_datapath': str(svd_file.resolve()),
+                                    'compress_kwargs': {'energy_tol': 0.99}})
     def model(inputs, coords):
         amp = inputs['A']
         return {'p': {'coord': coords, 'p': amp[..., np.newaxis] * np.tanh(np.squeeze(coords))}}
@@ -103,10 +105,10 @@ def test_compression_1d(tmp_path):
     data_matrix = data_matrix[:, ~nan_idx]
     u, s, vt = np.linalg.svd(data_matrix)
     energy_frac = np.cumsum(s ** 2 / np.sum(s ** 2))
-    if energy_tol := p.field['compress_args'].get('energy_tol'):
+    if energy_tol := p.field['compress_kwargs'].get('energy_tol'):
         idx = int(np.where(energy_frac >= energy_tol)[0][0])
         rank = idx + 1
-    elif rank := p.field['compress_args'].get('rank'):
+    elif rank := p.field['compress_kwargs'].get('rank'):
         energy_tol = energy_frac[rank - 1]
     else:
         raise ValueError(f'Must specify either energy_tol or rank for SVD compression for variable "{p}".')
@@ -154,9 +156,9 @@ def test_uniform_dist():
 
     # Make sure a transformed Uniform variable works
     v = Variable(dist='Uniform(1e-8, 1e-2)', norm='log10')
-    norm_bds = v.get_domain(norm=True)
+    norm_bds = v.get_domain(transform=True)
     unnorm_bds = v.denormalize(norm_bds)
-    samples_norm = v.sample(shape, norm=True)
+    samples_norm = v.sample(shape, transform=True)
     samples_unnorm = v.denormalize(samples_norm)
     assert np.all(np.logical_and(norm_bds[0] < samples_norm, samples_norm < norm_bds[1]))
     assert np.all(np.logical_and(unnorm_bds[0] < samples_unnorm, samples_unnorm < unnorm_bds[1]))
@@ -177,9 +179,9 @@ def test_normal_dist():
 
         # Normal distribution with transform
         v.update(norm='linear(2, 2)')
-        samples = v.sample(shape, norm=True)
-        x = v.denormalize(np.linspace(*v.get_domain(norm=True), 1000))
-        pdf = v.pdf(x, norm=True)
+        samples = v.sample(shape, transform=True)
+        x = v.denormalize(np.linspace(*v.get_domain(transform=True), 1000))
+        pdf = v.pdf(x, transform=True)
         assert relative_error(np.mean(samples), v.normalize(true_means[i])) < 0.05
         assert relative_error(v.normalize(x[np.argmax(pdf)]), v.normalize(true_means[i])) < 0.05
 
@@ -203,7 +205,7 @@ def test_relative_and_tolerance_dist():
 def test_no_dist():
     shape = (10, 2)
     nominals = [-5.2, 1, 2.7, 14.73, 100]
-    v = Variable()
+    v = Variable(domain=(0, 1))
     for i, nominal in enumerate(nominals):
         v.update(nominal=nominal)
         samples = v.sample(shape)
@@ -211,3 +213,74 @@ def test_no_dist():
         pdf = v.pdf(x)
         assert np.allclose(samples, nominal)
         assert np.allclose(pdf, 1)
+
+
+def test_variable_list(tmp_path):
+    # Initialize several variables
+    letters = 'abcdefgh'
+    means = np.random.rand(len(letters)) * 10 - 5
+    std = np.random.rand(len(letters)) * 3
+    variables = [Variable(var_id=letter, tex=f'${letter}_{i}$', dist=f'N({means[i]}, {std[i]})', norm='zscore')
+                 for i, letter in enumerate(letters)]
+
+    # Init from var, dict, list, or varlist
+    l1 = VariableList(variables)
+    l2 = VariableList({v: v for v in variables})
+    l3 = VariableList(variables[0])
+    for v in variables:
+        l3.append(v)
+    l4 = VariableList(l3)
+
+    for i, v in enumerate(variables):
+        assert l1[v] == v
+        assert l2.get(v) == v
+        assert l3[i] == v
+        assert l4[v.var_id] == v.var_id
+
+    # Fancy indexing
+    indices = [(0, 3, 5), slice(1, 4), ['a', 'b', 'h', 'g', 'f']]
+    for index in indices:
+        subset1 = l1[index]
+        for i, ele in enumerate(subset1):
+            assert ele == l2[index][i]
+            assert ele == l3[index][i]
+            assert ele == l4[index][i]
+
+    # Set/get bad values
+    bad_keys = [2.3, np.sum, slice(None), 'a']
+    bad_vals = [variables[0], variables[1], variables[2], 5.4]
+    for i, key in enumerate(bad_keys):
+        try:
+            l1[key] = bad_vals[i]
+            assert False
+        except Exception:
+            pass
+
+    bad_keys = ['z', 'y', 'X2', 1.2, np.mean]
+    for key in bad_keys:
+        try:
+            print(l4[key])
+            assert False
+        except Exception:
+            pass
+
+    # Delete and check
+    del_idx = (0, -1, 'c')
+    l1[-1] = Variable()
+    assert l2[-1] != l1[-1]
+    del l1[del_idx]
+    assert l1[0] == 'b'
+    assert l1[-1] == l2[-2]
+    assert len(l1) == len(letters) - len(del_idx)
+
+    # Load/dump from yaml
+    with open(tmp_path / 'variable_list.yml', 'w') as fd:
+        yaml.dump(l4, fd, allow_unicode=True)
+
+    with open(tmp_path / 'variable_list.yml', 'r') as fd:
+        variables_load = yaml.load(fd, yaml.Loader)
+
+    for v in variables_load:
+        v_old = l4[l4.index(v)]
+        assert v_old.get_domain() == v.get_domain()
+        assert v_old.get_tex(units=True) == v.get_tex(units=True)
