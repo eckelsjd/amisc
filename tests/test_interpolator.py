@@ -119,7 +119,7 @@ def test_grad():
                         np.sin(theta[..., 2:3]) * theta[..., 0:1])
     fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
 
-    x1, x2, x3 = Variable(dist='U(-2, 1)'), Variable('U(-1, 2)'), Variable('U(-3.14, 3.14)')
+    x1, x2, x3 = Variable(dist='U(-2, 1)'), Variable(dist='U(-1, 2)'), Variable(dist='U(-3.14, 3.14)')
     interp = LagrangeInterpolator((3, 2, 4), [x1, x2, x3], model=lambda x: dict(y=fun(x)))
     interp.set_yi()
 
@@ -146,7 +146,7 @@ def test_hessian():
         theta[..., 2:3]) * theta[..., 0:1]
     fun = lambda theta: np.concatenate((f1(theta), f2(theta)), axis=-1)
 
-    x1, x2, x3 = Variable(dist='U(-2, 1)'), Variable('U(-1, 2)'), Variable('U(-3.14, 3.14)')
+    x1, x2, x3 = Variable(dist='U(-2, 1)'), Variable(dist='U(-1, 2)'), Variable(dist='U(-3.14, 3.14)')
     interp = LagrangeInterpolator((3, 4, 4), [x1, x2, x3], model=lambda x: dict(y=fun(x)))
     interp.set_yi()
 

@@ -16,10 +16,7 @@ The variables, interpolators, and components all have abstract base classes, so 
 independent of the specific models, interpolation methods, or underlying variables. As such, the primary top-level
 object that users of the `amisc` package will interact with is the `SystemSurrogate`.
 
-!!! Note
-    There are already pretty good implementations of the other abstractions that most users will not need to worry
-    about, but they are provided in this API reference for completeness. The abstractions allow new interpolation
-    (i.e. function approximation) methods to be implemented if desired, such as neural networks, kriging, etc.
+Variables additionally use `Transform` and `Distribution` objects to manage normalization and PDFs, respectively.
 
 Here is a class diagram summary of this workflow:
 
@@ -74,12 +71,18 @@ classDiagram
       +str var_id
       +tuple domain
       +str units
-      +str dist
+      +Distribution dist
+      +Transform norm
       +float nominal
-      +pdf(x)
-      +sample(size)
       +normalize()
       +compress()
+    }
+    class Transform {
+      +transform(values)
+    }
+    class Distribution {
+      +sample(size)
+      +pdf(x)
     }
     SystemSurrogate o-- "1..n" ComponentSurrogate
     ComponentSurrogate o-- "1..n" BaseInterpolator
@@ -87,7 +90,8 @@ classDiagram
     ComponentSurrogate <|-- SparseGridSurrogate
     BaseInterpolator <|-- LagrangeInterpolator
     SparseGridSurrogate ..> LagrangeInterpolator
-    Variable
+    Variable o-- Transform
+    Variable o-- Distribution
 ```
 Note how the `SystemSurrogate` aggregates the `ComponentSurrogate`, which aggregates the `BaseInterpolator`. In other
 words, interpolators can act independently of components, and components can act independently of systems. All three
@@ -100,14 +104,17 @@ import numpy as np
 import yaml
 
 from amisc.interpolator import BaseInterpolator
-from amisc.variable import Variable
+from amisc.variable import Variable, VariableList
 
 __version__ = "0.3.0"
 
 yaml.add_representer(Variable, Variable._yaml_representer)
 yaml.add_constructor(Variable.yaml_tag, Variable._yaml_constructor)
+yaml.add_representer(VariableList, VariableList._yaml_representer)
+yaml.add_constructor(VariableList.yaml_tag, VariableList._yaml_constructor)
 
 # Custom types that are used frequently
+Variables = list[Variable] | Variable | VariableList
 IndexSet = list[tuple[tuple, tuple]]
 MiscTree = dict[str: dict[str: float | BaseInterpolator]]
 InterpResults = BaseInterpolator | tuple[list[int | tuple | str], np.ndarray, BaseInterpolator]
