@@ -100,22 +100,24 @@ underlying surrogate method that is implemented here is Lagrange polynomial inte
 `LagrangeInterpolator`). If one wanted to use neural networks instead, the only change required is a new
 implementation of `BaseInterpolator`.
 """
-import numpy as np
+# import numpy as np
 import yaml
 
-from amisc.interpolator import BaseInterpolator
+from amisc.component import Component
+
+# from amisc.interpolator import BaseInterpolator
 from amisc.variable import Variable, VariableList
 
 __version__ = "0.3.0"
 
+# TODO: make a custom yaml loader/dumper rather than editing global yaml configs
 yaml.add_representer(Variable, Variable._yaml_representer)
 yaml.add_constructor(Variable.yaml_tag, Variable._yaml_constructor)
 yaml.add_representer(VariableList, VariableList._yaml_representer)
 yaml.add_constructor(VariableList.yaml_tag, VariableList._yaml_constructor)
+yaml.add_representer(Component, Component._yaml_representer)
+yaml.add_constructor(Component.yaml_tag, Component._yaml_constructor)
 
 # Custom types that are used frequently
-Variables = list[Variable] | Variable | VariableList
-IndexSet = list[tuple[tuple, tuple]]
-MiscTree = dict[str: dict[str: float | BaseInterpolator]]
-InterpResults = BaseInterpolator | tuple[list[int | tuple | str], np.ndarray, BaseInterpolator]
+# InterpResults = BaseInterpolator | tuple[list[int | tuple | str], np.ndarray, BaseInterpolator]
 IndicesRV = list[int | str | Variable] | int | str | Variable

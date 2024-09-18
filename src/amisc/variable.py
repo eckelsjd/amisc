@@ -32,25 +32,8 @@ from pydantic import BaseModel, ConfigDict, DirectoryPath, Field, FilePath, Vali
 from scipy.interpolate import RBFInterpolator
 from typing_extensions import TypedDict
 
-
-def _parse_function_string(func_string: str) -> tuple[str, list, dict]:
-    """Convert a function signature like `func(a, b, key=value)` to name, args, kwargs."""
-    try:
-        parts = func_string.strip().split('(')
-        func_name = parts[0]
-        all_args = parts[1].split(')')[0].split(',') if len(parts) > 1 else []
-        args, kwargs = [], {}
-        for arg in all_args:
-            if arg in ['*', '/']:
-                continue
-            if '=' in arg:
-                key, value = arg.split('=')
-                kwargs[key.strip()] = value.strip()
-            else:
-                args.append(arg.strip())
-        return func_name, args, kwargs
-    except Exception as e:
-        raise ValueError(f'Function string "{func_string}" is not valid.') from e
+from amisc.serialize import Serializable
+from amisc.utils import parse_function_string
 
 
 class Distribution(ABC):
@@ -93,7 +76,7 @@ class Distribution(ABC):
         if not dist_string:
             return None
 
-        dist_name, args, kwargs = _parse_function_string(dist_string)
+        dist_name, args, kwargs = parse_function_string(dist_string)
         if dist_name in ['N', 'Normal', 'normal']:
             # Normal distribution like N(0, 1)
             try:
@@ -337,7 +320,7 @@ class Transform(ABC):
                 transforms.append(spec_string)
                 continue
 
-            name, args, kwargs = _parse_function_string(spec_string)
+            name, args, kwargs = parse_function_string(spec_string)
             if name.lower() == 'linear':
                 try:
                     slope = kwargs.get('slope', args[0] if len(args) > 0 else '1')
@@ -477,7 +460,7 @@ class Zscore(Transform):
 Transformation = Union[str, Transform, list[str | Transform]]
 
 
-class Variable(BaseModel):
+class Variable(BaseModel, Serializable):
     """Object for storing information about variables and providing methods for pdf evaluation, sampling, etc.
 
     A simple variable object can be created with `var = Variable()`. All initialization options are optional and will
@@ -522,17 +505,6 @@ class Variable(BaseModel):
     :ivar dist: a string specifier of a probability distribution function (or a `Distribution` object)
     :ivar domain: the explicit domain bounds of the variable (limits of where you expect to use it)
     :ivar norm: specifier of a map to a transformed-space for surrogate construction (or a `Transformation` type)
-
-    :vartype var_id: str
-    :vartype nominal: float
-    :vartype description: str
-    :vartype units: str
-    :vartype category: str
-    :vartype tex: str
-    :vartype field: FieldQuantity
-    :vartype dist: str | Distribution
-    :vartype domain: tuple[float, float]
-    :vartype norm: Transformation
     """
     yaml_tag: ClassVar[str] = u'!Variable'
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True)
@@ -934,10 +906,11 @@ class Variable(BaseModel):
         """Alias for `compress(reconstruct=True)`"""
         return self.compress(values, reconstruct=True, **kwargs)
 
-    @staticmethod
-    def _yaml_representer(dumper: yaml.Dumper, data) -> yaml.MappingNode:
-        """Convert a single `Variable` object (`data`) to a yaml MappingNode (i.e. a dict)."""
-        instance_variables = {key: value for key, value in data.__dict__.items() if value is not None}
+    def serialize(self) -> dict:
+        """Convert a `Variable` to a `dict` with only standard Python types
+        (i.e. convert custom objects like `dist` and `norm` to strings).
+        """
+        instance_variables = {key: value for key, value in self.__dict__.items() if value is not None}
         if domain := instance_variables.get('domain'):
             instance_variables['domain'] = str(domain)
         if dist := instance_variables.get('dist'):
@@ -945,22 +918,32 @@ class Variable(BaseModel):
         if norm := instance_variables.get('norm'):
             instance_variables['norm'] = str(norm) if isinstance(norm, str | Transform) else [str(transform) for
                                                                                               transform in norm]
-        return dumper.represent_mapping(Variable.yaml_tag, instance_variables)
+        return instance_variables
+
+    @classmethod
+    def deserialize(cls, data: dict) -> Variable:
+        """Convert a `dict` to a `Variable` object. Let `pydantic` handle validation and conversion of fields."""
+        return cls(**data) if isinstance(data, dict) else data
+
+    @staticmethod
+    def _yaml_representer(dumper: yaml.Dumper, data: Variable) -> yaml.MappingNode:
+        """Convert a single `Variable` object (`data`) to a yaml MappingNode (i.e. a `dict`)."""
+        return dumper.represent_mapping(Variable.yaml_tag, data.serialize())
 
     @staticmethod
     def _yaml_constructor(loader: yaml.Loader, node):
-        """Convert the !Variable tag in yaml to a single `Variable` object (or a list of `Variables`)."""
+        """Convert the `!Variable` tag in yaml to a single `Variable` object (or a list of `Variables`)."""
         if isinstance(node, yaml.SequenceNode):
-            return [ele if isinstance(ele, Variable) else Variable(**ele) for ele in
+            return [ele if isinstance(ele, Variable) else Variable.deserialize(ele) for ele in
                     loader.construct_sequence(node, deep=True)]
         elif isinstance(node, yaml.MappingNode):
-            return Variable(**loader.construct_mapping(node))
+            return Variable.deserialize(loader.construct_mapping(node))
         else:
             raise NotImplementedError(f'The "{Variable.yaml_tag}" yaml tag can only be used on a yaml sequence or '
                                       f'mapping, not a "{type(node)}".')
 
 
-class VariableList(OrderedDict):
+class VariableList(OrderedDict, Serializable):
     """Store Variables as `str(var) : Variable` in the order they were passed in. You can:
 
     - Initialize/update from a single Variable or a list of Variables
@@ -1058,20 +1041,27 @@ class VariableList(OrderedDict):
     def __repr__(self):
         return self.__str__()
 
+    def serialize(self) -> list[dict]:
+        return [var.serialize() for var in self.values()]
+
+    @classmethod
+    def deserialize(cls, data: dict | list[dict]) -> VariableList:
+        if not isinstance(data, list):
+            data = [data]
+        return cls([Variable.deserialize(d) for d in data])
+
     @staticmethod
-    def _yaml_representer(dumper: yaml.Dumper, data) -> yaml.SequenceNode:
+    def _yaml_representer(dumper: yaml.Dumper, data: VariableList) -> yaml.SequenceNode:
         """Convert a single `VariableList` object (`data`) to a yaml SequenceNode (i.e. a list)."""
-        return dumper.represent_sequence(VariableList.yaml_tag, list(data.values()))
+        return dumper.represent_sequence(VariableList.yaml_tag, data.serialize())
 
     @staticmethod
     def _yaml_constructor(loader: yaml.Loader, node):
-        """Convert the !VariableList tag in yaml to a `VariableList` object."""
+        """Convert the `!VariableList` tag in yaml to a `VariableList` object."""
         if isinstance(node, yaml.SequenceNode):
-            variables = [ele if isinstance(ele, Variable) else Variable(**ele) for ele in
-                         loader.construct_sequence(node, deep=True)]
-            return VariableList(variables)
+            return VariableList.deserialize(loader.construct_sequence(node, deep=True))
         elif isinstance(node, yaml.MappingNode):
-            return VariableList(Variable(**loader.construct_mapping(node)))
+            return VariableList.deserialize(loader.construct_mapping(node))
         else:
             raise NotImplementedError(f'The "{Variable.yaml_tag}" yaml tag can only be used on a yaml sequence or '
                                       f'mapping, not a "{type(node)}".')
