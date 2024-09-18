@@ -9,25 +9,561 @@ Includes:
 - `SparseGridSurrogate`: an AMISC component that manages a hierarchy of `LagrangeInterpolator` objects
 - `AnalyticalSurrogate`: a light wrapper around a single discipline model that does not require surrogate approximation
 """
+from __future__ import annotations
+
 import ast
 import copy
+import inspect
 import itertools
+import logging
 import os
+import random
+import string
 import tempfile
 from abc import ABC, abstractmethod
+from collections import UserDict, UserList
 from concurrent.futures import ALL_COMPLETED, Executor, wait
+from dataclasses import dataclass, field
+from enum import IntFlag
 from pathlib import Path
+from typing import Annotated, Any, Callable, ClassVar, Iterable, Optional
 
 import numpy as np
+import yaml
 from joblib import delayed
+from numpy.typing import ArrayLike
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MaxAbsScaler
+from typing_extensions import TypedDict
 
-from amisc import IndexSet, InterpResults, MiscTree
 from amisc.interpolator import BaseInterpolator, LagrangeInterpolator
-from amisc.utils import get_logger
-from amisc.variable import Variable
+from amisc.serialize import Base64Serializable, MetaSerializable, PickleSerializable, Serializable, StringSerializable
+from amisc.utils import as_tuple, get_logger
+from amisc.variable import Variable, VariableList
+
+ComponentData = dict[str: ArrayLike]
+MultiIndex = str | tuple[int, ...]
+Variables = list[Variable | dict] | Variable | dict | VariableList
+
+
+@dataclass
+class ModelArgs(StringSerializable):
+    """Default dataclass for storing model arguments."""
+    data: tuple = ()
+
+    def __init__(self, *args):
+        self.data = args
+
+    def __str__(self):
+        return f"ModelArgs{self.data}"
+
+
+@dataclass
+class ModelKwargs(StringSerializable):
+    """Default dataclass for storing model keyword arguments."""
+    data: dict = field(default_factory=dict)
+
+    def __init__(self, **kwargs):
+        self.data = kwargs
+
+    def __str__(self):
+        def format_value(value):
+            if isinstance(value, str):
+                return f'"{value}"'
+            else:
+                return str(value)
+        kw_str = ", ".join([f"{key}={format_value(value)}" for key, value in self.data.items()])
+        return f"ModelKwargs({kw_str})"
+
+
+class Interpolator(Serializable, ABC):
+    """Interface for an interpolator object that approximates a model."""
+    pass
+
+
+@dataclass
+class Lagrange(Interpolator, StringSerializable):
+    """Implementation of a barycentric Lagrange polynomial interpolator."""
+    interval_capacity: int = 4
+
+
+class InterpolatorState(Serializable, ABC):
+    """Interface for a dataclass that stores the internal state of an interpolator (e.g. weights and biases)."""
+    pass
+
+
+@dataclass
+class LagrangeState(InterpolatorState, Base64Serializable):
+    """The internal state for a barycentric Lagrange polynomial interpolator."""
+    weights: list[np.ndarray, ...] = field(default_factory=list)
+    x_grids: list[np.ndarray, ...] = field(default_factory=list)
+
+
+class IndexSet(BaseModel, UserList, Serializable):
+    """Dataclass that maintains a list of multi-indices. Overrides basic `list` functionality to ensure
+    elements are formatted correctly as `(alpha, beta)`.
+
+    !!! Example "An example index set"
+        $\\mathcal{I} = [(\\alpha, \\beta)_1 , (\\alpha, \\beta)_2, (\\alpha, \\beta)_3 , ...]$ would be specified
+        as `I = [((0, 0), (0, 0, 0)) , ((0, 1), (0, 1, 0)), ...]`.
+    """
+    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True)
+    data: list[str | tuple[MultiIndex, MultiIndex]]  # the underlying `list` data structure
+
+    def __init__(self, *args, data: list = None):
+        data_list = data or []
+        data_list.extend(args)
+        super().__init__(data=data_list)
+
+    def serialize(self) -> list[str]:
+        """Return a list of each multi-index in the set serialized to a string."""
+        return [str(ele) for ele in self.data]
+
+    @classmethod
+    def deserialize(cls, serialized_data: list[str]) -> IndexSet:
+        """Deserialize using pydantic model validation on `IndexSet.data`."""
+        return IndexSet(data=serialized_data)
+
+    @field_validator('data', mode='before')
+    @classmethod
+    def _validate_data(cls, data: list[str]) -> list[tuple[MultiIndex, MultiIndex]]:
+        ret_list = []
+        for ele in data:
+            alpha, beta = ast.literal_eval(ele) if isinstance(ele, str) else tuple(ele)
+            alpha, beta = as_tuple(alpha), as_tuple(beta)
+            ret_list.append((alpha, beta))
+        return ret_list
+
+    def append(self, item):
+        alpha, beta = item
+        super().append((as_tuple(alpha), as_tuple(beta)))
+
+    def __add__(self, other):
+        other_list = other.data if isinstance(other, IndexSet) else other
+        return IndexSet(data=self.data + other_list)
+
+    def extend(self, items):
+        new_items = []
+        for alpha, beta in items:
+            alpha_tup, beta_tup = as_tuple(alpha), as_tuple(beta)
+            new_items.append((alpha_tup, beta_tup))
+        super().extend(new_items)
+
+    def insert(self, index, item):
+        alpha, beta = item
+        super().insert(index, (as_tuple(alpha), as_tuple(beta)))
+
+    def __setitem__(self, key, value):
+        alpha, beta = value
+        super().__setitem__(key, (as_tuple(alpha), as_tuple(beta)))
+
+    def __iter__(self):
+        yield from self.data
+
+
+class MiscTree(BaseModel, UserDict, Serializable):
+    """Dataclass that maintains MISC data in a `dict` tree, indexed by `alpha` and `beta`. Overrides
+    basic `dict` functionality to ensure elements are formatted correctly as `(alpha, beta) -> data`.
+    Used to store MISC coefficients, model costs, and interpolator states.
+    """
+    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True)
+    state_serializer: Optional[str | type[Serializable] | MetaSerializable] = None
+    data: dict[MultiIndex, dict[MultiIndex, float | InterpolatorState]] = dict()  # Underlying data structure
+
+    def __init__(self, state_serializer: str | type[Serializable] = None, data: dict = None, **kwargs):
+        data_dict = data or {}
+        data_dict.update(kwargs)
+        super().__init__(state_serializer=state_serializer, data=data_dict)
+
+    def serialize(self, *args, **kwargs) -> dict:
+        """Serialize `alpha, beta` indices to string and return a `dict` of internal data.
+
+        :param args: extra serialization arguments for internal `InterpolatorState`
+        :param kwargs: extra serialization keyword arguments for internal `InterpolatorState`
+        """
+        ret_dict = {}
+        if state_serializer := self.state_serializer:
+            ret_dict['state_serializer'] = state_serializer.serialize()
+        for alpha, beta, data in self:
+            ret_dict.setdefault(str(alpha), dict())
+            serialized_data = data.serialize(*args, **kwargs) if isinstance(data, InterpolatorState) else float(data)
+            ret_dict[str(alpha)][str(beta)] = serialized_data
+        return ret_dict
+
+    @classmethod
+    def deserialize(cls, serialized_data: dict, *args, **kwargs) -> MiscTree:
+        """"Deserialize using pydantic model validation on `MiscTree` data.
+
+        :param serialized_data: the data to deserialize to a `MiscTree` object
+        :param args: extra deserialization arguments for internal `InterpolatorState`
+        :param kwargs: extra deserialization keyword arguments for internal `InterpolatorState`
+        """
+        state_serializer = cls._validate_state_serializer(serialized_data.pop('state_serializer', None))
+        data = cls._validate_data(serialized_data, state_serializer=state_serializer,
+                                  deserialize_args=args, deserialize_kwargs=kwargs)
+        return MiscTree(state_serializer=state_serializer, data=data)
+
+    @field_validator('state_serializer', mode='before')
+    @classmethod
+    def _validate_state_serializer(cls, state_serializer: Optional[str | type[Serializable] | MetaSerializable]
+                                   ) -> MetaSerializable | None:
+        if state_serializer is None:
+            return None
+        elif isinstance(state_serializer, MetaSerializable):
+            return state_serializer
+        elif isinstance(state_serializer, str):
+            return MetaSerializable.deserialize(state_serializer)  # Load the serializer type from base64 encoding
+        else:
+            return MetaSerializable(serializer=state_serializer)
+
+    @field_validator('data', mode='before')
+    @classmethod
+    def _validate_data(cls, serialized_data: dict, info: ValidationInfo = None, **kwargs) -> dict:
+        state_serializer = info.data.get('state_serializer', None) if info is not None else None
+        state_serializer = state_serializer or kwargs.get('state_serializer', None)
+        deserialize_args = kwargs.get('deserialize_args', tuple()) or tuple()
+        deserialize_kwargs = kwargs.get('deserialize_kwargs', dict()) or dict()
+        ret_dict = {}
+        for alpha, beta_dict in serialized_data.items():
+            alpha_tup = as_tuple(alpha)
+            ret_dict.setdefault(alpha_tup, dict())
+            for beta, data in beta_dict.items():
+                beta_tup = as_tuple(beta)
+                if isinstance(data, InterpolatorState):
+                    pass
+                elif state_serializer is not None:
+                    data = state_serializer.deserialize(data, *deserialize_args, **deserialize_kwargs)
+                else:
+                    data = float(data)
+                assert isinstance(data, InterpolatorState | float)
+                ret_dict[alpha_tup][beta_tup] = data
+        return ret_dict
+
+    @staticmethod
+    def _is_alpha_beta_access(key):
+        """Check that the key is of the format `(alpha, beta).`"""
+        return (isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], str | tuple)
+                and isinstance(key[1], str | tuple))
+
+    def set(self, alpha: MultiIndex, beta: MultiIndex, data: float | InterpolatorState):
+        """Preferred way of updating a `MiscTree` object."""
+        self[alpha, beta] = data
+
+    def get(self, key, default=None) -> float | InterpolatorState:
+        """Preferred way of getting data from a `MiscTree` object."""
+        try:
+            return self.__getitem__(key)
+        except Exception:
+            return default
+
+    def update(self, data_dict: dict = None, deserialize_args: tuple = (), deserialize_kwargs: dict = None, **kwargs):
+        """Force `dict.update()` through the validator."""
+        data_dict = data_dict or dict()
+        data_dict.update(kwargs)
+        data_dict = self._validate_data(data_dict, state_serializer=self.state_serializer,
+                                        deserialize_args=deserialize_args, deserialize_kwargs=deserialize_kwargs)
+        super().update(data_dict)
+
+    def __setitem__(self, key: tuple | MultiIndex, value: float | InterpolatorState):
+        """Allows `misc_tree[alpha, beta] = value` usage."""
+        if self._is_alpha_beta_access(key):
+            alpha, beta = as_tuple(key[0]), as_tuple(key[1])
+            self.data.setdefault(alpha, dict())
+            self.data[alpha][beta] = value
+        else:
+            super().__setitem__(as_tuple(key), value)
+
+    def __getitem__(self, key: tuple | MultiIndex) -> float | InterpolatorState:
+        """Allows `value = misc_tree[alpha, beta]` usage."""
+        if self._is_alpha_beta_access(key):
+            alpha, beta = as_tuple(key[0]), as_tuple(key[1])
+            return self.data[alpha][beta]
+        else:
+            return super().__getitem__(as_tuple(key))
+
+    def __iter__(self) -> Iterable[tuple[tuple, tuple, float | InterpolatorState]]:
+        for alpha, beta_dict in self.data.items():
+            for beta, data in beta_dict.items():
+                yield alpha, beta, data
+
+
+class SurrogateStatus(IntFlag):
+    """Keeps track of what state MISC coefficients are in for surrogate evaluation.
+
+    - TRAINING - training mode; only `active_set` indices are used
+    - EVALUATION - evaluation mode; `active_set` and `candidate_set` indices are used
+    - RESET - reset mode; unknown state, MISC coefficients should be recomputed
+    """
+    TRAINING = 1
+    EVALUATION = 2
+    RESET = 3
+
+
+class TrainingData(Serializable, ABC):
+    pass
+
+
+@dataclass
+class SparseGrid(TrainingData, PickleSerializable):
+    rule: str = 'leja'
+    skip: int = 2
+
+
+class ComponentSerializers(TypedDict, total=False):
+    """Type hint for the `Component` class data serializers."""
+    model_args: str | tuple | type[Serializable] | MetaSerializable
+    model_kwargs: str | dict | type[Serializable] | MetaSerializable
+    interpolator: str | type[Serializable] | MetaSerializable
+    misc_states: str | type[Serializable] | MetaSerializable
+    training_data: str | type[Serializable] | MetaSerializable
+
+
+class Component(BaseModel, Serializable):
+    yaml_tag: ClassVar[str] = u'!Component'
+    custom_serialize: ClassVar[list[str]] = ['active_set', 'candidate_set', 'misc_states', 'misc_costs', 'misc_coeff',
+                                            'training_data', 'interpolator']
+    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True,
+                              protected_namespaces=())
+    # Configuration
+    data_serializers: ComponentSerializers = dict(model_args=ModelArgs, model_kwargs=ModelKwargs,
+                                                  interpolator=Lagrange, misc_states=LagrangeState,
+                                                  training_data=SparseGrid)
+    model: Callable[[ComponentData], ComponentData]
+    inputs: Variables
+    outputs: Variables
+    name: Annotated[str, Field(default_factory=lambda: "Component_" + "".join(random.choices(string.digits, k=3)))]
+    model_args: str | tuple | ModelArgs = Field(default_factory=lambda: ModelArgs())
+    model_kwargs: str | dict | ModelKwargs = Field(default_factory=lambda: ModelKwargs())
+    max_alpha: MultiIndex = ()
+    max_beta: MultiIndex = ()
+    interpolator: Any | Interpolator = Field(default_factory=lambda: Lagrange())
+
+    # Data storage/states for a MISC component
+    active_set: list | IndexSet = []
+    candidate_set: list | IndexSet = []
+    training_data: Any | TrainingData = Field(default_factory=lambda: SparseGrid())
+    misc_states: MiscTree = dict()    # (alpha, beta) -> Interpolator state
+    misc_costs: MiscTree = dict()     # (alpha, beta) -> Computational cost
+    misc_coeff: MiscTree = dict()     # (alpha, beta) -> c_[alpha, beta]
+    status: int | SurrogateStatus = SurrogateStatus.RESET
+
+    # Internal -- don't serialize/store
+    _log_file: Optional[str | Path] = None
+    _logger: Optional[logging.Logger] = None
+    _executor: Optional[Executor] = None
+    _ij: Optional[np.ndarray] = None
+
+    def __init__(self, log_file=None, executor=None, **kwargs):
+        # Set defaults for data serializers based on some type checks
+        data_serializers = kwargs.get('data_serializers', {})
+        for key in data_serializers:
+            field = kwargs.get(key, None)
+            if isinstance(field, Serializable):
+                if isinstance(field, MiscTree):
+                    # Get the InterpolatorState serializer from the MiscTree (must have been passed in)
+                    data_serializers[key] = field.state_serializer.serializer
+                else:
+                    # Otherwise use the serializer type
+                    data_serializers[key] = type(field)
+
+        # Make sure nested pydantic objects are specified as obj "dicts"
+        for kw in ['active_set', 'candidate_set', 'misc_states', 'misc_costs', 'misc_coeff']:
+            kwargs[kw] = {'data': kwargs.get(kw)}
+            if kw == 'misc_states':
+                # Additionally add state serializer for `misc_states`
+                kwargs[kw]['state_serializer'] = data_serializers.get(kw, None)
+
+        super().__init__(**kwargs)
+
+        # Set internal properties
+        assert self.is_downward_closed(self.active_set + self.candidate_set)
+        self._executor = executor
+        self._log_file = log_file
+        self._logger = get_logger(self.name, log_file=self._log_file)
+
+        # Construct vectors of [0,1]^dim(alpha+beta)
+        Nij = len(self.max_alpha) + len(self.max_beta)
+        self._ij = np.empty((2 ** Nij, Nij), dtype=np.uint8)
+        for i, ele in enumerate(itertools.product([0, 1], repeat=Nij)):
+            self._ij[i, :] = ele
+
+    @field_validator('data_serializers', mode='before')
+    @classmethod
+    def _validate_serializers(cls, serializers: ComponentSerializers) -> ComponentSerializers:
+        for key, serializer in serializers.items():
+            if serializer is None:
+                serializers[key] = None
+            elif isinstance(serializer, MetaSerializable):
+                serializers[key] = serializer
+            elif isinstance(serializer, str):
+                serializers[key] = MetaSerializable.deserialize(serializer)
+            else:
+                serializers[key] = MetaSerializable(serializer=serializer)
+        return serializers
+
+    @field_validator('inputs', 'outputs')
+    @classmethod
+    def _validate_variables(cls, variables: Variables) -> VariableList:
+        if isinstance(variables, VariableList):
+            return variables
+        else:
+            return VariableList.deserialize(variables)
+
+    @field_validator('model_args', 'model_kwargs')
+    @classmethod
+    def _validate_model_args(cls, args: str | tuple | dict | ModelArgs | ModelKwargs,
+                             info: ValidationInfo = None, **kwargs) -> ModelArgs | ModelKwargs:
+        serializer, deserialize_args, deserialize_kwargs = cls._parse_deserialize_args(info, **kwargs)
+        if isinstance(args, str):
+            return serializer.deserialize(args, *deserialize_args, **deserialize_kwargs)
+        elif isinstance(args, dict):
+            return serializer(**args)
+        elif isinstance(args, tuple):
+            return serializer(*args)
+        else:
+            return args
+
+    @field_validator('max_alpha', 'max_beta')
+    @classmethod
+    def _validate_indices(cls, multi_index: MultiIndex) -> tuple[int, ...]:
+        return as_tuple(multi_index)
+
+    @field_validator('interpolator', 'training_data')
+    @classmethod
+    def _validate_arbitrary_serializable(cls, data: TrainingData | Interpolator | Any, info: ValidationInfo = None,
+                                         **kwargs) -> TrainingData | Interpolator:
+        serializer, deserialize_args, deserialize_kwargs = cls._parse_deserialize_args(info, **kwargs)
+        if isinstance(data, TrainingData | Interpolator):
+            return data
+        else:
+            return serializer.deserialize(data, *deserialize_args, **deserialize_kwargs)
+
+    @field_validator('status')
+    @classmethod
+    def _validate_status(cls, status: int | SurrogateStatus) -> SurrogateStatus:
+        return SurrogateStatus(status)
+
+    @property
+    def xdim(self) -> int:
+        return len(self.inputs)
+
+    @property
+    def ydim(self) -> int:
+        return len(self.outputs)
+
+    def output_path_requested(self):
+        """Return whether the underlying component model requests an `output_path`, in which case
+        a save directory created by `amisc` will be passed to the model for saving model output files.
+        """
+        signature = inspect.signature(self.model)
+        for param in signature.parameters.values():
+            if param.name == 'output_path':
+                return True
+        return False
+
+    def update_model(self, new_model: Callable[[ComponentData], ComponentData] = None, model_args: tuple = None,
+                     model_kwargs: dict = None, **kwargs):
+        """Update the underlying component model or its args/kwargs."""
+        if new_model is not None:
+            self.model = new_model
+        if model_args is not None:
+            self.model_args = model_args
+        self.model_kwargs.update(model_kwargs)
+        self.model_kwargs.update(kwargs)
+
+    @staticmethod
+    def _parse_deserialize_args(info: ValidationInfo = None, **kwargs):
+        """Parse deserialize arguments for a `ComponentSerializer` validator."""
+        field_name = info.field_name if info is not None else None
+        field_name = field_name or kwargs.get('field_name', None)
+        serializers = info.data.get('data_serializers', None) if info is not None else None
+        serializers = serializers or kwargs.get('data_serializers', None)
+        deserialize_args = kwargs.get('deserialize_args', tuple()) or tuple()
+        deserialize_kwargs = kwargs.get('deserialize_kwargs', dict()) or dict()
+        serializer = serializers.get(field_name, None) if serializers is not None else None
+
+        return serializer, deserialize_args, deserialize_kwargs
+
+    @staticmethod
+    def is_downward_closed(indices: IndexSet) -> bool:
+        """Return if a list of $(\\alpha, \\beta)$ multi-indices is downward-closed.
+
+        MISC approximations require a downward-closed set in order to use the combination-technique formula for the
+        coefficients (as implemented here).
+
+        !!! Example
+            The list `[( (0,), (0,) ), ( (1,), (0,) ), ( (1,), (1,) )]` is downward-closed. You can visualize this as
+            building a stack of cubes: in order to place a cube, all adjacent cubes must be present (does the logo
+            make sense now?).
+
+        :param indices: `list` of (`alpha`, `beta`) multi-indices
+        :returns: whether the set of indices is downward-closed
+        """
+        # Iterate over every multi-index
+        for alpha, beta in indices:
+            # Every smaller multi-index must also be included in the indices list
+            sub_sets = [np.arange(tuple(alpha + beta)[i] + 1) for i in range(len(alpha) + len(beta))]
+            for ele in itertools.product(*sub_sets):
+                tup = (tuple(ele[:len(alpha)]), tuple(ele[len(alpha):]))
+                if tup not in indices:
+                    return False
+        return True
+
+    def serialize(self, keep_variables=False, serialize_args=None, serialize_kwargs=None) -> dict:
+        """Convert to a `dict` with only standard Python types as fields and values."""
+        serialize_args = serialize_args or dict()
+        serialize_kwargs = serialize_kwargs or dict()
+        d = {}
+        for key, value in self.__dict__.items():
+            if value is not None and not key.startswith('_'):
+                if key == 'data_serializers':
+                    d[key] = {k: v.serialize() for k, v in value.items()}
+                elif key in ['inputs', 'outputs'] and not keep_variables:
+                    d[key] = value.serialize()
+                elif key in ['max_beta', 'max_alpha']:
+                    d[key] = str(value)
+                elif key in ['status']:
+                    d[key] = int(value)
+                elif key in ['active_set', 'candidate_set', 'misc_costs', 'misc_coeff']:
+                    d[key] = value.serialize()
+                elif key in ComponentSerializers.__annotations__.keys():
+                    d[key] = value.serialize(*serialize_args.get(key, ()), **serialize_kwargs.get(key, {}))
+                else:
+                    d[key] = value
+        return d
+
+    @classmethod
+    def deserialize(cls, data: dict) -> Component:
+        """Return a `Component` from `data`. Let pydantic handle field validation and conversion."""
+        return cls(**data) if isinstance(data, dict) else data
+
+    @staticmethod
+    def _yaml_representer(dumper: yaml.Dumper, comp: Component) -> yaml.MappingNode:
+        """Convert a single `Component` object (`data`) to a yaml MappingNode (i.e. a `dict`)."""
+        try:
+            save_path = Path(dumper.stream.name).parent
+        except Exception:
+            save_path = Path(os.getcwd())
+        serialize_kwargs = {}
+        for key, serializer in comp.data_serializers.items():
+            if isinstance(serializer, PickleSerializable):
+                serialize_kwargs[key] = {'save_path': save_path}
+        return dumper.represent_mapping(Component.yaml_tag, comp.serialize(serialize_kwargs=serialize_kwargs,
+                                                                           keep_variables=True))
+
+    @staticmethod
+    def _yaml_constructor(loader: yaml.Loader, node):
+        """Convert the `!Component` tag in yaml to a `Component` object."""
+        if isinstance(node, yaml.SequenceNode):
+            return [ele if isinstance(ele, Component) else Component.deserialize(ele) for ele in
+                    loader.construct_sequence(node, deep=True)]
+        elif isinstance(node, yaml.MappingNode):
+            return Component.deserialize(loader.construct_mapping(node, deep=True))
+        else:
+            raise NotImplementedError(f'The "{Component.yaml_tag}" yaml tag can only be used on a yaml sequence or '
+                                      f'mapping, not a "{type(node)}".')
 
 
 class ComponentSurrogate(ABC):
@@ -326,7 +862,7 @@ class ComponentSurrogate(ABC):
         """Here for convenience so you can also do `ret = surrogate(x)`, just like the `BaseInterpolator`."""
         return self.predict(*args, **kwargs)
 
-    def update_misc_coeffs(self, index_set: IndexSet = None) -> MiscTree:
+    def update_misc_coeffs(self, index_set: IndexSet = None) -> 'MiscTree':
         """Update the combination technique coeffs for MISC using the given index set.
 
         :param index_set: the index set to consider when computing the MISC coefficients, defaults to the active set
@@ -525,7 +1061,7 @@ class ComponentSurrogate(ABC):
         return True
 
     @abstractmethod
-    def build_interpolator(self, alpha: tuple, beta: tuple) -> InterpResults:
+    def build_interpolator(self, alpha: tuple, beta: tuple):
         """Return a `BaseInterpolator` object and new refinement points for a given $(\\alpha, \\beta)$ multi-index.
 
         :param alpha: A multi-index specifying model fidelity

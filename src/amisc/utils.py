@@ -2,16 +2,106 @@
 
 Includes:
 
-- `relative_error`: compute the relative L2 error between two vectors
-- `get_logger`: logging utility with nice formatting
+- `as_tuple` — convert a tuple-like object to a tuple of `ints`
+- `parse_function_string` — convert function-like strings to arguments and keyword-arguments
+- `relative_error` — compute the relative L2 error between two vectors
+- `get_logger` — logging utility with nice formatting
 """
+import ast
 import logging
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 
 LOG_FORMATTER = logging.Formatter(u"%(asctime)s — [%(levelname)s] — %(name)-25s — %(message)s")
+
+
+def as_tuple(value: str | tuple) -> tuple[int, ...]:
+    """Convert a tuple-like object to a tuple of `ints`."""
+    if isinstance(value, str):
+        return tuple([int(i) for i in ast.literal_eval(value)])
+    else:
+        return tuple([int(i) for i in value])
+
+
+def tokenize(args_str):
+    """Helper function to extract tokens respecting nested structures"""
+    tokens = []
+    current_token = []
+    brace_depth = 0
+    in_string = False
+    string_char = ''  # noqa: F841
+
+    i = 0
+    while i < len(args_str):
+        char = args_str[i]
+        if char in ('"', "'") and (i == 0 or args_str[i - 1] != '\\'):  # Toggle string state
+            in_string = not in_string
+            string_char = char if in_string else '' # noqa: F841
+            current_token.append(char)
+        elif in_string:
+            current_token.append(char)
+        elif char in '([{':
+            brace_depth += 1
+            current_token.append(char)
+        elif char in ')]}':
+            brace_depth -= 1
+            current_token.append(char)
+        elif char == ',' and brace_depth == 0:
+            if current_token:
+                tokens.append(''.join(current_token).strip())
+                current_token = []
+        else:
+            current_token.append(char)
+        i += 1
+
+    # Add last token
+    if current_token:
+        tokens.append(''.join(current_token).strip())
+
+    return tokens
+
+
+def parse_function_string(call_string: str) -> tuple[str, list, dict]:
+    """Convert a function signature like `func(a, b, key=value)` to name, args, kwargs."""
+    # Regex pattern to match function name and arguments
+    pattern = r"(\w+)\((.*)\)"
+    match = re.match(pattern, call_string.strip())
+
+    if not match:
+        raise ValueError(f"Function string '{call_string}' is not valid.")
+
+    # Extracting name and arguments section
+    name = match.group(1)
+    args_str = match.group(2)
+
+    # Regex to split arguments respecting parentheses and quotes
+    # arg_pattern = re.compile(r'''((?:[^,'"()\[\]*]+|'[^']*'|"(?:\\.|[^"\\])*"|\([^)]*\)|\[[^\]]*\]|\*)+|,)''')
+    # arg_pattern = re.compile(r'''((?:[^,'"()\[\]{}*]+|'[^']*'|"(?:\\.|[^"\\])*"|\([^)]*\)|\[[^\]]*\]|\{[^{}]*\}|\*)+|,)''')  # noqa: E501
+    # pieces = [piece.strip() for piece in arg_pattern.findall(args_str) if piece.strip() != ',']
+    pieces = tokenize(args_str)
+
+    args = []
+    kwargs = {}
+    keyword_only = False
+
+    for piece in pieces:
+        if piece == '/':
+            continue
+        elif piece == '*':
+            keyword_only = True
+        elif '=' in piece and (piece.index('=') < piece.find('{') or piece.find('{') == -1):
+            key, val = piece.split('=', 1)
+            kwargs[key.strip()] = ast.literal_eval(val.strip())
+            keyword_only = True
+        else:
+            if keyword_only:
+                raise ValueError("Positional arguments cannot follow keyword arguments.")
+            args.append(ast.literal_eval(piece))
+
+    return name, args, kwargs
 
 
 def relative_error(pred, targ, axis=None):

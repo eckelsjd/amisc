@@ -51,8 +51,8 @@ from joblib import Parallel, delayed
 from joblib.externals.loky import set_loky_pickler
 from uqtils import ax_default
 
-from amisc import IndexSet, IndicesRV
-from amisc.component import AnalyticalSurrogate, ComponentSurrogate, SparseGridSurrogate
+from amisc import IndicesRV
+from amisc.component import AnalyticalSurrogate, ComponentSurrogate, IndexSet, SparseGridSurrogate
 from amisc.utils import get_logger
 from amisc.variable import Variable
 
