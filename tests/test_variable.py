@@ -1,7 +1,7 @@
 import h5py
 import numpy as np
-import yaml
 
+from amisc import yaml_dump, yaml_load
 from amisc.utils import relative_error
 from amisc.variable import Variable, VariableList
 
@@ -13,11 +13,8 @@ def test_load_and_dump_variables(tmp_path):
                           field={'compress_method': 'svd', 'interp_args': {'kernel': 'gaussian', 'neighbors': 10},
                                  'compress_args': {'rank': 10, 'energy_tol': 0.95}})
                  ]
-    with open(tmp_path / 'variables.yml', 'w') as fd:
-        yaml.dump(variables, fd, allow_unicode=True)
-
-    with open(tmp_path / 'variables.yml', 'r') as fd:
-        variables_load = yaml.load(fd, yaml.Loader)
+    yaml_dump(variables, tmp_path / 'variables.yml')
+    variables_load = yaml_load(tmp_path / 'variables.yml')
 
     for v in variables_load:
         v_old = variables[variables.index(v)]
@@ -26,7 +23,7 @@ def test_load_and_dump_variables(tmp_path):
 
 
 def test_single_norm():
-    norms = ['linear(1/2, 2)', 'log(10)', 'minmax(lb_norm=-1, ub_norm=1)', 'zscore(2, 1)']
+    norms = ['linear(0.5, 2)', 'log(10)', 'minmax(lb_norm=-1, ub_norm=1)', 'zscore(2, 1)']
     dists = ['U(0.1, 2)', 'N(3, 0.5)']
 
     for norm_method in norms:
@@ -144,7 +141,7 @@ def test_compression_nd():
 
 def test_uniform_dist():
     shape = (50,)
-    true_lb = [-2 , 1.1, 11.3]
+    true_lb = [-2, 1.1, 11.3]
     true_ub = [-1, 1.2, 94]
     for i in range(len(true_lb)):
         v = Variable(dist=f'Uniform({true_lb[i]}, {true_ub[i]})')
@@ -274,11 +271,8 @@ def test_variable_list(tmp_path):
     assert len(l1) == len(letters) - len(del_idx)
 
     # Load/dump from yaml
-    with open(tmp_path / 'variable_list.yml', 'w') as fd:
-        yaml.dump(l4, fd, allow_unicode=True)
-
-    with open(tmp_path / 'variable_list.yml', 'r') as fd:
-        variables_load = yaml.load(fd, yaml.Loader)
+    yaml_dump(l4, tmp_path / 'variable_list.yml')
+    variables_load = yaml_load(tmp_path / 'variable_list.yml')
 
     for v in variables_load:
         v_old = l4[l4.index(v)]
