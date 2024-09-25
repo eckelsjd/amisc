@@ -26,7 +26,7 @@ from concurrent.futures import ALL_COMPLETED, Executor, wait
 from dataclasses import dataclass, field
 from enum import IntFlag
 from pathlib import Path
-from typing import Annotated, Any, Callable, ClassVar, Iterable, Optional
+from typing import Annotated, Any, Callable, ClassVar, Iterable, Literal, Optional
 
 import numpy as np
 import yaml
@@ -43,9 +43,28 @@ from amisc.serialize import Base64Serializable, MetaSerializable, PickleSerializ
 from amisc.utils import as_tuple, get_logger
 from amisc.variable import Variable, VariableList
 
-ComponentData = dict[str: ArrayLike]
 MultiIndex = str | tuple[int, ...]
 Variables = list[Variable | dict] | Variable | dict | VariableList
+
+
+class ComponentIO(TypedDict, total=False):
+    """Type hint for the input/output `dicts` of a call to `Component.model`. The keys are the variable IDs and the
+    values are the corresponding data arrays. There are also a few special keys that can be returned by the model:
+
+    - `model_cost` — the computational cost (seconds of CPU time) of a single model evaluation
+    - `output_path` — the path to the output file or directory written by the model
+    - `errors` — a `dict` with the indices where the model evaluation failed with context about the errors
+
+    The model can return additional items that are not part of `Component.outputs`. These items are returned as object
+    arrays in the output.
+    """
+    input_var_ids: float | list | ArrayLike   # Use the actual variable IDs
+    output_var_ids: float | list | ArrayLike
+    extra_outputs: Any
+
+    model_cost: float | list | ArrayLike
+    output_path: str | Path
+    errors: dict
 
 
 @dataclass
@@ -56,8 +75,18 @@ class ModelArgs(StringSerializable):
     def __init__(self, *args):
         self.data = args
 
+    def __repr__(self):
+        return str(self.data)
+
     def __str__(self):
-        return f"ModelArgs{self.data}"
+        def format_value(value):
+            if isinstance(value, str):
+                return f'"{value}"'
+            else:
+                return str(value)
+
+        arg_str = ", ".join([f"{format_value(value)}" for value in self.data])
+        return f"ModelArgs({arg_str})"
 
 
 @dataclass
@@ -68,12 +97,16 @@ class ModelKwargs(StringSerializable):
     def __init__(self, **kwargs):
         self.data = kwargs
 
+    def __repr__(self):
+        return str(self.data)
+
     def __str__(self):
         def format_value(value):
             if isinstance(value, str):
                 return f'"{value}"'
             else:
                 return str(value)
+
         kw_str = ", ".join([f"{key}={format_value(value)}" for key, value in self.data.items()])
         return f"ModelKwargs({kw_str})"
 
@@ -97,8 +130,18 @@ class InterpolatorState(Serializable, ABC):
 @dataclass
 class LagrangeState(InterpolatorState, Base64Serializable):
     """The internal state for a barycentric Lagrange polynomial interpolator."""
-    weights: list[np.ndarray, ...] = field(default_factory=list)
-    x_grids: list[np.ndarray, ...] = field(default_factory=list)
+    weights: list[ArrayLike, ...] = field(default_factory=list)
+    x_grids: list[ArrayLike, ...] = field(default_factory=list)
+
+    def __eq__(self, other):
+        if isinstance(other, LagrangeState):
+            try:
+                return all([np.allclose(self.weights[i], other.weights[i]) for i in range(len(self.weights))]) and \
+                    all([np.allclose(self.x_grids[i], other.x_grids[i]) for i in range(len(self.x_grids))])
+            except IndexError:
+                return False
+        else:
+            return False
 
 
 class IndexSet(BaseModel, UserList, Serializable):
@@ -116,6 +159,21 @@ class IndexSet(BaseModel, UserList, Serializable):
         data_list = data or []
         data_list.extend(args)
         super().__init__(data=data_list)
+
+    def __str__(self):
+        return str(self.data)
+
+    def __repr__(self):
+        return str(self)
+
+    def __eq__(self, other):
+        if isinstance(other, IndexSet):
+            for index1, index2 in zip(self.data, other.data):
+                if index1 != index2:
+                    return False
+            return True
+        else:
+            return False
 
     def serialize(self) -> list[str]:
         """Return a list of each multi-index in the set serialized to a string."""
@@ -169,13 +227,24 @@ class MiscTree(BaseModel, UserDict, Serializable):
     Used to store MISC coefficients, model costs, and interpolator states.
     """
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True)
-    state_serializer: Optional[str | type[Serializable] | MetaSerializable] = None
     data: dict[MultiIndex, dict[MultiIndex, float | InterpolatorState]] = dict()  # Underlying data structure
 
-    def __init__(self, state_serializer: str | type[Serializable] = None, data: dict = None, **kwargs):
+    def __init__(self, data: dict = None, **kwargs):
         data_dict = data or {}
         data_dict.update(kwargs)
-        super().__init__(state_serializer=state_serializer, data=data_dict)
+        super().__init__(data=data_dict)
+
+    def __eq__(self, other):
+        if isinstance(other, MiscTree):
+            try:
+                for alpha, beta, data in self:
+                    if other[alpha, beta] != data:
+                        return False
+                return True
+            except KeyError:
+                return False
+        else:
+            return False
 
     def serialize(self, *args, **kwargs) -> dict:
         """Serialize `alpha, beta` indices to string and return a `dict` of internal data.
@@ -184,7 +253,7 @@ class MiscTree(BaseModel, UserDict, Serializable):
         :param kwargs: extra serialization keyword arguments for internal `InterpolatorState`
         """
         ret_dict = {}
-        if state_serializer := self.state_serializer:
+        if state_serializer := self.state_serializer(self.data):
             ret_dict['state_serializer'] = state_serializer.serialize()
         for alpha, beta, data in self:
             ret_dict.setdefault(str(alpha), dict())
@@ -200,12 +269,25 @@ class MiscTree(BaseModel, UserDict, Serializable):
         :param args: extra deserialization arguments for internal `InterpolatorState`
         :param kwargs: extra deserialization keyword arguments for internal `InterpolatorState`
         """
-        state_serializer = cls._validate_state_serializer(serialized_data.pop('state_serializer', None))
-        data = cls._validate_data(serialized_data, state_serializer=state_serializer,
-                                  deserialize_args=args, deserialize_kwargs=kwargs)
-        return MiscTree(state_serializer=state_serializer, data=data)
+        data = cls._validate_data(serialized_data, deserialize_args=args, deserialize_kwargs=kwargs)
+        return MiscTree(data=data)
 
-    @field_validator('state_serializer', mode='before')
+    @classmethod
+    def state_serializer(cls, data: dict) -> MetaSerializable | None:
+        """Infer and return the state serializer from the `MiscTree` data."""
+        serializer = data.get('state_serializer', None)  # if `data` is serialized
+        if serializer is None:  # Otherwise search for an InterpolatorState
+            for alpha, beta_dict in data.items():
+                if alpha == 'state_serializer':
+                    continue
+                for beta, value in beta_dict.items():
+                    if isinstance(value, InterpolatorState):
+                        serializer = type(value)
+                        break
+                if serializer is not None:
+                    break
+        return cls._validate_state_serializer(serializer)
+
     @classmethod
     def _validate_state_serializer(cls, state_serializer: Optional[str | type[Serializable] | MetaSerializable]
                                    ) -> MetaSerializable | None:
@@ -220,13 +302,14 @@ class MiscTree(BaseModel, UserDict, Serializable):
 
     @field_validator('data', mode='before')
     @classmethod
-    def _validate_data(cls, serialized_data: dict, info: ValidationInfo = None, **kwargs) -> dict:
-        state_serializer = info.data.get('state_serializer', None) if info is not None else None
-        state_serializer = state_serializer or kwargs.get('state_serializer', None)
+    def _validate_data(cls, serialized_data: dict, **kwargs) -> dict:
+        state_serializer = cls.state_serializer(serialized_data)
         deserialize_args = kwargs.get('deserialize_args', tuple()) or tuple()
         deserialize_kwargs = kwargs.get('deserialize_kwargs', dict()) or dict()
         ret_dict = {}
         for alpha, beta_dict in serialized_data.items():
+            if alpha == 'state_serializer':
+                continue
             alpha_tup = as_tuple(alpha)
             ret_dict.setdefault(alpha_tup, dict())
             for beta, data in beta_dict.items():
@@ -234,7 +317,7 @@ class MiscTree(BaseModel, UserDict, Serializable):
                 if isinstance(data, InterpolatorState):
                     pass
                 elif state_serializer is not None:
-                    data = state_serializer.deserialize(data, *deserialize_args, **deserialize_kwargs)
+                    data = state_serializer.serializer.deserialize(data, *deserialize_args, **deserialize_kwargs)
                 else:
                     data = float(data)
                 assert isinstance(data, InterpolatorState | float)
@@ -262,8 +345,8 @@ class MiscTree(BaseModel, UserDict, Serializable):
         """Force `dict.update()` through the validator."""
         data_dict = data_dict or dict()
         data_dict.update(kwargs)
-        data_dict = self._validate_data(data_dict, state_serializer=self.state_serializer,
-                                        deserialize_args=deserialize_args, deserialize_kwargs=deserialize_kwargs)
+        data_dict = self._validate_data(data_dict, deserialize_args=deserialize_args,
+                                        deserialize_kwargs=deserialize_kwargs)
         super().update(data_dict)
 
     def __setitem__(self, key: tuple | MultiIndex, value: float | InterpolatorState):
@@ -285,6 +368,8 @@ class MiscTree(BaseModel, UserDict, Serializable):
 
     def __iter__(self) -> Iterable[tuple[tuple, tuple, float | InterpolatorState]]:
         for alpha, beta_dict in self.data.items():
+            if alpha == 'state_interpolator':
+                continue
             for beta, data in beta_dict.items():
                 yield alpha, beta, data
 
@@ -302,6 +387,7 @@ class SurrogateStatus(IntFlag):
 
 
 class TrainingData(Serializable, ABC):
+    """Interface for storing surrogate training data."""
     pass
 
 
@@ -313,75 +399,66 @@ class SparseGrid(TrainingData, PickleSerializable):
 
 class ComponentSerializers(TypedDict, total=False):
     """Type hint for the `Component` class data serializers."""
-    model_args: str | tuple | type[Serializable] | MetaSerializable
-    model_kwargs: str | dict | type[Serializable] | MetaSerializable
+    model_args: str | type[Serializable] | MetaSerializable
+    model_kwargs: str | type[Serializable] | MetaSerializable
     interpolator: str | type[Serializable] | MetaSerializable
-    misc_states: str | type[Serializable] | MetaSerializable
     training_data: str | type[Serializable] | MetaSerializable
 
 
 class Component(BaseModel, Serializable):
     yaml_tag: ClassVar[str] = u'!Component'
-    custom_serialize: ClassVar[list[str]] = ['active_set', 'candidate_set', 'misc_states', 'misc_costs', 'misc_coeff',
-                                            'training_data', 'interpolator']
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True,
-                              protected_namespaces=())
+                              protected_namespaces=(), extra='allow')
     # Configuration
-    data_serializers: ComponentSerializers = dict(model_args=ModelArgs, model_kwargs=ModelKwargs,
-                                                  interpolator=Lagrange, misc_states=LagrangeState,
-                                                  training_data=SparseGrid)
-    model: Callable[[ComponentData], ComponentData]
+    serializers: Optional[ComponentSerializers] = None  # TODO: find a way to allow setting as private before __init__
+    model: Callable[[ComponentIO, ...], ComponentIO]
     inputs: Variables
     outputs: Variables
     name: Annotated[str, Field(default_factory=lambda: "Component_" + "".join(random.choices(string.digits, k=3)))]
-    model_args: str | tuple | ModelArgs = Field(default_factory=lambda: ModelArgs())
-    model_kwargs: str | dict | ModelKwargs = Field(default_factory=lambda: ModelKwargs())
+    model_args: str | tuple | ModelArgs = ModelArgs()
+    model_kwargs: str | dict | ModelKwargs = ModelKwargs()
     max_alpha: MultiIndex = ()
     max_beta: MultiIndex = ()
-    interpolator: Any | Interpolator = Field(default_factory=lambda: Lagrange())
+    interpolator: Any | Interpolator = Lagrange()
+    vectorized: bool = False
 
     # Data storage/states for a MISC component
-    active_set: list | IndexSet = []
-    candidate_set: list | IndexSet = []
-    training_data: Any | TrainingData = Field(default_factory=lambda: SparseGrid())
-    misc_states: MiscTree = dict()    # (alpha, beta) -> Interpolator state
-    misc_costs: MiscTree = dict()     # (alpha, beta) -> Computational cost
-    misc_coeff: MiscTree = dict()     # (alpha, beta) -> c_[alpha, beta]
+    active_set: list | IndexSet = IndexSet()
+    candidate_set: list | IndexSet = IndexSet()
+    training_data: Any | TrainingData = SparseGrid()
+    misc_states: MiscTree = MiscTree()  # (alpha, beta) -> Interpolator state
+    misc_costs: MiscTree = MiscTree()  # (alpha, beta) -> Computational cost
+    misc_coeff: MiscTree = MiscTree()  # (alpha, beta) -> c_[alpha, beta]
     status: int | SurrogateStatus = SurrogateStatus.RESET
 
-    # Internal -- don't serialize/store
+    # Internal
     _log_file: Optional[str | Path] = None
     _logger: Optional[logging.Logger] = None
     _executor: Optional[Executor] = None
     _ij: Optional[np.ndarray] = None
 
-    def __init__(self, log_file=None, executor=None, **kwargs):
-        # Set defaults for data serializers based on some type checks
-        data_serializers = kwargs.get('data_serializers', {})
-        for key in data_serializers:
-            field = kwargs.get(key, None)
-            if isinstance(field, Serializable):
-                if isinstance(field, MiscTree):
-                    # Get the InterpolatorState serializer from the MiscTree (must have been passed in)
-                    data_serializers[key] = field.state_serializer.serializer
-                else:
-                    # Otherwise use the serializer type
-                    data_serializers[key] = type(field)
+    def __init__(self, /, model, inputs, outputs, *, log_file=None, executor=None, **kwargs):
+        # Gather data serializers from type checks (if not passed in as a kwarg)
+        serializers = kwargs.get('serializers', {})
+        for key in ComponentSerializers.__annotations__.keys():
+            if not serializers.get(key, None):
+                field = kwargs.get(key, None)
+                serializers[key] = type(field) if isinstance(field, Serializable) else (
+                    type(self.model_fields[key].default))
+        kwargs['serializers'] = serializers
 
         # Make sure nested pydantic objects are specified as obj "dicts"
         for kw in ['active_set', 'candidate_set', 'misc_states', 'misc_costs', 'misc_coeff']:
-            kwargs[kw] = {'data': kwargs.get(kw)}
-            if kw == 'misc_states':
-                # Additionally add state serializer for `misc_states`
-                kwargs[kw]['state_serializer'] = data_serializers.get(kw, None)
+            if (value := kwargs.get(kw, None)) is not None:
+                kwargs[kw] = {'data': value} if (not isinstance(value, dict) or
+                                                 value.get('data', None) is None) else value
 
-        super().__init__(**kwargs)
+        super().__init__(model=model, inputs=inputs, outputs=outputs, **kwargs)  # Pydantic validation runs here
 
         # Set internal properties
         assert self.is_downward_closed(self.active_set + self.candidate_set)
         self._executor = executor
-        self._log_file = log_file
-        self._logger = get_logger(self.name, log_file=self._log_file)
+        self.set_logger(log_file=log_file)
 
         # Construct vectors of [0,1]^dim(alpha+beta)
         Nij = len(self.max_alpha) + len(self.max_beta)
@@ -389,7 +466,7 @@ class Component(BaseModel, Serializable):
         for i, ele in enumerate(itertools.product([0, 1], repeat=Nij)):
             self._ij[i, :] = ele
 
-    @field_validator('data_serializers', mode='before')
+    @field_validator('serializers')
     @classmethod
     def _validate_serializers(cls, serializers: ComponentSerializers) -> ComponentSerializers:
         for key, serializer in serializers.items():
@@ -414,14 +491,14 @@ class Component(BaseModel, Serializable):
     @field_validator('model_args', 'model_kwargs')
     @classmethod
     def _validate_model_args(cls, args: str | tuple | dict | ModelArgs | ModelKwargs,
-                             info: ValidationInfo = None, **kwargs) -> ModelArgs | ModelKwargs:
+                             info: ValidationInfo, **kwargs) -> ModelArgs | ModelKwargs:
         serializer, deserialize_args, deserialize_kwargs = cls._parse_deserialize_args(info, **kwargs)
         if isinstance(args, str):
-            return serializer.deserialize(args, *deserialize_args, **deserialize_kwargs)
+            return serializer.serializer.deserialize(args, *deserialize_args, **deserialize_kwargs)
         elif isinstance(args, dict):
-            return serializer(**args)
+            return serializer.serializer(**args)
         elif isinstance(args, tuple):
-            return serializer(*args)
+            return serializer.serializer(*args)
         else:
             return args
 
@@ -432,13 +509,13 @@ class Component(BaseModel, Serializable):
 
     @field_validator('interpolator', 'training_data')
     @classmethod
-    def _validate_arbitrary_serializable(cls, data: TrainingData | Interpolator | Any, info: ValidationInfo = None,
+    def _validate_arbitrary_serializable(cls, data: TrainingData | Interpolator | Any, info: ValidationInfo,
                                          **kwargs) -> TrainingData | Interpolator:
         serializer, deserialize_args, deserialize_kwargs = cls._parse_deserialize_args(info, **kwargs)
         if isinstance(data, TrainingData | Interpolator):
             return data
         else:
-            return serializer.deserialize(data, *deserialize_args, **deserialize_kwargs)
+            return serializer.serializer.deserialize(data, *deserialize_args, **deserialize_kwargs)
 
     @field_validator('status')
     @classmethod
@@ -453,33 +530,202 @@ class Component(BaseModel, Serializable):
     def ydim(self) -> int:
         return len(self.outputs)
 
-    def output_path_requested(self):
-        """Return whether the underlying component model requests an `output_path`, in which case
-        a save directory created by `amisc` will be passed to the model for saving model output files.
+    def __eq__(self, other):
+        if isinstance(other, Component):
+            return (self.model.__code__.co_code == other.model.__code__.co_code and self.inputs == other.inputs
+                    and self.outputs == other.outputs and self.name == other.name and
+                    self.model_args.data == other.model_args.data and self.model_kwargs.data == other.model_kwargs.data
+                    and self.max_alpha == other.max_alpha and self.max_beta == other.max_beta and
+                    self.interpolator == other.interpolator
+                    and self.active_set == other.active_set and self.candidate_set == other.candidate_set
+                    and self.training_data == other.training_data and self.misc_states == other.misc_states
+                    and self.misc_costs == other.misc_costs
+                    )
+        else:
+            return False
+
+    def call_model(self, inputs: ComponentIO, alpha: Literal['best', 'worst'] | tuple = None,
+                   output_path: str | Path = None, executor: Executor = None) -> ComponentIO:
+        """Wrapper function for calling the underlying component model.
+
+        This function formats the input data, calls the model, and processes the output data.
+        It supports vectorized calls, parallel execution using an executor, or serial execution. These options are
+        checked in that order, with the first available method used. Must set `Component.vectorized=True` if the
+        model supports input arrays of the form `(N,)` or even arbitrary shape `(...,)`.
+
+        !!! Warning "Parallel Execution"
+            The underlying model must be defined in a global module scope if `pickle` is the serialization method for
+            the provided `Executor`.
+
+        !!! Note "Additional return values"
+            The model can return additional items that are not part of `Component.outputs`. These items are returned
+            as object arrays in the output `dict`. Two special return values are `model_cost` and `output_path`.
+            Returning `model_cost` will store the computational cost of a single model evaluation (which is used by
+            `amisc` adaptive surrogate training). Returning `output_path` will store the output file name if the model
+            wrote any files to disk.
+
+        !!! Note "Handling errors"
+            If the underlying component model raises an exception, the error is stored in `output_dict['errors']` with
+            the index of the input data that caused the error. The output data for that index is set to `np.nan`
+            for each output variable.
+
+        :param inputs: The input data for the model, formatted as a `dict` with a key for each input variable and
+                       a corresponding value that is an array of the input data. If specified as a plain list, then the
+                       order is assumed the same as `Component.inputs`.
+        :param alpha: Fidelity indices to adjust the model fidelity (model must request this in its keyword arguments).
+        :param output_path: Directory to save model output files (model must request this in its keyword arguments).
+        :param executor: Executor for parallel execution if the model is not vectorized.
+        :returns: The output data from the model, formatted as a `dict` with a key for each output variable and a
+                  corresponding value that is an array of the output data.
+        """
+        # Format inputs to 1d arrays (fail if missing any)
+        if isinstance(inputs, list | np.ndarray):
+            inputs = np.atleast_1d(inputs)
+            inputs = {var.var_id: inputs[..., i] for i, var in enumerate(self.inputs)}
+        input_dict = {}
+        loop_shape = None
+        for var_id, arr in inputs.items():
+            arr = np.atleast_1d(arr)  # assumes a single input is scalar (i.e. not a field qty)
+            if loop_shape is None:
+                loop_shape = arr.shape
+            if arr.shape != loop_shape:
+                self._logger.warning(f"Input variable '{var_id}' has shape {arr.shape} but expected {loop_shape}.")
+            input_dict[var_id] = np.ravel(arr)
+        for var in self.inputs:
+            if var.var_id not in input_dict:
+                raise ValueError(f"Missing input variable '{var.var_id}'.")
+
+        # Pass extra requested items to the model kwargs
+        kwargs = copy.deepcopy(self.model_kwargs.data)
+        if self.model_arg_requested('output_path'):
+            kwargs['output_path'] = output_path
+        if self.model_arg_requested('input_vars'):
+            kwargs['input_vars'] = self.inputs
+        if self.model_arg_requested('output_vars'):
+            kwargs['output_vars'] = self.outputs
+        if self.model_arg_requested('alpha'):
+            if alpha == 'best':
+                alpha = self.max_alpha
+            elif alpha == 'worst':
+                alpha = (0,) * len(self.max_alpha)
+            kwargs['alpha'] = alpha
+
+        # Compute model (vectorized, executor parallel, or serial)
+        errors = {}
+        if self.vectorized:
+            output_dict = self.model(input_dict, *self.model_args.data, **kwargs)
+        else:
+            executor = executor or self._executor
+            if executor is None:  # Serial
+                results = []
+                for i in range(np.prod(loop_shape)):
+                    try:
+                        res = self.model({k: v[i] for k, v in input_dict.items()}, *self.model_args.data, **kwargs)
+                        results.append(res)
+                    except Exception as e:
+                        results.append({'inputs': {k: v[i] for k, v in input_dict.items()}, 'index': i,
+                                        'model_args': self.model_args.data, 'model_kwargs': kwargs, 'error': str(e)})
+            else:  # Parallel
+                results = []
+                futures = [executor.submit(self.model, {k: v[i] for k, v in input_dict.items()},
+                                           *self.model_args.data, **kwargs) for i in range(np.prod(loop_shape))]
+                wait(futures, timeout=None, return_when=ALL_COMPLETED)
+                for i, fs in enumerate(futures):
+                    try:
+                        res = fs.result()
+                        results.append(res)
+                    except Exception as e:
+                        results.append({'inputs': {k: v[i] for k, v in input_dict.items()}, 'index': i,
+                                        'model_args': self.model_args.data, 'model_kwargs': kwargs, 'error': str(e)})
+            # Set default return values from the first successful model return result
+            output_dict = {}
+            for res in results:
+                if 'error' not in res:
+                    for var in self.outputs:
+                        if var.var_id not in res:
+                            self._logger.warning(f"Model output missing variable '{var.var_id}'.")
+                        else:
+                            output_shape = np.atleast_1d(res[var.var_id]).shape
+                            output_dict.setdefault(var.var_id, np.full((len(results), *output_shape), np.nan))
+                    if res.get('model_cost'):
+                        output_dict.setdefault('model_cost', np.full((len(results),), np.nan))
+                    if res.get('output_path'):
+                        output_dict.setdefault('output_path', np.full((len(results),), None, dtype=object))
+
+                    # Collect any extra model return items into object arrays
+                    for key in res.keys() - output_dict.keys():
+                        output_dict.setdefault(key, np.full((len(results),), None, dtype=object))
+                    break
+
+            # Collect parallel/serial results
+            for i, res in enumerate(results):
+                if 'error' in res:
+                    errors[i] = res
+                else:
+                    for key, val in res.items():
+                        if key in self.outputs:
+                            output_dict[key][i, ...] = np.atleast_1d(val)
+                        elif key in output_dict:
+                            output_dict[key][i] = val
+
+        # Reshape loop dimensions to match the original input shape
+        for key, val in output_dict.items():
+            if key in self.outputs:
+                output_shape = val.shape[1:]
+                val = val.reshape(loop_shape + output_shape)
+                if output_shape == (1,):
+                    val = np.atleast_1d(np.squeeze(val, axis=-1))  # Squeeze singleton outputs
+                if loop_shape == (1,):
+                    val = np.atleast_1d(np.squeeze(val, axis=0))   # Squeeze singleton loop dimensions
+                output_dict[key] = val
+            else:
+                output_dict[key] = val.reshape(loop_shape)
+
+        # Return the output dictionary and any errors
+        if errors:
+            output_dict['errors'] = errors
+        return output_dict
+
+    def model_arg_requested(self, arg_name):
+        """Return whether the underlying component model requested this `arg_name`. Special args include:
+
+        - `output_path` — a save directory created by `amisc` will be passed to the model for saving model output files.
+        - `alpha` — a tuple of model fidelity indices will be passed to the model to adjust fidelity.
+        - `input_vars` — a list of `Variable` objects will be passed to the model for input variable information.
+        - `output_vars` — a list of `Variable` objects will be passed to the model for output variable information.
+
+        :param arg_name: the argument to check for in the underlying component model's function signature
         """
         signature = inspect.signature(self.model)
         for param in signature.parameters.values():
-            if param.name == 'output_path':
+            if param.name == arg_name:
                 return True
         return False
 
-    def update_model(self, new_model: Callable[[ComponentData], ComponentData] = None, model_args: tuple = None,
+    def set_logger(self, log_file=None, logger=None):
+        """Set the logger for the component."""
+        self._log_file = log_file
+        self._logger = logger or get_logger(self.name, log_file=self._log_file)
+
+    def update_model(self, new_model: Callable[[ComponentIO], ComponentIO] = None, model_args: tuple = None,
                      model_kwargs: dict = None, **kwargs):
         """Update the underlying component model or its args/kwargs."""
         if new_model is not None:
             self.model = new_model
         if model_args is not None:
             self.model_args = model_args
-        self.model_kwargs.update(model_kwargs)
-        self.model_kwargs.update(kwargs)
+        new_kwargs = self.model_kwargs.data
+        new_kwargs.update(model_kwargs or {})
+        new_kwargs.update(kwargs)
+        self.model_kwargs = new_kwargs
 
     @staticmethod
-    def _parse_deserialize_args(info: ValidationInfo = None, **kwargs):
+    def _parse_deserialize_args(info: ValidationInfo, **kwargs):
         """Parse deserialize arguments for a `ComponentSerializer` validator."""
         field_name = info.field_name if info is not None else None
         field_name = field_name or kwargs.get('field_name', None)
-        serializers = info.data.get('data_serializers', None) if info is not None else None
-        serializers = serializers or kwargs.get('data_serializers', None)
+        serializers = info.data.get('serializers', None) if info is not None else None
+        serializers = serializers or kwargs.get('serializers', None)
         deserialize_args = kwargs.get('deserialize_args', tuple()) or tuple()
         deserialize_kwargs = kwargs.get('deserialize_kwargs', dict()) or dict()
         serializer = serializers.get(field_name, None) if serializers is not None else None
@@ -518,7 +764,7 @@ class Component(BaseModel, Serializable):
         d = {}
         for key, value in self.__dict__.items():
             if value is not None and not key.startswith('_'):
-                if key == 'data_serializers':
+                if key == 'serializers':
                     d[key] = {k: v.serialize() for k, v in value.items()}
                 elif key in ['inputs', 'outputs'] and not keep_variables:
                     d[key] = value.serialize()
@@ -526,7 +772,7 @@ class Component(BaseModel, Serializable):
                     d[key] = str(value)
                 elif key in ['status']:
                     d[key] = int(value)
-                elif key in ['active_set', 'candidate_set', 'misc_costs', 'misc_coeff']:
+                elif key in ['active_set', 'candidate_set', 'misc_costs', 'misc_coeff', 'misc_states']:
                     d[key] = value.serialize()
                 elif key in ComponentSerializers.__annotations__.keys():
                     d[key] = value.serialize(*serialize_args.get(key, ()), **serialize_kwargs.get(key, {}))
@@ -544,12 +790,15 @@ class Component(BaseModel, Serializable):
         """Convert a single `Component` object (`data`) to a yaml MappingNode (i.e. a `dict`)."""
         try:
             save_path = Path(dumper.stream.name).parent
+            save_file = Path(dumper.stream.name).with_suffix('')
         except Exception:
             save_path = Path(os.getcwd())
+            save_file = 'default'
         serialize_kwargs = {}
-        for key, serializer in comp.data_serializers.items():
-            if isinstance(serializer, PickleSerializable):
-                serialize_kwargs[key] = {'save_path': save_path}
+        for key, serializer in comp.serializers.items():
+            if issubclass(serializer.serializer, PickleSerializable):
+                filename = save_path / f'{save_file}_{comp.name}_{key}.pkl'
+                serialize_kwargs[key] = {'save_path': save_path / filename}
         return dumper.represent_mapping(Component.yaml_tag, comp.serialize(serialize_kwargs=serialize_kwargs,
                                                                            keep_variables=True))
 
@@ -646,21 +895,21 @@ class ComponentSurrogate(ABC):
         multi_index = list() if multi_index is None else multi_index
         assert self.is_downward_closed(multi_index), 'Must be a downward closed set.'
         self.ydim = None
-        self.index_set = []         # The active index set for the MISC approximation
-        self.candidate_set = []     # Candidate indices for refinement
+        self.index_set = []  # The active index set for the MISC approximation
+        self.candidate_set = []  # Candidate indices for refinement
         self._model = model
         self._model_args = model_args
         self._model_kwargs = model_kwargs if model_kwargs is not None else {}
         self.truth_alpha = truth_alpha
         self.x_vars = x_vars if isinstance(x_vars, list) else [x_vars]
         max_alpha = truth_alpha if max_alpha == () else max_alpha
-        max_beta = (2,)*len(self.x_vars) if max_beta == () else max_beta
-        self.max_refine = list(max_alpha + max_beta)    # Max refinement indices
+        max_beta = (2,) * len(self.x_vars) if max_beta == () else max_beta
+        self.max_refine = list(max_alpha + max_beta)  # Max refinement indices
 
         # Initialize important tree-like structures
-        self.surrogates = dict()        # Maps alphas -> betas -> surrogates
-        self.costs = dict()             # Maps alphas -> betas -> wall clock run times
-        self.misc_coeff = dict()        # Maps alphas -> betas -> MISC coefficients
+        self.surrogates = dict()  # Maps alphas -> betas -> surrogates
+        self.costs = dict()  # Maps alphas -> betas -> wall clock run times
+        self.misc_coeff = dict()  # Maps alphas -> betas -> MISC coefficients
 
         # Construct vectors of [0,1]^dim(alpha+beta)
         Nij = len(self.max_refine)
@@ -713,10 +962,10 @@ class ComponentSurrogate(ABC):
                 new_candidates.append(new_cand)
 
         # Build an interpolator for each new candidate
-        if self.executor is None:   # Sequential
+        if self.executor is None:  # Sequential
             for a, b in new_candidates:
                 self.add_surrogate(a, b)
-        else:                       # Parallel
+        else:  # Parallel
             temp_exc = self.executor
             self.executor = None
             for a, b in new_candidates:
@@ -733,7 +982,7 @@ class ComponentSurrogate(ABC):
         self.index_set.append(ele)
         new_candidates = [cand for cand in new_candidates if cand not in self.candidate_set]
         self.candidate_set.extend(new_candidates)
-        self.training_flag = None   # Makes sure misc coeffs get recomputed next time
+        self.training_flag = None  # Makes sure misc coeffs get recomputed next time
 
     def add_surrogate(self, alpha: tuple, beta: tuple):
         """Build a `BaseInterpolator` object for a given $(\\alpha, \\beta)$
@@ -875,21 +1124,21 @@ class ComponentSurrogate(ABC):
         index_mat = np.zeros((len(index_set), len(self.max_refine)), dtype=np.uint8)
         for i, (alpha, beta) in enumerate(index_set):
             index_mat[i, :] = alpha + beta
-        index_mat = np.expand_dims(index_mat, axis=0)                               # (1, Ns, Nij)
+        index_mat = np.expand_dims(index_mat, axis=0)  # (1, Ns, Nij)
 
         misc_coeff = dict()
         for alpha, beta in index_set:
             # Add permutations of [0, 1] to (alpha, beta)
-            alpha_beta = np.array(alpha+beta, dtype=np.uint8)[np.newaxis, :]        # (1, Nij)
-            new_indices = np.expand_dims(alpha_beta + self.ij, axis=1)              # (2**Nij, 1, Nij)
+            alpha_beta = np.array(alpha + beta, dtype=np.uint8)[np.newaxis, :]  # (1, Nij)
+            new_indices = np.expand_dims(alpha_beta + self.ij, axis=1)  # (2**Nij, 1, Nij)
 
             # Find which indices are in the index_set (using np broadcasting comparison)
-            diff = new_indices - index_mat                                  # (2**Nij, Ns, Nij)
-            idx = np.count_nonzero(diff, axis=-1) == 0                      # (2**Nij, Ns)
-            idx = np.any(idx, axis=-1)                                      # (2**Nij,)
-            ij_use = self.ij[idx, :]                                        # (*, Nij)
-            l1_norm = np.sum(np.abs(ij_use), axis=-1)                       # (*,)
-            coeff = np.sum((-1.) ** l1_norm)                                # float
+            diff = new_indices - index_mat  # (2**Nij, Ns, Nij)
+            idx = np.count_nonzero(diff, axis=-1) == 0  # (2**Nij, Ns)
+            idx = np.any(idx, axis=-1)  # (2**Nij,)
+            ij_use = self.ij[idx, :]  # (*, Nij)
+            l1_norm = np.sum(np.abs(ij_use), axis=-1)  # (*,)
+            coeff = np.sum((-1.) ** l1_norm)  # float
 
             # Save misc coeff to a dict() tree structure
             if misc_coeff.get(str(alpha)) is None:
@@ -1053,7 +1302,7 @@ class ComponentSurrogate(ABC):
         # Iterate over every multi-index
         for alpha, beta in indices:
             # Every smaller multi-index must also be included in the indices list
-            sub_sets = [np.arange(tuple(alpha+beta)[i]+1) for i in range(len(alpha) + len(beta))]
+            sub_sets = [np.arange(tuple(alpha + beta)[i] + 1) for i in range(len(alpha) + len(beta))]
             for ele in itertools.product(*sub_sets):
                 tup = (tuple(ele[:len(alpha)]), tuple(ele[len(alpha):]))
                 if tup not in indices:
@@ -1141,12 +1390,12 @@ class SparseGridSurrogate(ComponentSurrogate):
 
     def __init__(self, *args, **kwargs):
         # Initialize tree-like hash structures for maintaining a sparse grid of smaller tensor-product grids
-        self.curr_max_beta = dict()     # Maps alphas -> current max refinement indices
-        self.x_grids = dict()           # Maps alphas -> list of ndarrays specifying 1d grids corresponding to max_beta
-        self.xi_map = dict()            # Maps alphas -> grid point coords -> interpolation points
-        self.yi_map = dict()            # Maps alphas -> grid point coords -> interpolation function values
-        self.yi_nan_map = dict()        # Maps alphas -> grid point coords -> interpolated yi values when yi=nan
-        self.yi_files = dict()          # Maps alphas -> grid point coords -> model output files (optional)
+        self.curr_max_beta = dict()  # Maps alphas -> current max refinement indices
+        self.x_grids = dict()  # Maps alphas -> list of ndarrays specifying 1d grids corresponding to max_beta
+        self.xi_map = dict()  # Maps alphas -> grid point coords -> interpolation points
+        self.yi_map = dict()  # Maps alphas -> grid point coords -> interpolation function values
+        self.yi_nan_map = dict()  # Maps alphas -> grid point coords -> interpolated yi values when yi=nan
+        self.yi_files = dict()  # Maps alphas -> grid point coords -> model output files (optional)
         super().__init__(*args, **kwargs)
 
     # Override
@@ -1289,7 +1538,7 @@ class SparseGridSurrogate(ComponentSurrogate):
                 x_interp = self.xi_map[str(alpha)][str(grid_coord)].reshape((1, xdim))
                 y_interp = np.atleast_1d(np.squeeze(imputer.predict(x_interp)))
                 nan_idx = np.isnan(yi)
-                y_interp[~nan_idx] = yi[~nan_idx]   # Only keep imputed values where yi is nan
+                y_interp[~nan_idx] = yi[~nan_idx]  # Only keep imputed values where yi is nan
                 self.yi_nan_map[str(alpha)][str(grid_coord)] = y_interp
 
         # Go back and try to re-interpolate old nan values as more points get added to the grid
@@ -1357,8 +1606,8 @@ class SparseGridSurrogate(ComponentSurrogate):
 
         # Gather new interpolation grid points
         x_new_idx, x_new, interp = refine_tup
-        xn_coord = []   # Save multi-index coordinates of points to compute model at for refinement
-        xn_pts = np.zeros((0, interp.xdim()), dtype=np.float32)     # Save physical x location of new points
+        xn_coord = []  # Save multi-index coordinates of points to compute model at for refinement
+        xn_pts = np.zeros((0, interp.xdim()), dtype=np.float32)  # Save physical x location of new points
         for i, multi_idx in enumerate(x_new_idx):
             if str(multi_idx) not in self.yi_map[str(alpha)]:
                 # We have not computed this grid coordinate yet

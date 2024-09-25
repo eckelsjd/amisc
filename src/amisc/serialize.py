@@ -5,7 +5,7 @@ Includes:
 - `Serializable` — mixin interface for serializing and deserializing objects
 - `Base64Serializable` — mixin class for serializing objects using base64 encoding
 - `StringSerializable` — mixin class for serializing objects using string representation
-- `PickleSerializable` — mixin class for serializing objects using pickle
+- `PickleSerializable` — mixin class for serializing objects using pickle files
 - `MetaSerializable` — metaclass for serializing a `Serializable` type, always with base64 encoding
 """
 from __future__ import annotations
@@ -19,10 +19,11 @@ from typing import Type
 
 from amisc.utils import parse_function_string
 
+builtin = str | dict | list | int | float | tuple | bool
+
 
 class Serializable(ABC):
     """Mixin interface for serializing and deserializing objects."""
-    builtin = str | dict | list | int | float | tuple | bool
 
     @abstractmethod
     def serialize(self) -> builtin:
@@ -39,7 +40,7 @@ class Serializable(ABC):
 class Base64Serializable(Serializable):
     """Mixin class for serializing objects using base64 encoding."""
     def serialize(self) -> str:
-        return base64.b64encode(base64.b64encode(pickle.dumps(self))).decode('utf-8')
+        return base64.b64encode(pickle.dumps(self)).decode('utf-8')
 
     @classmethod
     def deserialize(cls, serialized_data: str) -> Base64Serializable:
@@ -79,7 +80,7 @@ class PickleSerializable(Serializable):
     def serialize(self, save_path: str | Path = None) -> str:
         with open(Path(save_path), 'wb') as fd:
             pickle.dump(self, fd)
-        return Path(save_path).name
+        return str(Path(save_path).resolve().as_posix())
 
     @classmethod
     def deserialize(cls, serialized_data: str | Path) -> PickleSerializable:
@@ -91,3 +92,6 @@ class PickleSerializable(Serializable):
 class MetaSerializable(Base64Serializable):
     """Metaclass for serializing a `Serializable` type, always with base64 encoding."""
     serializer: Type[Serializable]
+
+    def __str__(self):
+        return f'Meta({self.serializer.__name__})'

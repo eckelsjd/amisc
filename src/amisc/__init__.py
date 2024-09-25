@@ -100,6 +100,8 @@ underlying surrogate method that is implemented here is Lagrange polynomial inte
 `LagrangeInterpolator`). If one wanted to use neural networks instead, the only change required is a new
 implementation of `BaseInterpolator`.
 """
+from pathlib import Path
+
 # import numpy as np
 import yaml
 
@@ -110,13 +112,36 @@ from amisc.variable import Variable, VariableList
 
 __version__ = "0.3.0"
 
-# TODO: make a custom yaml loader/dumper rather than editing global yaml configs
-yaml.add_representer(Variable, Variable._yaml_representer)
-yaml.add_constructor(Variable.yaml_tag, Variable._yaml_constructor)
-yaml.add_representer(VariableList, VariableList._yaml_representer)
-yaml.add_constructor(VariableList.yaml_tag, VariableList._yaml_constructor)
-yaml.add_representer(Component, Component._yaml_representer)
-yaml.add_constructor(Component.yaml_tag, Component._yaml_constructor)
+
+def yaml_loader():
+    """Custom YAML loader that includes `amisc` object tags."""
+    loader = yaml.Loader
+    loader.add_constructor(Variable.yaml_tag, Variable._yaml_constructor)
+    loader.add_constructor(VariableList.yaml_tag, VariableList._yaml_constructor)
+    loader.add_constructor(Component.yaml_tag, Component._yaml_constructor)
+    return loader
+
+
+def yaml_dumper():
+    """Custom YAML dumper that includes `amisc` object tags."""
+    dumper = yaml.Dumper
+    dumper.add_representer(Variable, Variable._yaml_representer)
+    dumper.add_representer(VariableList, VariableList._yaml_representer)
+    dumper.add_representer(Component, Component._yaml_representer)
+    return dumper
+
+
+def yaml_load(yaml_file: str | Path):
+    """Convenience function for loading from a YAML file that contains `amisc` object tags."""
+    with open(Path(yaml_file), 'r', encoding='utf-8') as fd:
+        return yaml.load(fd, Loader=yaml_loader())
+
+
+def yaml_dump(data, yaml_file: str | Path):
+    """Convenience function for dumping to a YAML file using `amisc` object tags."""
+    with open(Path(yaml_file), 'w', encoding='utf-8') as fd:
+        yaml.dump(data, fd, Dumper=yaml_dumper(), allow_unicode=True)
+
 
 # Custom types that are used frequently
 # InterpResults = BaseInterpolator | tuple[list[int | tuple | str], np.ndarray, BaseInterpolator]

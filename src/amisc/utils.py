@@ -26,20 +26,35 @@ def as_tuple(value: str | tuple) -> tuple[int, ...]:
         return tuple([int(i) for i in value])
 
 
-def tokenize(args_str):
-    """Helper function to extract tokens respecting nested structures"""
+def _tokenize(args_str: str) -> list[str]:
+    """
+    Helper function to extract tokens from a string of arguments while respecting nested structures.
+
+    This function processes a string of arguments and splits it into individual tokens, ensuring that nested
+    structures such as parentheses, brackets, and quotes are correctly handled.
+
+    :param args_str: The string of arguments to tokenize
+    :return: A list of tokens extracted from the input string
+
+    !!! Example
+        ```python
+        args_str = "func(1, 2), {'key': 'value'}, [1, 2, 3]"
+        _tokenize(args_str)
+        # Output: ['func(1, 2)', "{'key': 'value'}", '[1, 2, 3]']
+        ```
+    """
+    if args_str is None or len(args_str) == 0:
+        return []
     tokens = []
     current_token = []
     brace_depth = 0
     in_string = False
-    string_char = ''  # noqa: F841
 
     i = 0
     while i < len(args_str):
         char = args_str[i]
         if char in ('"', "'") and (i == 0 or args_str[i - 1] != '\\'):  # Toggle string state
             in_string = not in_string
-            string_char = char if in_string else '' # noqa: F841
             current_token.append(char)
         elif in_string:
             current_token.append(char)
@@ -67,7 +82,7 @@ def tokenize(args_str):
 def parse_function_string(call_string: str) -> tuple[str, list, dict]:
     """Convert a function signature like `func(a, b, key=value)` to name, args, kwargs."""
     # Regex pattern to match function name and arguments
-    pattern = r"(\w+)\((.*)\)"
+    pattern = r"(\w+)(?:\((.*)\))?"
     match = re.match(pattern, call_string.strip())
 
     if not match:
@@ -78,10 +93,9 @@ def parse_function_string(call_string: str) -> tuple[str, list, dict]:
     args_str = match.group(2)
 
     # Regex to split arguments respecting parentheses and quotes
-    # arg_pattern = re.compile(r'''((?:[^,'"()\[\]*]+|'[^']*'|"(?:\\.|[^"\\])*"|\([^)]*\)|\[[^\]]*\]|\*)+|,)''')
     # arg_pattern = re.compile(r'''((?:[^,'"()\[\]{}*]+|'[^']*'|"(?:\\.|[^"\\])*"|\([^)]*\)|\[[^\]]*\]|\{[^{}]*\}|\*)+|,)''')  # noqa: E501
     # pieces = [piece.strip() for piece in arg_pattern.findall(args_str) if piece.strip() != ',']
-    pieces = tokenize(args_str)
+    pieces = _tokenize(args_str)
 
     args = []
     kwargs = {}

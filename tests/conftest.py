@@ -43,7 +43,7 @@ def update_readme_coverage_badge():
     replacement_str = f"![Code Coverage]({badge_url})"
 
     # Use regex to replace badge icon in README
-    with open(README_FILE, "r+") as f:
+    with open(README_FILE, "r+", encoding='utf-8') as f:
         text = f.read()
         if replacement_str in text:
             logging.info('Coverage in README is up to date -- no changes made.')

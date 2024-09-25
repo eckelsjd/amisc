@@ -69,7 +69,7 @@ class Distribution(ABC):
         """Convert a string to a `Distribution` object.
 
         :param dist_string: specifies a PDF or distribution. Can be `Normal(mu, std)`, `Uniform(lb, ub)`,
-                            `Relative(pct)`, or `Tolerance(tol)`. The shorthands `N(0, 1)`, `U(0, 1)`, `rel(5%)`, or
+                            `Relative(pct)`, or `Tolerance(tol)`. The shorthands `N(0, 1)`, `U(0, 1)`, `rel(5)`, or
                             `tol(1)` are also accepted.
         :return: the corresponding `Distribution` object
         """
@@ -96,10 +96,10 @@ class Distribution(ABC):
         elif dist_name in ['R', 'Relative', 'relative', 'rel']:
             # Relative uniform distribution like rel(+-5%)
             try:
-                pct = float(kwargs.get('pct', args[0].split(r'%')[0].strip()))
+                pct = float(kwargs.get('pct', args[0]))
                 return Relative((pct,))
             except Exception as e:
-                raise ValueError(f'Relative distribution string "{dist_string}" is not valid: Try rel(5%).') from e
+                raise ValueError(f'Relative distribution string "{dist_string}" is not valid: Try rel(5).') from e
         elif dist_name in ['T', 'Tolerance', 'tolerance', 'tol']:
             # Uniform distribution within a tolerance like tol(+-1)
             try:
@@ -175,7 +175,7 @@ class Relative(Distribution):
     """
 
     def __str__(self):
-        return rf'rel({self.dist_args[0]}%)'
+        return rf'rel({self.dist_args[0]})'
 
     def domain(self, dist_args=None):
         return None
@@ -283,8 +283,8 @@ class Transform(ABC):
     def from_string(cls, transform_spec: str | list[str]) -> list[Transform] | None:
         """Return a list of Transforms given a list of string specifications. Available transformations are:
 
-        - **linear** — $x_{norm} = mx + b$ specified as `linear(m, b)` or `linear(slope=m, offset=b)`. `b=0` if not
-                       specified. Use `m=1/10` for fractional values (for example).
+        - **linear** — $x_{norm} = mx + b$ specified as `linear(m, b)` or `linear(slope=m, offset=b)`. `m=1, b=0` if not
+                       specified.
         - **log** — $x_{norm} = \\log_b(x)$ specified as `log` or `log10` for the natural or common logarithms. For a
                     different base, use `log(b)`. Optionally, specify `offset` for `log(x+offset)`.
         - **minmax** — $x_{norm} = \\frac{x - a}{b - a}(u - l) + l$ specified as `minmax(a, b, l, u)` or
@@ -323,16 +323,15 @@ class Transform(ABC):
             name, args, kwargs = parse_function_string(spec_string)
             if name.lower() == 'linear':
                 try:
-                    slope = kwargs.get('slope', args[0] if len(args) > 0 else '1')
-                    slope = float(slope.split('/')[0]) / float(slope.split('/')[1]) if '/' in slope else float(slope)
+                    slope = float(kwargs.get('slope', args[0] if len(args) > 0 else 1))
                     offset = float(kwargs.get('offset', args[1] if len(args) > 1 else 0))
                     transforms.append(Linear((slope, offset)))
                 except Exception as e:
                     raise ValueError(f'Linear transform spec "{spec_string}" is not valid: Try "linear(m, b)".') from e
             elif name.lower() in ['log', 'log10']:
                 try:
-                    log_base = kwargs.get('base', args[0] if len(args) > 0 else ('e' if name.lower() == 'log' else 10))
-                    log_base = np.e if log_base == 'e' else float(log_base)
+                    log_base = float(kwargs.get('base', args[0] if len(args) > 0 else (np.e if name.lower() == 'log'
+                                                                                       else 10)))
                     offset = float(kwargs.get('offset', args[1] if len(args) > 1 else 0))
                     transforms.append(Log((log_base, offset)))
                 except Exception as e:
@@ -961,6 +960,15 @@ class VariableList(OrderedDict, Serializable):
 
     def __iter__(self):
         yield from self.values()
+
+    def __eq__(self, other):
+        if isinstance(other, VariableList):
+            for v1, v2 in zip(self.values(), other.values()):
+                if v1 != v2:
+                    return False
+            return True
+        else:
+            return False
 
     def append(self, data: Variable):
         self.update(data)
