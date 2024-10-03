@@ -20,8 +20,9 @@ import os
 import random
 import string
 import tempfile
+import typing
 from abc import ABC, abstractmethod
-from collections import UserDict, UserList
+from collections import UserDict, UserList, deque
 from concurrent.futures import ALL_COMPLETED, Executor, wait
 from dataclasses import dataclass, field
 from enum import IntFlag
@@ -39,8 +40,9 @@ from sklearn.preprocessing import MaxAbsScaler
 from typing_extensions import TypedDict
 
 from amisc.interpolator import BaseInterpolator, LagrangeInterpolator
-from amisc.serialize import Base64Serializable, MetaSerializable, PickleSerializable, Serializable, StringSerializable
-from amisc.utils import as_tuple, get_logger
+from amisc.serialize import Base64Serializable, YamlSerializable, PickleSerializable, Serializable, StringSerializable
+from amisc.utils import as_tuple, get_logger, format_inputs, format_outputs, search_for_file, _get_yaml_path, \
+    _inspect_assignment
 from amisc.variable import Variable, VariableList
 
 MultiIndex = str | tuple[int, ...]
@@ -68,13 +70,37 @@ class ComponentIO(TypedDict, total=False):
 
 
 @dataclass
-class ModelArgs(StringSerializable):
+class ModelArgs(Serializable):
     """Default dataclass for storing model arguments."""
     data: tuple = ()
 
     def __init__(self, *args):
         self.data = args
 
+    def __iter__(self):
+        yield from self.data
+
+    def serialize(self):
+        return list(self.data)
+
+    @classmethod
+    def deserialize(cls, serialized_data):
+        return ModelArgs(*serialized_data)
+
+    @classmethod
+    def from_dict(cls, config: dict) -> ModelArgs:
+        """Create a `ModelArgs` object from a `dict` configuration."""
+        method = config.pop('method', 'default').lower()
+        match method:
+            case 'default':
+                return ModelArgs(*config['args'])
+            case 'string':
+                return StringArgs(*config['args'])
+            case other:
+                raise NotImplementedError(f"Unknown model args method: {method}")
+
+
+class StringArgs(StringSerializable, ModelArgs):
     def __repr__(self):
         return str(self.data)
 
@@ -90,13 +116,41 @@ class ModelArgs(StringSerializable):
 
 
 @dataclass
-class ModelKwargs(StringSerializable):
+class ModelKwargs(Serializable):
     """Default dataclass for storing model keyword arguments."""
     data: dict = field(default_factory=dict)
 
     def __init__(self, **kwargs):
         self.data = kwargs
 
+    def __iter__(self):
+        yield from self.data
+
+    def items(self):
+        return self.data.items()
+
+    def serialize(self):
+        return self.data
+
+    @classmethod
+    def deserialize(cls, serialized_data):
+        return ModelKwargs(**serialized_data)
+
+    @classmethod
+    def from_dict(cls, config: dict) -> ModelKwargs:
+        """Create a `ModelKwargs` object from a `dict` configuration."""
+        method = config.pop('method', 'default_kwargs').lower()
+        match method:
+            case 'default_kwargs':
+                return ModelKwargs(**config)
+            case 'string_kwargs':
+                return StringKwargs(**config)
+            case other:
+                config['method'] = other
+                return ModelKwargs(**config)  # Pass the method through
+
+
+class StringKwargs(StringSerializable, ModelKwargs):
     def __repr__(self):
         return str(self.data)
 
@@ -113,7 +167,16 @@ class ModelKwargs(StringSerializable):
 
 class Interpolator(Serializable, ABC):
     """Interface for an interpolator object that approximates a model."""
-    pass
+
+    @classmethod
+    def from_dict(cls, config: dict) -> Interpolator:
+        """Create an `Interpolator` object from a `dict` configuration."""
+        method = config.pop('method', 'lagrange').lower()
+        match method:
+            case 'lagrange':
+                return Lagrange(**config)
+            case other:
+                raise NotImplementedError(f"Unknown interpolator method: {method}")
 
 
 @dataclass
@@ -246,15 +309,16 @@ class MiscTree(BaseModel, UserDict, Serializable):
         else:
             return False
 
-    def serialize(self, *args, **kwargs) -> dict:
+    def serialize(self, *args, keep_yaml_objects=False, **kwargs) -> dict:
         """Serialize `alpha, beta` indices to string and return a `dict` of internal data.
 
         :param args: extra serialization arguments for internal `InterpolatorState`
+        :param keep_yaml_objects: whether to keep `YamlSerializable` instances in the serialization
         :param kwargs: extra serialization keyword arguments for internal `InterpolatorState`
         """
         ret_dict = {}
         if state_serializer := self.state_serializer(self.data):
-            ret_dict['state_serializer'] = state_serializer.serialize()
+            ret_dict['state_serializer'] = state_serializer.obj if keep_yaml_objects else state_serializer.serialize()
         for alpha, beta, data in self:
             ret_dict.setdefault(str(alpha), dict())
             serialized_data = data.serialize(*args, **kwargs) if isinstance(data, InterpolatorState) else float(data)
@@ -262,18 +326,15 @@ class MiscTree(BaseModel, UserDict, Serializable):
         return ret_dict
 
     @classmethod
-    def deserialize(cls, serialized_data: dict, *args, **kwargs) -> MiscTree:
+    def deserialize(cls, serialized_data: dict) -> MiscTree:
         """"Deserialize using pydantic model validation on `MiscTree` data.
 
         :param serialized_data: the data to deserialize to a `MiscTree` object
-        :param args: extra deserialization arguments for internal `InterpolatorState`
-        :param kwargs: extra deserialization keyword arguments for internal `InterpolatorState`
         """
-        data = cls._validate_data(serialized_data, deserialize_args=args, deserialize_kwargs=kwargs)
-        return MiscTree(data=data)
+        return MiscTree(data=serialized_data)
 
     @classmethod
-    def state_serializer(cls, data: dict) -> MetaSerializable | None:
+    def state_serializer(cls, data: dict) -> YamlSerializable | None:
         """Infer and return the state serializer from the `MiscTree` data."""
         serializer = data.get('state_serializer', None)  # if `data` is serialized
         if serializer is None:  # Otherwise search for an InterpolatorState
@@ -289,23 +350,21 @@ class MiscTree(BaseModel, UserDict, Serializable):
         return cls._validate_state_serializer(serializer)
 
     @classmethod
-    def _validate_state_serializer(cls, state_serializer: Optional[str | type[Serializable] | MetaSerializable]
-                                   ) -> MetaSerializable | None:
+    def _validate_state_serializer(cls, state_serializer: Optional[str | type[Serializable] | YamlSerializable]
+                                   ) -> YamlSerializable | None:
         if state_serializer is None:
             return None
-        elif isinstance(state_serializer, MetaSerializable):
+        elif isinstance(state_serializer, YamlSerializable):
             return state_serializer
         elif isinstance(state_serializer, str):
-            return MetaSerializable.deserialize(state_serializer)  # Load the serializer type from base64 encoding
+            return YamlSerializable.deserialize(state_serializer)  # Load the serializer type from string
         else:
-            return MetaSerializable(serializer=state_serializer)
+            return YamlSerializable(obj=state_serializer)
 
     @field_validator('data', mode='before')
     @classmethod
-    def _validate_data(cls, serialized_data: dict, **kwargs) -> dict:
+    def _validate_data(cls, serialized_data: dict) -> dict:
         state_serializer = cls.state_serializer(serialized_data)
-        deserialize_args = kwargs.get('deserialize_args', tuple()) or tuple()
-        deserialize_kwargs = kwargs.get('deserialize_kwargs', dict()) or dict()
         ret_dict = {}
         for alpha, beta_dict in serialized_data.items():
             if alpha == 'state_serializer':
@@ -317,7 +376,7 @@ class MiscTree(BaseModel, UserDict, Serializable):
                 if isinstance(data, InterpolatorState):
                     pass
                 elif state_serializer is not None:
-                    data = state_serializer.serializer.deserialize(data, *deserialize_args, **deserialize_kwargs)
+                    data = state_serializer.obj.deserialize(data)
                 else:
                     data = float(data)
                 assert isinstance(data, InterpolatorState | float)
@@ -341,12 +400,11 @@ class MiscTree(BaseModel, UserDict, Serializable):
         except Exception:
             return default
 
-    def update(self, data_dict: dict = None, deserialize_args: tuple = (), deserialize_kwargs: dict = None, **kwargs):
+    def update(self, data_dict: dict = None, **kwargs):
         """Force `dict.update()` through the validator."""
         data_dict = data_dict or dict()
         data_dict.update(kwargs)
-        data_dict = self._validate_data(data_dict, deserialize_args=deserialize_args,
-                                        deserialize_kwargs=deserialize_kwargs)
+        data_dict = self._validate_data(data_dict)
         super().update(data_dict)
 
     def __setitem__(self, key: tuple | MultiIndex, value: float | InterpolatorState):
@@ -388,7 +446,16 @@ class SurrogateStatus(IntFlag):
 
 class TrainingData(Serializable, ABC):
     """Interface for storing surrogate training data."""
-    pass
+
+    @classmethod
+    def from_dict(cls, config: dict) -> TrainingData:
+        """Create a `TrainingData` object from a `dict` configuration."""
+        method = config.pop('method', 'sparse-grid').lower()
+        match method:
+            case 'sparse-grid':
+                return SparseGrid(**config)
+            case other:
+                raise NotImplementedError(f"Unknown training data method: {method}")
 
 
 @dataclass
@@ -399,10 +466,10 @@ class SparseGrid(TrainingData, PickleSerializable):
 
 class ComponentSerializers(TypedDict, total=False):
     """Type hint for the `Component` class data serializers."""
-    model_args: str | type[Serializable] | MetaSerializable
-    model_kwargs: str | type[Serializable] | MetaSerializable
-    interpolator: str | type[Serializable] | MetaSerializable
-    training_data: str | type[Serializable] | MetaSerializable
+    model_args: str | type[Serializable] | YamlSerializable
+    model_kwargs: str | type[Serializable] | YamlSerializable
+    interpolator: str | type[Serializable] | YamlSerializable
+    training_data: str | type[Serializable] | YamlSerializable
 
 
 class Component(BaseModel, Serializable):
@@ -410,11 +477,11 @@ class Component(BaseModel, Serializable):
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True,
                               protected_namespaces=(), extra='allow')
     # Configuration
-    serializers: Optional[ComponentSerializers] = None  # TODO: find a way to allow setting as private before __init__
-    model: Callable[[ComponentIO, ...], ComponentIO]
+    serializers: Optional[ComponentSerializers] = None
+    model: str | Callable[[dict | ComponentIO, ...], dict | ComponentIO]
     inputs: Variables
     outputs: Variables
-    name: Annotated[str, Field(default_factory=lambda: "Component_" + "".join(random.choices(string.digits, k=3)))]
+    name: Optional[str] = None
     model_args: str | tuple | ModelArgs = ModelArgs()
     model_kwargs: str | dict | ModelKwargs = ModelKwargs()
     max_alpha: MultiIndex = ()
@@ -432,17 +499,23 @@ class Component(BaseModel, Serializable):
     status: int | SurrogateStatus = SurrogateStatus.RESET
 
     # Internal
-    _log_file: Optional[str | Path] = None
     _logger: Optional[logging.Logger] = None
     _executor: Optional[Executor] = None
-    _ij: Optional[np.ndarray] = None
 
-    def __init__(self, /, model, inputs, outputs, *, log_file=None, executor=None, **kwargs):
+    def __init__(self, /, model, inputs, outputs, *, executor=None, name=None, **kwargs):
+        if name is None:
+            name = _inspect_assignment('Component')  # try to assign the name from inspection
+        name = name or "Component_" + "".join(random.choices(string.digits, k=3))
+
         # Gather data serializers from type checks (if not passed in as a kwarg)
-        serializers = kwargs.get('serializers', {})
+        serializers = kwargs.get('serializers', {})  # directly passing serializers will override type checks
         for key in ComponentSerializers.__annotations__.keys():
+            field = kwargs.get(key, None)
+            if isinstance(field, dict):
+                field_super = next(filter(lambda x: issubclass(x, Serializable),
+                                          typing.get_args(self.model_fields[key].annotation)), None)
+                field = field_super.from_dict(field) if field_super is not None else field
             if not serializers.get(key, None):
-                field = kwargs.get(key, None)
                 serializers[key] = type(field) if isinstance(field, Serializable) else (
                     type(self.model_fields[key].default))
         kwargs['serializers'] = serializers
@@ -453,12 +526,11 @@ class Component(BaseModel, Serializable):
                 kwargs[kw] = {'data': value} if (not isinstance(value, dict) or
                                                  value.get('data', None) is None) else value
 
-        super().__init__(model=model, inputs=inputs, outputs=outputs, **kwargs)  # Pydantic validation runs here
+        super().__init__(model=model, inputs=inputs, outputs=outputs, name=name, **kwargs)  # Runs pydantic validation
 
         # Set internal properties
         assert self.is_downward_closed(self.active_set + self.candidate_set)
-        self._executor = executor
-        self.set_logger(log_file=log_file)
+        self.executor = executor
 
         # Construct vectors of [0,1]^dim(alpha+beta)
         Nij = len(self.max_alpha) + len(self.max_beta)
@@ -466,19 +538,38 @@ class Component(BaseModel, Serializable):
         for i, ele in enumerate(itertools.product([0, 1], repeat=Nij)):
             self._ij[i, :] = ele
 
+    def __repr__(self):
+        s = f'---- {self.name} ----\n'
+        s += f'Inputs:  {self.inputs}\n'
+        s += f'Outputs: {self.outputs}\n'
+        s += f'Model:   {self.model}'
+        return s
+
+    def __str__(self):
+        return self.__repr__()
+
     @field_validator('serializers')
     @classmethod
     def _validate_serializers(cls, serializers: ComponentSerializers) -> ComponentSerializers:
         for key, serializer in serializers.items():
             if serializer is None:
                 serializers[key] = None
-            elif isinstance(serializer, MetaSerializable):
+            elif isinstance(serializer, YamlSerializable):
                 serializers[key] = serializer
             elif isinstance(serializer, str):
-                serializers[key] = MetaSerializable.deserialize(serializer)
+                serializers[key] = YamlSerializable.deserialize(serializer)
             else:
-                serializers[key] = MetaSerializable(serializer=serializer)
+                serializers[key] = YamlSerializable(obj=serializer)
         return serializers
+
+    @field_validator('model')
+    @classmethod
+    def _validate_model(cls, model: str | Callable) -> Callable:
+        """Expects model as a callable or a yaml !!python/name string representation."""
+        if isinstance(model, str):
+            return YamlSerializable.deserialize(model).obj
+        else:
+            return model
 
     @field_validator('inputs', 'outputs')
     @classmethod
@@ -488,34 +579,19 @@ class Component(BaseModel, Serializable):
         else:
             return VariableList.deserialize(variables)
 
-    @field_validator('model_args', 'model_kwargs')
-    @classmethod
-    def _validate_model_args(cls, args: str | tuple | dict | ModelArgs | ModelKwargs,
-                             info: ValidationInfo, **kwargs) -> ModelArgs | ModelKwargs:
-        serializer, deserialize_args, deserialize_kwargs = cls._parse_deserialize_args(info, **kwargs)
-        if isinstance(args, str):
-            return serializer.serializer.deserialize(args, *deserialize_args, **deserialize_kwargs)
-        elif isinstance(args, dict):
-            return serializer.serializer(**args)
-        elif isinstance(args, tuple):
-            return serializer.serializer(*args)
-        else:
-            return args
-
     @field_validator('max_alpha', 'max_beta')
     @classmethod
     def _validate_indices(cls, multi_index: MultiIndex) -> tuple[int, ...]:
         return as_tuple(multi_index)
 
-    @field_validator('interpolator', 'training_data')
+    @field_validator('model_args', 'model_kwargs', 'interpolator', 'training_data')
     @classmethod
-    def _validate_arbitrary_serializable(cls, data: TrainingData | Interpolator | Any, info: ValidationInfo,
-                                         **kwargs) -> TrainingData | Interpolator:
-        serializer, deserialize_args, deserialize_kwargs = cls._parse_deserialize_args(info, **kwargs)
-        if isinstance(data, TrainingData | Interpolator):
+    def _validate_arbitrary_serializable(cls, data: Any, info: ValidationInfo) -> Any:
+        serializer = info.data.get('serializers').get(info.field_name).obj
+        if isinstance(data, Serializable):
             return data
         else:
-            return serializer.serializer.deserialize(data, *deserialize_args, **deserialize_kwargs)
+            return serializer.deserialize(data)
 
     @field_validator('status')
     @classmethod
@@ -529,6 +605,18 @@ class Component(BaseModel, Serializable):
     @property
     def ydim(self) -> int:
         return len(self.outputs)
+
+    @property
+    def executor(self) -> Executor:
+        return self._executor
+
+    @executor.setter
+    def executor(self, executor: Executor):
+        self._executor = executor
+
+    @property
+    def logger(self) -> logging.Logger:
+        return self._logger
 
     def __eq__(self, other):
         if isinstance(other, Component):
@@ -544,8 +632,8 @@ class Component(BaseModel, Serializable):
         else:
             return False
 
-    def call_model(self, inputs: ComponentIO, alpha: Literal['best', 'worst'] | tuple = None,
-                   output_path: str | Path = None, executor: Executor = None) -> ComponentIO:
+    def call_model(self, inputs: dict | ComponentIO, alpha: Literal['best', 'worst'] | tuple = None,
+                   output_path: str | Path = None, executor: Executor = None) -> dict | ComponentIO:
         """Wrapper function for calling the underlying component model.
 
         This function formats the input data, calls the model, and processes the output data.
@@ -578,22 +666,15 @@ class Component(BaseModel, Serializable):
         :returns: The output data from the model, formatted as a `dict` with a key for each output variable and a
                   corresponding value that is an array of the output data.
         """
-        # Format inputs to 1d arrays (fail if missing any)
+        # Format inputs to a common loop shape (fail if missing any)
         if isinstance(inputs, list | np.ndarray):
             inputs = np.atleast_1d(inputs)
-            inputs = {var.var_id: inputs[..., i] for i, var in enumerate(self.inputs)}
-        input_dict = {}
-        loop_shape = None
-        for var_id, arr in inputs.items():
-            arr = np.atleast_1d(arr)  # assumes a single input is scalar (i.e. not a field qty)
-            if loop_shape is None:
-                loop_shape = arr.shape
-            if arr.shape != loop_shape:
-                self._logger.warning(f"Input variable '{var_id}' has shape {arr.shape} but expected {loop_shape}.")
-            input_dict[var_id] = np.ravel(arr)
+            inputs = {var.name: inputs[..., i] for i, var in enumerate(self.inputs)}
+        inputs, loop_shape = format_inputs(inputs, var_shape={var: var.shape for var in self.inputs})
+        N = int(np.prod(loop_shape))
         for var in self.inputs:
-            if var.var_id not in input_dict:
-                raise ValueError(f"Missing input variable '{var.var_id}'.")
+            if var.name not in inputs:
+                raise ValueError(f"Missing input variable '{var.name}'.")
 
         # Pass extra requested items to the model kwargs
         kwargs = copy.deepcopy(self.model_kwargs.data)
@@ -613,78 +694,93 @@ class Component(BaseModel, Serializable):
         # Compute model (vectorized, executor parallel, or serial)
         errors = {}
         if self.vectorized:
-            output_dict = self.model(input_dict, *self.model_args.data, **kwargs)
+            output_dict = self.model(inputs, *self.model_args, **kwargs)
         else:
-            executor = executor or self._executor
+            executor = executor or self.executor
             if executor is None:  # Serial
-                results = []
-                for i in range(np.prod(loop_shape)):
+                results = deque(maxlen=N)
+                for i in range(N):
                     try:
-                        res = self.model({k: v[i] for k, v in input_dict.items()}, *self.model_args.data, **kwargs)
-                        results.append(res)
+                        results.append(self.model({k: v[i] for k, v in inputs.items()}, *self.model_args, **kwargs))
                     except Exception as e:
-                        results.append({'inputs': {k: v[i] for k, v in input_dict.items()}, 'index': i,
+                        results.append({'inputs': {k: v[i] for k, v in inputs.items()}, 'index': i,
                                         'model_args': self.model_args.data, 'model_kwargs': kwargs, 'error': str(e)})
             else:  # Parallel
-                results = []
-                futures = [executor.submit(self.model, {k: v[i] for k, v in input_dict.items()},
+                results = deque(maxlen=N)
+                futures = [executor.submit(self.model, {k: v[i] for k, v in inputs.items()},
                                            *self.model_args.data, **kwargs) for i in range(np.prod(loop_shape))]
                 wait(futures, timeout=None, return_when=ALL_COMPLETED)
                 for i, fs in enumerate(futures):
                     try:
-                        res = fs.result()
-                        results.append(res)
+                        results.append(fs.result())
                     except Exception as e:
-                        results.append({'inputs': {k: v[i] for k, v in input_dict.items()}, 'index': i,
+                        results.append({'inputs': {k: v[i] for k, v in inputs.items()}, 'index': i,
                                         'model_args': self.model_args.data, 'model_kwargs': kwargs, 'error': str(e)})
-            # Set default return values from the first successful model return result
-            output_dict = {}
-            for res in results:
-                if 'error' not in res:
-                    for var in self.outputs:
-                        if var.var_id not in res:
-                            self._logger.warning(f"Model output missing variable '{var.var_id}'.")
-                        else:
-                            output_shape = np.atleast_1d(res[var.var_id]).shape
-                            output_dict.setdefault(var.var_id, np.full((len(results), *output_shape), np.nan))
-                    if res.get('model_cost'):
-                        output_dict.setdefault('model_cost', np.full((len(results),), np.nan))
-                    if res.get('output_path'):
-                        output_dict.setdefault('output_path', np.full((len(results),), None, dtype=object))
-
-                    # Collect any extra model return items into object arrays
-                    for key in res.keys() - output_dict.keys():
-                        output_dict.setdefault(key, np.full((len(results),), None, dtype=object))
-                    break
 
             # Collect parallel/serial results
-            for i, res in enumerate(results):
+            output_dict = {}
+            for i in range(N):
+                res = results.popleft()
                 if 'error' in res:
                     errors[i] = res
                 else:
                     for key, val in res.items():
                         if key in self.outputs:
+                            if output_dict.get(key) is None:
+                                output_dict.setdefault(key, np.full((N, *np.atleast_1d(val).shape), np.nan))
                             output_dict[key][i, ...] = np.atleast_1d(val)
-                        elif key in output_dict:
+                        elif key == 'model_cost':
+                            if output_dict.get(key) is None:
+                                output_dict.setdefault(key, np.full((N,), np.nan))
                             output_dict[key][i] = val
+                        else:
+                            if output_dict.get(key) is None:
+                                output_dict.setdefault(key, np.full((N,), None, dtype=object))
+                            output_dict[key][i]
 
         # Reshape loop dimensions to match the original input shape
-        for key, val in output_dict.items():
-            if key in self.outputs:
-                output_shape = val.shape[1:]
-                val = val.reshape(loop_shape + output_shape)
-                if output_shape == (1,):
-                    val = np.atleast_1d(np.squeeze(val, axis=-1))  # Squeeze singleton outputs
-                if loop_shape == (1,):
-                    val = np.atleast_1d(np.squeeze(val, axis=0))   # Squeeze singleton loop dimensions
-                output_dict[key] = val
-            else:
-                output_dict[key] = val.reshape(loop_shape)
+        output_dict = format_outputs(output_dict, loop_shape)
+
+        for var in self.outputs:
+            if var.name not in output_dict:
+                self.logger.warning(f"Model output missing variable '{var.name}'.")
 
         # Return the output dictionary and any errors
         if errors:
             output_dict['errors'] = errors
         return output_dict
+
+    def predict(self, x: dict | ComponentIO, use_model: Literal['best', 'worst'] | tuple = None,
+                model_dir: str | Path = None, training: bool = False, index_set: IndexSet = None) -> dict | ComponentIO:
+        """Evaluate the MISC approximation at new inputs `x`.
+
+        !!! Note
+            By default this will predict the MISC surrogate approximation. However, for convenience you can also specify
+            `use_model` to call the underlying model function instead.
+
+        :param x: `dict` of input arrays for each variable input
+        :param use_model: 'best'=high-fidelity, 'worst'=low-fidelity, tuple=a specific `alpha`, None=surrogate (default)
+        :param model_dir: directory to save output files if `use_model` is specified, ignored otherwise
+        :param training: if `True`, then only compute with the active index set, otherwise use all candidates as well
+        :param index_set: a list of concatenated $(\\alpha, \\beta)$ to override `self.active_set` if given, else ignore
+        :returns: the surrogate approximation of the function (or the function itself if `use_model`)
+        """
+        if use_model is not None:
+            return self.call_model(x, alpha=use_model, output_path=model_dir)
+
+        index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
+        x, loop_shape = format_inputs(x, var_shape={var: var.shape for var in self.inputs})  # {'x': (N, ...)}
+        y = {}
+
+        # TODO: Compress input fields and call surrogates
+        for alpha, beta in index_set:
+            comb_coeff = misc_coeff[str(alpha)][str(beta)]
+            if np.abs(comb_coeff) > 0:
+                func = self.surrogates[str(alpha)][str(beta)]
+                y += int(comb_coeff) * func(x)
+        # TODO: Reconstruct output fields
+
+        return format_outputs(y, loop_shape)
 
     def model_arg_requested(self, arg_name):
         """Return whether the underlying component model requested this `arg_name`. Special args include:
@@ -702,13 +798,24 @@ class Component(BaseModel, Serializable):
                 return True
         return False
 
-    def set_logger(self, log_file=None, logger=None):
-        """Set the logger for the component."""
-        self._log_file = log_file
-        self._logger = logger or get_logger(self.name, log_file=self._log_file)
+    def set_logger(self, log_file: str | Path = None, stdout: bool = None, logger: logging.Logger = None):
+        """Set a new `logging.Logger` object.
 
-    def update_model(self, new_model: Callable[[ComponentIO], ComponentIO] = None, model_args: tuple = None,
-                     model_kwargs: dict = None, **kwargs):
+        :param log_file: log to file (if provided)
+        :param stdout: whether to connect the logger to console (defaults to whatever is currently set or False)
+        :param logger: the logging object to use (if None, then a new logger is created; this will override
+                       the `log_file` and `stdout` arguments if set)
+        """
+        if stdout is None:
+            stdout = False
+            if self._logger is not None:
+                for handler in self._logger.handlers:
+                    if isinstance(handler, logging.StreamHandler):
+                        stdout = True
+                        break
+        self._logger = logger or get_logger(self.name, log_file=log_file, stdout=stdout)
+
+    def update_model(self, new_model=None, model_args: tuple = None, model_kwargs: dict = None, **kwargs):
         """Update the underlying component model or its args/kwargs."""
         if new_model is not None:
             self.model = new_model
@@ -718,19 +825,6 @@ class Component(BaseModel, Serializable):
         new_kwargs.update(model_kwargs or {})
         new_kwargs.update(kwargs)
         self.model_kwargs = new_kwargs
-
-    @staticmethod
-    def _parse_deserialize_args(info: ValidationInfo, **kwargs):
-        """Parse deserialize arguments for a `ComponentSerializer` validator."""
-        field_name = info.field_name if info is not None else None
-        field_name = field_name or kwargs.get('field_name', None)
-        serializers = info.data.get('serializers', None) if info is not None else None
-        serializers = serializers or kwargs.get('serializers', None)
-        deserialize_args = kwargs.get('deserialize_args', tuple()) or tuple()
-        deserialize_kwargs = kwargs.get('deserialize_kwargs', dict()) or dict()
-        serializer = serializers.get(field_name, None) if serializers is not None else None
-
-        return serializer, deserialize_args, deserialize_kwargs
 
     @staticmethod
     def is_downward_closed(indices: IndexSet) -> bool:
@@ -757,7 +851,7 @@ class Component(BaseModel, Serializable):
                     return False
         return True
 
-    def serialize(self, keep_variables=False, serialize_args=None, serialize_kwargs=None) -> dict:
+    def serialize(self, keep_yaml_objects=False, serialize_args=None, serialize_kwargs=None) -> dict:
         """Convert to a `dict` with only standard Python types as fields and values."""
         serialize_args = serialize_args or dict()
         serialize_kwargs = serialize_kwargs or dict()
@@ -765,15 +859,21 @@ class Component(BaseModel, Serializable):
         for key, value in self.__dict__.items():
             if value is not None and not key.startswith('_'):
                 if key == 'serializers':
-                    d[key] = {k: v.serialize() for k, v in value.items()}
-                elif key in ['inputs', 'outputs'] and not keep_variables:
-                    d[key] = value.serialize()
+                    # Update the serializers
+                    serializers = self._validate_serializers({k: type(getattr(self, k)) for k in value.keys()})
+                    d[key] = {k: (v.obj if keep_yaml_objects else v.serialize()) for k, v in serializers.items()}
+                elif key in ['inputs', 'outputs'] and not keep_yaml_objects:
+                    d[key] = value.serialize(**serialize_kwargs.get(key, {}))
+                elif key == 'model' and not keep_yaml_objects:
+                    d[key] = YamlSerializable(obj=value).serialize()
                 elif key in ['max_beta', 'max_alpha']:
                     d[key] = str(value)
                 elif key in ['status']:
                     d[key] = int(value)
-                elif key in ['active_set', 'candidate_set', 'misc_costs', 'misc_coeff', 'misc_states']:
+                elif key in ['active_set', 'candidate_set']:
                     d[key] = value.serialize()
+                elif key in ['misc_costs', 'misc_coeff', 'misc_states']:
+                    d[key] = value.serialize(keep_yaml_objects=keep_yaml_objects)
                 elif key in ComponentSerializers.__annotations__.keys():
                     d[key] = value.serialize(*serialize_args.get(key, ()), **serialize_kwargs.get(key, {}))
                 else:
@@ -781,35 +881,60 @@ class Component(BaseModel, Serializable):
         return d
 
     @classmethod
-    def deserialize(cls, data: dict) -> Component:
-        """Return a `Component` from `data`. Let pydantic handle field validation and conversion."""
-        return cls(**data) if isinstance(data, dict) else data
+    def deserialize(cls, serialized_data: dict, search_paths=None, search_keys=None) -> Component:
+        """Return a `Component` from `data`. Let pydantic handle field validation and conversion. If any component
+        data has been saved to file and the save file doesn't exist, then the loader will search for the file
+        in the current working directory and any additional search paths provided.
+
+        :param serialized_data: the serialized data to construct the object from
+        :param search_paths: paths to try and find any save files (i.e. if they moved since they were serialized),
+                             will always search in the current working directory by default
+        :param search_keys: keys to search for save files in each component (default is all keys in
+                            [`ComponentSerializers`][amisc.component.ComponentSerializers], in addition to variable
+                            inputs and outputs)
+        """
+        if isinstance(serialized_data, Component):
+            return serialized_data
+
+        search_paths = search_paths or []
+        search_keys = search_keys or []
+        search_keys.extend(ComponentSerializers.__annotations__.keys())
+        comp = serialized_data
+
+        for key in search_keys:
+            if (filename := comp.get(key, None)) is not None:
+                comp[key] = search_for_file(filename, search_paths=search_paths)
+
+        for key in ['inputs', 'outputs']:
+            for var in comp[key]:
+                if isinstance(var, dict):
+                    if (compression := var.get('compression', None)) is not None:
+                        var['compression'] = search_for_file(compression, search_paths=search_paths)
+
+        return cls(**comp)
 
     @staticmethod
     def _yaml_representer(dumper: yaml.Dumper, comp: Component) -> yaml.MappingNode:
         """Convert a single `Component` object (`data`) to a yaml MappingNode (i.e. a `dict`)."""
-        try:
-            save_path = Path(dumper.stream.name).parent
-            save_file = Path(dumper.stream.name).with_suffix('')
-        except Exception:
-            save_path = Path(os.getcwd())
-            save_file = 'default'
+        save_path, save_file = _get_yaml_path(dumper)
         serialize_kwargs = {}
         for key, serializer in comp.serializers.items():
-            if issubclass(serializer.serializer, PickleSerializable):
+            if issubclass(serializer.obj, PickleSerializable):
                 filename = save_path / f'{save_file}_{comp.name}_{key}.pkl'
                 serialize_kwargs[key] = {'save_path': save_path / filename}
         return dumper.represent_mapping(Component.yaml_tag, comp.serialize(serialize_kwargs=serialize_kwargs,
-                                                                           keep_variables=True))
+                                                                           keep_yaml_objects=True))
 
     @staticmethod
     def _yaml_constructor(loader: yaml.Loader, node):
         """Convert the `!Component` tag in yaml to a `Component` object."""
+        # Add a file search path in the same directory as the yaml file being loaded from
+        save_path, save_file = _get_yaml_path(loader)
         if isinstance(node, yaml.SequenceNode):
-            return [ele if isinstance(ele, Component) else Component.deserialize(ele) for ele in
-                    loader.construct_sequence(node, deep=True)]
+            return [ele if isinstance(ele, Component) else Component.deserialize(ele, search_paths=[save_path])
+                    for ele in loader.construct_sequence(node, deep=True)]
         elif isinstance(node, yaml.MappingNode):
-            return Component.deserialize(loader.construct_mapping(node, deep=True))
+            return Component.deserialize(loader.construct_mapping(node, deep=True), search_paths=[save_path])
         else:
             raise NotImplementedError(f'The "{Component.yaml_tag}" yaml tag can only be used on a yaml sequence or '
                                       f'mapping, not a "{type(node)}".')

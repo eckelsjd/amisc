@@ -4,36 +4,40 @@ Includes:
 
 - `Distribution` — an object for specifying a PDF. `Normal`, `Uniform`, `Relative`, and `Tolerance` are available.
 - `Transform` — an object for specifying a transformation. `Linear`, `Log`, `Minmax`, and `Zscore` are available.
-- `FieldQuantity` — a dictionary spec for variables that contain field quantity data (i.e. high-dimensional outputs)
+- `Compression` — an object for specifying a compression method for field quantities. `SVD` is available.
 - `CompressionData` — a dictionary spec for passing data to/from `Variable.compress()`
 - `Variable` — an object that stores information about a variable and includes methods for sampling, pdf evaluation,
                normalization, compression, loading from file, etc.
-- `VariableList` — a container for Variables that provides dict-like access of Variables by `var_id` along with normal
+- `VariableList` — a container for Variables that provides dict-like access of Variables by `name` along with normal
                    indexing and slicing
 
 The preferred serialization of `Variable` and `VariableList` is to/from yaml. `Distribution` and `Transform`
-objects can be serialized via conversion to/from string.
+objects can be serialized via conversion to/from string. `Compression` objects can be serialized via pickle.
 """
 from __future__ import annotations
 
 import ast
+import inspect
 import random
 import string
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal, Optional, Union
+from typing import ClassVar, Optional, Union
 
-import h5py
 import numpy as np
 import yaml
 from numpy.typing import ArrayLike
-from pydantic import BaseModel, ConfigDict, DirectoryPath, Field, FilePath, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 from scipy.interpolate import RBFInterpolator
 from typing_extensions import TypedDict
 
-from amisc.serialize import Serializable
-from amisc.utils import parse_function_string
+from amisc.serialize import Serializable, PickleSerializable
+from amisc.utils import parse_function_string, search_for_file, _get_yaml_path, _inspect_assignment
+
+__all__ = ['Distribution', 'Uniform', 'Normal', 'Relative', 'Tolerance', 'CompressionData', 'Compression', 'SVD',
+           'Transform', 'Linear', 'Log', 'Minmax', 'Zscore', 'Variable', 'VariableList']
 
 
 class Distribution(ABC):
@@ -219,22 +223,197 @@ class Tolerance(Distribution):
         return np.ones(x.shape)
 
 
-class FieldQuantity(TypedDict, total=False):
-    """Configuration `dict` for field quantities.
+@dataclass
+class Compression(PickleSerializable, ABC):
+    """Base class for compression methods."""
+    fields: list[str] = field(default_factory=list)
+    method: str = 'svd'
+    shape: tuple = ()
+    coords: np.ndarray = None  # (num_pts, dim)
+    interpolate_method: str = 'rbf'
+    interpolate_opts: dict = field(default_factory=dict)
+    _map_computed: bool = False
 
-    TODO: Make this interface more general and check that all compression data is provided and in the right format
+    @property
+    def map_exists(self):
+        """All compression methods should have `coords` when their map has been constructed."""
+        return self.coords is not None and self._map_computed
 
-    :ivar quantities: a list of quantities included with this FieldQuantity (e.g. `v_x, v_y, v_z` for 3d velocity)
-    :ivar compress_datapath: the path to the compression data
-    :ivar compress_method: the compression method
-    :ivar compress_kwargs: extra args for `Variable.compress()`
-    :ivar interp_kwargs: extra args for the `RBFInterpolator` used during compression
-    """
-    quantities: list[str]
-    compress_datapath: Union[FilePath, DirectoryPath, None]
-    compress_method: Literal['svd']
-    compress_kwargs: dict[str, Any]
-    interp_kwargs: dict[str, Any]
+    @property
+    def dim(self):
+        """Number of physical grid coordinates for the field quantity, (i.e. x,y,z spatial dims)"""
+        return self.coords.shape[1] if (self.coords is not None and len(self.coords.shape) > 1) else 1
+
+    @property
+    def num_pts(self):
+        """Number of physical points in the compression grid"""
+        return self.coords.shape[0] if self.coords is not None else None
+
+    @property
+    def num_qoi(self):
+        """Number of quantities of interest at each grid point, (i.e. ux, uy, uz for 3d velocity data)"""
+        return len(self.fields) if self.fields is not None else 1
+
+    @property
+    def dof(self):
+        """Total degrees of freedom in the compression grid."""
+        return self.num_pts * self.num_qoi if self.num_pts is not None else None
+
+    def _correct_coords(self, coords):
+        """Correct the coordinates to be in the correct shape for compression."""
+        coords = np.atleast_1d(coords)
+        if len(coords.shape) == 1:
+            coords = coords[..., np.newaxis] if self.dim == 1 else coords[np.newaxis, ...]
+        return coords
+
+    def interpolator(self):
+        """The interpolator to use during compression and reconstruction. Interpolator expects to be used as:
+
+        ```python
+        xg = np.ndarray    # (num_pts, dim)  grid coordinates
+        yg = np.ndarray    # (num_pts, ...)  scalar values on grid
+        xp = np.ndarray    # (Q, dim)        evaluation points
+
+        interp = interpolate_method(xg, yg, **interpolate_opts)
+
+        yp = interp(xp)    # (Q, ...)        interpolated values
+        ```
+        """
+        method = self.interpolate_method or 'rbf'
+        match method.lower():
+            case 'rbf':
+                return RBFInterpolator
+            case other:
+                raise NotImplementedError(f"Interpolation method '{other}' is not implemented.")
+
+    def interpolate_from_grid(self, states, new_coords):
+        """Interpolate the states on the compression grid to new coordinates.
+
+        :param states: `(*loop_shape, dof)` - the states on the compression grid
+        :param new_coords: `(*coord_shape, dim)` - the new coordinates to interpolate to
+        :return: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the interpolated states
+        """
+        new_coords = self._correct_coords(new_coords)
+        grid_coords = self._correct_coords(self.coords)
+        skip_interp = (new_coords.shape == grid_coords.shape and np.allclose(new_coords, grid_coords))
+
+        ret_dict = {}
+        loop_shape = states.shape[:-1]
+        coords_shape = new_coords.shape[:-1]
+        states = states.reshape((*loop_shape, self.num_pts, self.num_qoi))
+        new_coords = new_coords.reshape((-1, self.dim))
+        for i, qoi in enumerate(self.fields):
+            if skip_interp:
+                ret_dict[qoi] = states[..., i]
+            else:
+                reshaped_states = states[..., i].reshape(-1, self.num_pts).T  # (num_pts, ...)
+                interp = self.interpolator()(grid_coords, reshaped_states, **self.interpolate_opts)
+                yp = interp(new_coords)
+                ret_dict[qoi] = yp.T.reshape(*loop_shape, *coords_shape)
+
+        return ret_dict
+
+    def interpolate_to_grid(self, field_coords, field_values):
+        """Interpolate the field values at given coordinates to the compression grid.
+
+        :param field_coords: `(*coord_shape, dim)` - the coordinates of the field values
+        :param field_values: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the field values at the coordinates
+        :return: `(*loop_shape, dof)` - the interpolated values on the compression grid
+        """
+        field_coords = self._correct_coords(field_coords)
+        grid_coords = self._correct_coords(self.coords)
+        skip_interp = (field_coords.shape == grid_coords.shape and np.allclose(field_coords, grid_coords))
+
+        coords_shape = field_coords.shape[:-1]
+        loop_shape = next(iter(field_values.values())).shape[:-len(coords_shape)]
+        states = np.empty((*loop_shape, self.num_pts, self.num_qoi))
+        field_coords = field_coords.reshape(-1, self.dim)
+        for i, qoi in enumerate(self.fields):
+            field_vals = field_values[qoi].reshape((*loop_shape, -1))  # (..., Q)
+            if skip_interp:
+                states[..., i] = field_vals
+            else:
+                field_vals = field_vals.reshape((-1, field_vals.shape[-1])).T  # (Q, ...)
+                interp = self.interpolator()(field_coords, field_vals, **self.interpolate_opts)
+                yg = interp(grid_coords)
+                states[..., i] = yg.T.reshape(*loop_shape, self.num_pts)
+
+        return states.reshape((*loop_shape, self.dof))
+
+    @abstractmethod
+    def compute_map(self, **kwargs):
+        """Compute and store the compression map. Must set the value of `coords` and `_is_computed`."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def compress(self, data: np.ndarray) -> np.ndarray:
+        """Compress the data into a latent space.
+
+        :param data: `(..., dof)` - the data to compress from full size of `dof`
+        :return: `(..., rank)` - the compressed latent space data
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def reconstruct(self, compressed: np.ndarray) -> np.ndarray:
+        """Reconstruct the compressed data back into the full `dof` space.
+
+        :param compressed: `(..., rank)` - the compressed data to reconstruct
+        :return: `(..., dof)` - the reconstructed data with full `dof`
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def from_dict(cls, spec: dict) -> Compression:
+        """Construct a `Compression` object from a spec dictionary."""
+        method = spec.pop('method', 'svd').lower()
+        match method:
+            case 'svd':
+                return SVD(**spec)
+            case other:
+                raise NotImplementedError(f"Compression method '{other}' is not implemented.")
+
+
+@dataclass
+class SVD(Compression):
+    """A Singular Value Decomposition (SVD) compression method."""
+    data_matrix: np.ndarray = None          # (dof, num_samples)
+    projection_matrix: np.ndarray = None    # (dof, rank)
+    rank: int = None
+    energy_tol: float = None
+
+    def __post_init__(self):
+        if (data_matrix := self.data_matrix) is not None:
+            self.compute_map(data_matrix, rank=self.rank, energy_tol=self.energy_tol)
+
+    def compute_map(self, data_matrix: np.ndarray, rank: int = None, energy_tol: float = None):
+        """Compute the SVD compression map from the data matrix.
+
+        :param data_matrix: `(dof, num_samples)` - the data matrix
+        :param rank: the rank of the SVD decomposition
+        :param energy_tol: the energy tolerance of the SVD decomposition
+        """
+        nan_idx = np.any(np.isnan(data_matrix), axis=0)
+        data_matrix = data_matrix[:, ~nan_idx]
+        u, s, vt = np.linalg.svd(data_matrix)
+        energy_frac = np.cumsum(s ** 2 / np.sum(s ** 2))
+        if rank := (rank or self.rank):
+            energy_tol = energy_frac[rank - 1]
+        else:
+            energy_tol = energy_tol or self.energy_tol or 0.95
+            idx = int(np.where(energy_frac >= energy_tol)[0][0])
+            rank = idx + 1
+
+        self.rank = rank
+        self.energy_tol = energy_tol
+        self.projection_matrix = u[:, :rank]  # (dof, rank)
+        self._map_computed = True
+
+    def compress(self, data):
+        return np.squeeze(self.projection_matrix.T @ data[..., np.newaxis], axis=-1)
+
+    def reconstruct(self, compressed):
+        return np.squeeze(self.projection_matrix @ compressed[..., np.newaxis], axis=-1)
 
 
 class CompressionData(TypedDict, total=False):
@@ -254,10 +433,10 @@ class CompressionData(TypedDict, total=False):
     :ivar coord: `(qty.shape, dim)` the coordinate locations of the qty data; coordinates exist in `dim` space (e.g.
                  `dim=2` for 2d Cartesian coordinates). Defaults to the coordinates used when building the construction
                   map (i.e. the coordinates of the data in the SVD data matrix)
-    :ivar latent: `(..., latent_size)` array of latent space coefficients for a `FieldQuantity`; this is what is
+    :ivar latent: `(..., latent_size)` array of latent space coefficients for a field quantity; this is what is
                   _returned_ by `Variable.compress()` and what is _expected_ as input by `Variable.reconstruct()`.
     :ivar qty: `(..., qty.shape)` array of uncompressed field quantity data for this qty within
-               the `FieldQuantity[quantities]` list. Each qty in this list will be its own `key:value` pair in the
+               the `fields` list. Each qty in this list will be its own `key:value` pair in the
                `CompressionData` structure
     """
     coord: np.ndarray
@@ -268,7 +447,7 @@ class CompressionData(TypedDict, total=False):
 class Transform(ABC):
     """A base class for all transformations.
 
-    :ivar transform_args
+    :ivar transform_args: the arguments for the transformation
     :vartype transform_args: tuple
     """
 
@@ -463,7 +642,7 @@ class Variable(BaseModel, Serializable):
     """Object for storing information about variables and providing methods for pdf evaluation, sampling, etc.
 
     A simple variable object can be created with `var = Variable()`. All initialization options are optional and will
-    be given good defaults. You should probably at the very least give a memorable `var_id` and a `domain`.
+    be given good defaults. You should probably at the very least give a memorable `name` and a `domain`.
 
     With the `pyyaml` library installed, all Variable objects can be saved or loaded directly from a `.yml` file by
     using the `!Variable` yaml tag (which is loaded by default with `amisc`).
@@ -471,36 +650,36 @@ class Variable(BaseModel, Serializable):
     - Use `Variable.dist` to specify sampling PDFs, such as for random variables. See the `Distribution` classes.
     - Use `Variable.norm` to specify a transformed-space that is more amenable to surrogate construction
       (e.g. mapping to the range (0,1)). See the `Transform` classes.
-    - Use `Variable.field` to specify high-dimensional, coordinate-based field quantities, such as from the output of
-      many simulation software programs. See `FieldQuantity` for arguments.
+    - Use `Variable.compression` to specify high-dimensional, coordinate-based field quantities,
+      such as from the output of many simulation software programs. See [`Compression`][amisc.variable.Compression].
     - Use `Variable.category` as an additional layer for using Variable's in different ways (e.g. set a "calibration"
       category for Bayesian inference).
 
     !!! Example
         ```python
         # Random variable
-        temp = Variable(var_id='T', description='Temperature', units='K', dist='Uniform(280, 320)')
+        temp = Variable(name='T', description='Temperature', units='K', dist='Uniform(280, 320)')
         samples = temp.sample(100)
         pdf = temp.pdf(samples)
 
         # Field quantity
-        vel = Variable(var_id='u', description='Velocity', units='m/s', field={'quantities': ['ux', 'uy', 'uz']})
+        vel = Variable(name='u', description='Velocity', units='m/s', field={'quantities': ['ux', 'uy', 'uz']})
         vel_data = ...  # from a simulation
         reduced_vel = vel.compress(vel_data)
         ```
 
     !!! Warning
-        Changes to collection fields (like `Variable.field` and `Variable.norm`) should completely reassign the _whole_
+        Changes to collection fields (like `Variable.norm`) should completely reassign the _whole_
         collection to trigger the correct validation, rather than editing particular entries. For example, reassign
         `norm=['log', 'linear(2, 2)']` rather than editing norm via `norm.append('linear(2, 2)')`.
 
-    :ivar var_id: an identifier for the variable, can compare variables directly with strings for indexing purposes
+    :ivar name: an identifier for the variable, can compare variables directly with strings for indexing purposes
     :ivar nominal: a typical value for this variable
     :ivar description: a lengthier description of the variable
     :ivar units: assumed units for the variable (if applicable)
     :ivar category: an additional descriptor for how this variable is used, e.g. calibration, operating, design, etc.
     :ivar tex: latex format for the variable, i.e. r"$x_i$"
-    :ivar field: specifies field quantities and links to relevant compression data
+    :ivar compression: specifies field quantities and links to relevant compression data
     :ivar dist: a string specifier of a probability distribution function (or a `Distribution` object)
     :ivar domain: the explicit domain bounds of the variable (limits of where you expect to use it)
     :ivar norm: specifier of a map to a transformed-space for surrogate construction (or a `Transformation` type)
@@ -508,16 +687,23 @@ class Variable(BaseModel, Serializable):
     yaml_tag: ClassVar[str] = u'!Variable'
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True)
 
-    var_id: Annotated[str, Field(default_factory=lambda: "X_" + "".join(random.choices(string.digits, k=3)))]
+    name: Optional[str] = None
     nominal: Optional[float] = None
     description: Optional[str] = None
     units: Optional[str] = None
     category: Optional[str] = None
     tex: Optional[str] = None
-    field: Optional[FieldQuantity] = None
+    compression: Optional[str | dict | Compression] = None
     dist: Optional[str | Distribution] = None
     domain: Optional[str | tuple[float, float]] = None
     norm: Optional[Transformation] = None
+
+    def __init__(self, /, name=None, **kwargs):
+        # Try to set the variable name if instantiated as "x = Variable()"
+        if name is None:
+            name = _inspect_assignment('Variable')
+        name = name or "X_" + "".join(random.choices(string.digits, k=3))
+        super().__init__(name=name, **kwargs)
 
     @field_validator('tex')
     @classmethod
@@ -530,21 +716,19 @@ class Variable(BaseModel, Serializable):
             tex = rf'{tex}$'
         return tex
 
-    @field_validator('field')
+    @field_validator('compression')
     @classmethod
-    def _validate_field(cls, field: dict, info: ValidationInfo) -> dict | None:
-        if field is None:
-            return field
+    def _validate_compression(cls, compression: str | dict | Compression, info: ValidationInfo) -> Compression | None:
+        if compression is None:
+            return compression
+        elif isinstance(compression, str):
+            return Compression.deserialize(compression)
+        elif isinstance(compression, dict):
+            compression['fields'] = compression.get('fields', None) or [info.data['name']]
+            return Compression.from_dict(compression)
         else:
-            field['quantities'] = field.get('quantities', [info.data['var_id']])
-            field['compress_datapath'] = field.get('compress_datapath', None)
-            field['compress_method'] = field.get('compress_method', 'svd')
-            field['compress_kwargs'] = field.get('compress_kwargs', dict())
-            field['interp_kwargs'] = field.get('interp_kwargs', dict())
-
-        if datapath := field.get('compress_datapath'):
-            assert Path(datapath).exists()
-        return field
+            compression.fields = compression.fields or [info.data['name']]
+            return compression
 
     @field_validator('dist')
     @classmethod
@@ -604,13 +788,13 @@ class Variable(BaseModel, Serializable):
         setattr(self, key, value)
 
     def __str__(self):
-        return self.var_id
+        return self.name
 
     def __repr__(self):
         return self.__str__()
 
     def __hash__(self):
-        return hash(self.var_id)
+        return hash(self.name)
 
     def __eq__(self, other):
         """Consider two Variables equal if they share the same string id.
@@ -618,9 +802,9 @@ class Variable(BaseModel, Serializable):
         Also returns true when checking if this Variable is equal to a string id by itself.
         """
         if isinstance(other, Variable):
-            return self.var_id == other.var_id
+            return self.name == other.name
         elif isinstance(other, str):
-            return self.var_id == other
+            return self.name == other
         else:
             return False
 
@@ -642,7 +826,7 @@ class Variable(BaseModel, Serializable):
         :param units: whether to include the units in the string
         :param symbol: just latex symbol if true, otherwise the full description
         """
-        s = (self.tex if symbol else self.description) or self.var_id
+        s = (self.tex if symbol else self.description) or self.name
         return r'{} [{}]'.format(s, self.units) if units else r'{}'.format(s)
 
     def get_nominal(self, transform: bool = False) -> float | None:
@@ -682,7 +866,7 @@ class Variable(BaseModel, Serializable):
         if domain := self.get_domain(transform=transform):
             return np.random.rand(*shape) * (domain[1] - domain[0]) + domain[0]
         else:
-            raise RuntimeError(f'Variable "{self.var_id}" does not have a domain specified.')
+            raise RuntimeError(f'Variable "{self.name}" does not have a domain specified.')
 
     def pdf(self, x: np.ndarray, transform: bool = False) -> np.ndarray:
         """Compute the PDF of the Variable at the given `x` locations.
@@ -731,7 +915,7 @@ class Variable(BaseModel, Serializable):
         else:
             # Variable's with no distribution
             if nominal is None:
-                raise ValueError(f'Cannot sample "{self.var_id}" with no dist or nominal value specified.')
+                raise ValueError(f'Cannot sample "{self.name}" with no dist or nominal value specified.')
             else:
                 return np.ones(shape) * nominal
 
@@ -793,119 +977,70 @@ class Variable(BaseModel, Serializable):
         """Alias for `normalize(denorm=True)`"""
         return self.normalize(values, denorm=True)
 
-    def compress(self, values: CompressionData, reconstruct: bool = False,
-                 interp_kwargs: dict = None) -> CompressionData:
+    def compress(self, values: CompressionData, coord: np.ndarray = None,
+                 reconstruct: bool = False) -> CompressionData:
         """Compress or reconstruct field quantity values using this Variable's compression info.
 
         !!! Note "Specifying compression values"
-            If only one field quantity is associated with this variable, then `len(field[quantities])=0`. In this case,
-            specify `values` as `dict(coord=..., var_id=...)` for this Variable's `var_id`. If `coord` is not specified,
+            If only one field quantity is associated with this variable, then `len(field[quantities])=1`. In this case,
+            specify `values` as `dict(coord=..., name=...)` for this Variable's `name`. If `coord` is not specified,
             then this assumes the locations are the same as the reconstruction data (and skips interpolation).
 
         !!! Info "Compression workflow"
             Generally, compression follows `interpolate -> normalize -> compress` to take raw values into the compressed
             "latent" space. The interpolation step is required to make sure `values` align with the coordinates used
-            when building the compression map in the first place (such as through SVD). Use compression functions
-            provided in `amisc.compress` to ensure proper formatting of the compression data.
+            when building the compression map in the first place (such as through SVD).
 
         :param values: a `dict` with a key for each field qty of shape `(..., qty.shape)` and a `coord` key of shape
                       `(qty.shape, dim)` that gives the coordinates of each point. Only a single `latent` key should
                       be given instead if `reconstruct=True`.
+        :param coord: the coordinates of each point in `values` if `values` did not contain a `coord` key;
+                       defaults to the compression grid coordinates
         :param reconstruct: whether to reconstruct values instead of compress
-        :param interp_kwargs: extra arguments passed to `scipy.interpolate.RBFInterpolator` for interpolating between
-                              the reconstruction grid coordinates and the passed-in coordinates
         :returns: the compressed values with key `latent` and shape `(..., latent_size)`; if `reconstruct=True`,
                   then the reconstructed values with shape `(..., qty.shape)` for each `qty` key are returned.
                   The return `dict` also has a `coord` key with shape `(qty.shape, dim)`.
         """
-        field = self.field
-        if not field:
-            raise ValueError(f'Compression is not supported for the non-field variable "{self.var_id}".')
-        if not field.get('compress_datapath'):
-            raise ValueError(f'Compression datapath not specified for variable "{self.var_id}".')
-        method = field.get('compress_method', 'svd')
-        datapath = Path(field['compress_datapath'])
-        interp_kwargs = interp_kwargs or field.get('interp_kwargs', dict())
-        if not datapath.exists():
-            raise ValueError(f'The compression datapath "{datapath}" for variable "{self.var_id}" does not exist.')
+        if not self.compression:
+            raise ValueError(f'Compression is not supported for the non-field variable "{self.name}".')
+        if not self.compression.map_exists:
+            raise ValueError(f'Compression map not computed yet for "{self.name}".')
 
-        qty_list = field.get('quantities', [self.var_id])
-        nqoi = len(qty_list)
-
-        if method.lower() == 'svd':
-            if datapath.suffix not in ['.h5', '.hdf5']:
-                raise ValueError(f'Compression file type "{datapath.suffix}" is not supported for SVD. '
-                                 f'Only [.h5, .hdf5].')
-            with h5py.File(datapath, 'r') as fd:
-                try:
-                    projection_matrix = fd['projection_matrix'][:]   # (dof, rank)
-                    rec_coords = fd['coord'][:]                      # (num_pts, dim)
-                    num_pts, dim = rec_coords.shape                  # Also num_pts = dof / nqoi
-                    reconstruct_func = lambda latent: np.squeeze(projection_matrix @ latent[..., np.newaxis], axis=-1)
-                    compress_func = lambda states: np.squeeze(projection_matrix.T @ states[..., np.newaxis], axis=-1)
-                except Exception as e:
-                    raise ValueError('SVD compression data not formatted correctly.') from e
-        else:
-            raise NotImplementedError(f'The compression method "{method}" is not implemented.')
-
-        # Default field coordinates to the reconstruction coordinates if they are not provided
-        if values.get('coord') is not None:
-            no_interp = False
-            field_coords = np.atleast_1d(values.get('coord'))
-            if len(field_coords.shape) == 1:
-                field_coords = field_coords[..., np.newaxis] if dim == 1 else field_coords[np.newaxis, ...]
-        else:
-            no_interp = True
-            field_coords = rec_coords
-        qty_shape = field_coords.shape[:-1]
-        field_coords = field_coords.reshape(-1, dim)    # (N, dim)
-
-        # Don't need to interpolate if passed-in coords are same as reconstruction coords
-        no_interp = no_interp or (field_coords.shape == rec_coords.shape and np.allclose(field_coords, rec_coords))
-        ret_dict = {'coord': values.get('coord', rec_coords)}
+        # Default field coordinates to the compression coordinates if they are not provided
+        field_coords = values.pop('coord', coord)
+        if field_coords is None:
+            field_coords = self.compression.coords
+        ret_dict = {'coord': field_coords}
 
         # For reconstruction: decompress -> denormalize -> interpolate
         if reconstruct:
             try:
-                latent = np.atleast_1d(values['latent'])                                # (..., rank)
+                states = np.atleast_1d(values['latent'])    # (..., rank)
             except KeyError as e:
                 raise ValueError('Must pass values["latent"] in for reconstruction.') from e
-            states = reconstruct_func(latent)                                           # (..., dof)
-            states = self.denormalize(states).reshape((*states.shape[:-1], num_pts, nqoi))
-
-            for i, qoi in enumerate(qty_list):
-                if no_interp:
-                    ret_dict[qoi] = states[..., i]
-                else:
-                    reshaped_states = states[..., i].reshape(-1, num_pts).T                     # (num_pts, N...)
-                    rbf = RBFInterpolator(rec_coords, reshaped_states, **interp_kwargs)
-                    field_vals = rbf(field_coords).T.reshape(*states.shape[:-2], *qty_shape)    # (..., qty.shape)
-                    ret_dict[qoi] = field_vals
+            states = self.compression.reconstruct(states)   # (..., dof)
+            states = self.denormalize(states)               # (..., dof)
+            states = self.compression.interpolate_from_grid(states, field_coords)
+            ret_dict.update(states)
 
         # For compression: interpolate -> normalize -> compress
         else:
-            states = None
-            for i, qoi in enumerate(qty_list):
-                if states is None:
-                    states = np.empty((*values[qoi].shape[:-len(qty_shape)], num_pts, nqoi))
-                field_vals = values[qoi].reshape((*states.shape[:-2], -1))              # (..., N)
-                if no_interp:
-                    states[..., i] = field_vals
-                else:
-                    reshaped_field = field_vals.reshape(-1, field_vals.shape[-1]).T     # (N, ...)
-                    rbf = RBFInterpolator(field_coords, reshaped_field, **interp_kwargs)
-                    states[..., i] = rbf(rec_coords).T.reshape(*states.shape[:-2], num_pts)
-            states = self.normalize(np.reshape(states, (*states.shape[:-2], -1)))       # (..., dof)
-            latent = compress_func(states)                                              # (..., rank)
-            ret_dict['latent'] = latent
+            states = self.compression.interpolate_to_grid(field_coords, values)
+            states = self.normalize(states)                 # (..., dof)
+            states = self.compression.compress(states)      # (..., rank)
+            ret_dict['latent'] = states
 
         return ret_dict
 
-    def reconstruct(self, values, **kwargs):
+    def reconstruct(self, values, coord=None):
         """Alias for `compress(reconstruct=True)`"""
-        return self.compress(values, reconstruct=True, **kwargs)
+        return self.compress(values, coord=coord, reconstruct=True)
 
-    def serialize(self) -> dict:
+    @property
+    def shape(self):
+        return self.compression.shape if self.compression else ()
+
+    def serialize(self, save_path: str | Path = '.') -> dict:
         """Convert a `Variable` to a `dict` with only standard Python types
         (i.e. convert custom objects like `dist` and `norm` to strings).
         """
@@ -917,26 +1052,37 @@ class Variable(BaseModel, Serializable):
         if norm := instance_variables.get('norm'):
             instance_variables['norm'] = str(norm) if isinstance(norm, str | Transform) else [str(transform) for
                                                                                               transform in norm]
+        if compression := instance_variables.get('compression'):
+            fname = f'{self.name}_compression.pkl'
+            instance_variables['compression'] = compression.serialize(save_path=Path(save_path) / fname)
         return instance_variables
 
     @classmethod
-    def deserialize(cls, data: dict) -> Variable:
+    def deserialize(cls, data: dict, search_paths=None) -> Variable:
         """Convert a `dict` to a `Variable` object. Let `pydantic` handle validation and conversion of fields."""
-        return cls(**data) if isinstance(data, dict) else data
+        if isinstance(data, Variable):
+            return data
+        else:
+            if (compression := data.get('compression', None)) is not None:
+                if isinstance(compression, str):
+                    data['compression'] = search_for_file(compression, search_paths=search_paths)
+            return cls(**data)
 
     @staticmethod
     def _yaml_representer(dumper: yaml.Dumper, data: Variable) -> yaml.MappingNode:
         """Convert a single `Variable` object (`data`) to a yaml MappingNode (i.e. a `dict`)."""
-        return dumper.represent_mapping(Variable.yaml_tag, data.serialize())
+        save_path, save_file = _get_yaml_path(dumper)
+        return dumper.represent_mapping(Variable.yaml_tag, data.serialize(save_path=save_path))
 
     @staticmethod
     def _yaml_constructor(loader: yaml.Loader, node):
         """Convert the `!Variable` tag in yaml to a single `Variable` object (or a list of `Variables`)."""
+        save_path, save_file = _get_yaml_path(loader)
         if isinstance(node, yaml.SequenceNode):
-            return [ele if isinstance(ele, Variable) else Variable.deserialize(ele) for ele in
+            return [ele if isinstance(ele, Variable) else Variable.deserialize(ele, search_paths=[save_path]) for ele in
                     loader.construct_sequence(node, deep=True)]
         elif isinstance(node, yaml.MappingNode):
-            return Variable.deserialize(loader.construct_mapping(node))
+            return Variable.deserialize(loader.construct_mapping(node), search_paths=[save_path])
         else:
             raise NotImplementedError(f'The "{Variable.yaml_tag}" yaml tag can only be used on a yaml sequence or '
                                       f'mapping, not a "{type(node)}".')
@@ -946,7 +1092,7 @@ class VariableList(OrderedDict, Serializable):
     """Store Variables as `str(var) : Variable` in the order they were passed in. You can:
 
     - Initialize/update from a single Variable or a list of Variables
-    - Get/set a Variable directly or by var_id via `my_vars[var]` or `my_vars[str(var)]` etc.
+    - Get/set a Variable directly or by name via `my_vars[var]` or `my_vars[str(var)]` etc.
     - Retrieve the original order of insertion by `list(my_vars.items())`
     - Access/delete elements by order of insertion using integer/slice indexing (i.e. `my_vars[1:3]`)
     - Save/load from yaml file using the `!VariableList` tag
@@ -1049,27 +1195,29 @@ class VariableList(OrderedDict, Serializable):
     def __repr__(self):
         return self.__str__()
 
-    def serialize(self) -> list[dict]:
-        return [var.serialize() for var in self.values()]
+    def serialize(self, save_path='.') -> list[dict]:
+        return [var.serialize(save_path=save_path) for var in self.values()]
 
     @classmethod
-    def deserialize(cls, data: dict | list[dict]) -> VariableList:
+    def deserialize(cls, data: dict | list[dict], search_paths=None) -> VariableList:
         if not isinstance(data, list):
             data = [data]
-        return cls([Variable.deserialize(d) for d in data])
+        return cls([Variable.deserialize(d, search_paths=search_paths) for d in data])
 
     @staticmethod
     def _yaml_representer(dumper: yaml.Dumper, data: VariableList) -> yaml.SequenceNode:
         """Convert a single `VariableList` object (`data`) to a yaml SequenceNode (i.e. a list)."""
-        return dumper.represent_sequence(VariableList.yaml_tag, data.serialize())
+        save_path, save_file = _get_yaml_path(dumper)
+        return dumper.represent_sequence(VariableList.yaml_tag, data.serialize(save_path=save_path))
 
     @staticmethod
     def _yaml_constructor(loader: yaml.Loader, node):
         """Convert the `!VariableList` tag in yaml to a `VariableList` object."""
+        save_path, save_file = _get_yaml_path(loader)
         if isinstance(node, yaml.SequenceNode):
-            return VariableList.deserialize(loader.construct_sequence(node, deep=True))
+            return VariableList.deserialize(loader.construct_sequence(node, deep=True), search_paths=[save_path])
         elif isinstance(node, yaml.MappingNode):
-            return VariableList.deserialize(loader.construct_mapping(node))
+            return VariableList.deserialize(loader.construct_mapping(node), search_paths=[save_path])
         else:
-            raise NotImplementedError(f'The "{Variable.yaml_tag}" yaml tag can only be used on a yaml sequence or '
+            raise NotImplementedError(f'The "{VariableList.yaml_tag}" yaml tag can only be used on a yaml sequence or '
                                       f'mapping, not a "{type(node)}".')

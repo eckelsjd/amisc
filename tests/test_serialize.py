@@ -1,4 +1,4 @@
-from amisc.serialize import Base64Serializable, MetaSerializable, PickleSerializable, Serializable, StringSerializable
+from amisc.serialize import Base64Serializable, YamlSerializable, PickleSerializable, Serializable, StringSerializable
 
 
 class ClassTestBase64(Base64Serializable):
@@ -41,7 +41,7 @@ def test_pickle_serializable(tmp_path):
     assert obj.value == deserialized.value
 
 
-class ClassTestMeta(Serializable):
+class ClassTestYaml(Serializable):
     def __init__(self, value):
         self.value = value
 
@@ -53,8 +53,8 @@ class ClassTestMeta(Serializable):
         return cls(serialized_data['value'])
 
 
-def test_meta_serializable():
-    meta_obj = MetaSerializable(serializer=ClassTestMeta)
+def test_yaml_serializable():
+    meta_obj = YamlSerializable(obj=ClassTestYaml)
     serialized = meta_obj.serialize()
-    deserialized = MetaSerializable.deserialize(serialized)
-    assert meta_obj.serializer == deserialized.serializer
+    deserialized = YamlSerializable.deserialize(serialized)
+    assert meta_obj.obj == deserialized.obj

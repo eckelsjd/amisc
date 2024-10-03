@@ -6,19 +6,23 @@ Includes:
 - `Base64Serializable` — mixin class for serializing objects using base64 encoding
 - `StringSerializable` — mixin class for serializing objects using string representation
 - `PickleSerializable` — mixin class for serializing objects using pickle files
-- `MetaSerializable` — metaclass for serializing a `Serializable` type, always with base64 encoding
+- `YamlSerializable` — metaclass for serializing an object using Yaml load/dump from string
 """
 from __future__ import annotations
 
 import base64
 import pickle
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Type
+from typing import Type, Any
+
+import yaml
 
 from amisc.utils import parse_function_string
 
+__all__ = ['Serializable', 'Base64Serializable', 'StringSerializable', 'PickleSerializable', 'YamlSerializable']
 builtin = str | dict | list | int | float | tuple | bool
 
 
@@ -33,7 +37,13 @@ class Serializable(ABC):
     @classmethod
     @abstractmethod
     def deserialize(cls, serialized_data: builtin) -> Serializable:
-        """Construct a `Serializable` object from serialized data."""
+        """Construct a `Serializable` object from serialized data.
+
+        !!! Note "Passing arguments to deserialize"
+            Subclasses should generally not take arguments for deserialization. The serialized object should contain
+            all the information it needs to reconstruct itself. If you need arguments for deserialization, then
+            serialize them along with the object itself and unpack them during the call to deserialize.
+        """
         raise NotImplementedError
 
 
@@ -78,6 +88,8 @@ class StringSerializable(Serializable):
 class PickleSerializable(Serializable):
     """Mixin class for serializing objects using pickle."""
     def serialize(self, save_path: str | Path = None) -> str:
+        if save_path is None:
+            raise ValueError('Must provide a save path for Pickle serialization.')
         with open(Path(save_path), 'wb') as fd:
             pickle.dump(self, fd)
         return str(Path(save_path).resolve().as_posix())
@@ -89,9 +101,18 @@ class PickleSerializable(Serializable):
 
 
 @dataclass
-class MetaSerializable(Base64Serializable):
-    """Metaclass for serializing a `Serializable` type, always with base64 encoding."""
-    serializer: Type[Serializable]
+class YamlSerializable(Serializable):
+    """Metaclass for serializing an object using Yaml load/dump from string."""
+    obj: Any
 
-    def __str__(self):
-        return f'Meta({self.serializer.__name__})'
+    def serialize(self):
+        with tempfile.NamedTemporaryFile(mode='w+', encoding='utf-8', suffix='.yml') as f:
+            yaml.dump(self.obj, f, allow_unicode=True)
+            f.seek(0)
+            s = f.read().strip()
+        return s
+
+    @classmethod
+    def deserialize(cls, yaml_str) -> YamlSerializable:
+        obj = yaml.load(yaml_str, yaml.Loader)
+        return YamlSerializable(obj=obj)

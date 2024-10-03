@@ -6,7 +6,7 @@
 ![build](https://img.shields.io/github/actions/workflow/status/eckelsjd/amisc/deploy.yml?logo=github)
 ![docs](https://img.shields.io/github/actions/workflow/status/eckelsjd/amisc/docs.yml?logo=materialformkdocs&logoColor=%2523cccccc&label=docs)
 ![tests](https://img.shields.io/github/actions/workflow/status/eckelsjd/amisc/tests.yml?logo=github&logoColor=%2523cccccc&label=tests)
-![Code Coverage](https://img.shields.io/badge/coverage-84%25-yellowgreen?logo=codecov)
+![Code Coverage](https://img.shields.io/badge/coverage-52%25-orange?logo=codecov)
 [![Algorithm description](https://img.shields.io/badge/DOI-10.1002/nme.6958-blue)](https://doi.org/10.1002/nme.6958)
 
 Efficient framework for building surrogates of multidisciplinary systems using the adaptive multi-index stochastic collocation ([AMISC](https://onlinelibrary.wiley.com/doi/full/10.1002/nme.6958))  technique.
@@ -27,25 +27,22 @@ pdm add -e ./amisc --dev
 ```python
 import numpy as np
 
-from amisc.system import SystemSurrogate, ComponentSpec
-from amisc.variable import Variable
+from amisc import Variable, Component, System
 
 def fun1(x):
-    return dict(y=x * np.sin(np.pi * x))
+    return dict(y1=x['x'] * np.sin(np.pi * x['x']))
 
-def fun2(x):
-    return dict(y=1 / (1 + 25 * x ** 2))
+def fun2(y1):
+    return dict(y2=1 / (1 + 25 * y1['y1'] ** 2))
 
 dist = 'Uniform(0, 1)'
 x = Variable(dist)
-y = Variable(dist)
-z = Variable(dist)
-model1 = ComponentSpec(fun1, exo_in=x, coupling_out=y)
-model2 = ComponentSpec(fun2, coupling_in=y, coupling_out=z)
+y1 = Variable(dist)
+y2 = Variable(dist)
+model1 = Component(fun1, x, y1)
+model2 = Component(fun2, y1, y2)
 
-inputs = x
-outputs = [y, z]
-system = SystemSurrogate([model1, model2], inputs, outputs)
+system = System(model1, model2)
 system.fit()
 
 x_test = system.sample_inputs(10)
