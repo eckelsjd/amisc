@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import ArrayLike
 
-from amisc import yaml_dump, yaml_load
+from amisc import YamlLoader
 from amisc.component import (
     Component,
     IndexSet,
@@ -17,7 +17,9 @@ from amisc.component import (
     LagrangeState,
     MiscTree,
     ModelArgs,
+    StringArgs,
     ModelKwargs,
+    StringKwargs,
     TrainingData,
 )
 from amisc.serialize import Base64Serializable, Serializable, StringSerializable
@@ -30,9 +32,13 @@ def test_model_args_kwargs():
              (None, [1, 2, 3], {'key': 'value'}), (3.14, 2.718, 1.618), (True, False, None)]
     for case in cases:
         args = ModelArgs(*case)
+        str_args = ModelArgs.from_dict({'method': 'string', 'args': case})
         serialized_args = args.serialize()
+        str_serial = str_args.serialize()
         deserialized_args = ModelArgs.deserialize(serialized_args)
+        str_deserialized = StringArgs.deserialize(str_serial)
         assert deserialized_args.data == args.data
+        assert str_deserialized.data == args.data
 
     # Test ModelKwargs
     cases = [{'a': 1, 'b': 2, 'c': 3}, {'a': 1.1, 'b': -1.3e6, 'c': True},
@@ -43,9 +49,13 @@ def test_model_args_kwargs():
              {'nested': {'level1': {'level2': {'level3': 'deep_value', 'level4': [True, False, (1, 2, 3)]}}}}]
     for case in cases:
         kwargs = ModelKwargs(**case)
+        str_kwargs = ModelKwargs.from_dict({'method': 'string_kwargs', **case})
         serialized_kwargs = kwargs.serialize()
+        str_serial = str_kwargs.serialize()
         deserialized_kwargs = ModelKwargs.deserialize(serialized_kwargs)
+        str_deserialized = StringKwargs.deserialize(str_serial)
         assert deserialized_kwargs.data == kwargs.data
+        assert str_deserialized.data == kwargs.data
 
 
 def test_indexset():
@@ -130,7 +140,7 @@ def test_component_validation(tmp_path):
     assert c3 == c
 
 
-class CustomArgs(ModelArgs):
+class CustomArgs(StringArgs):
     def __init__(self, number, *args):
         self.number = number
         super().__init__(*args)
@@ -186,8 +196,8 @@ def test_save_and_load(tmp_path):
                   model_kwargs={'output_path': '.', 'opts': {'max_iter': 1000}}, max_alpha=(3,), status=1)
 
     savepath = tmp_path / 'component.yml'
-    yaml_dump(c, savepath)
-    c_load = yaml_load(savepath)
+    YamlLoader.dump(c, savepath)
+    c_load = YamlLoader.load(savepath)
     assert c_load == c
 
 
@@ -224,8 +234,8 @@ def test_model_wrapper(tmp_path):
             'y3': np.ones((15, 2)) * x['x1'][..., np.newaxis, np.newaxis]
         }
 
-    inputs = [Variable(var_id='x1'), Variable(var_id='x2'), Variable(var_id='x3')]
-    outputs = [Variable(var_id='y1', nominal=0.1), Variable(var_id='y2'), Variable(var_id='y3')]
+    inputs = [Variable('x1'), Variable('x2'), Variable('x3')]
+    outputs = [Variable('y1', nominal=0.1), Variable('y2'), Variable('y3')]
     comp = Component(vectorized_model, inputs, outputs, vectorized=True)
 
     cases = [{'x1': np.random.rand(10), 'x2': np.random.rand(10), 'x3': np.random.rand(10)},

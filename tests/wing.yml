@@ -1,26 +1,26 @@
 exo:
   !Variable
-  - var_id: Sw
+  - name: Sw
     dist: U(150, 250)
-  - var_id: Wfw
+  - name: Wfw
     dist: U(220, 300)
-  - var_id: A
+  - name: A
     dist: U(6, 10)
-  - var_id: Lambda
+  - name: Lambda
     dist: U(-10, 10)
-  - var_id: q
+  - name: q
     dist: U(16, 45)
-  - var_id: lambda
+  - name: lambda
     dist: U(0.5, 1)
-  - var_id: tc
+  - name: tc
     dist: U(0.08, 0.18)
-  - var_id: Nz
+  - name: Nz
     dist: U(2.5, 6)
-  - var_id: Wdg
+  - name: Wdg
     dist: U(1700, 2500)
-  - var_id: Wp
+  - name: Wp
     dist: U(0.025, 0.08)
 coupling:
   !Variable
-  - var_id: Wwing
+  - name: Wwing
     dist: U(0, 10000)

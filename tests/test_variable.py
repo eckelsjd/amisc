@@ -1,25 +1,33 @@
-import h5py
 import numpy as np
 
-from amisc import yaml_dump, yaml_load
+from amisc import YamlLoader
 from amisc.utils import relative_error
-from amisc.variable import Variable, VariableList
+from amisc.variable import Variable, VariableList, SVD
 
 
 def test_load_and_dump_variables(tmp_path):
-    variables = [Variable(var_id='a', description='Altitude', units='m', dist='U(0, 1)'),
-                 Variable(var_id=u'Φ', description='Base width', units='m', dist='N(0, 1)'),
-                 Variable(var_id='p', description='Pressure', units='Pa', domain=(1e6, 2e6),
-                          field={'compress_method': 'svd', 'interp_args': {'kernel': 'gaussian', 'neighbors': 10},
-                                 'compress_args': {'rank': 10, 'energy_tol': 0.95}})
+    variables = [Variable('a', description='Altitude', units='m', dist='U(0, 1)'),
+                 Variable(u'Φ', description='Base width', units='m', dist='N(0, 1)'),
+                 Variable('p', description='Pressure', units='Pa', domain=(1e6, 2e6),
+                          compression={'method': 'svd', 'interpolate_opts': {'kernel': 'gaussian', 'neighbors': 10},
+                                       'rank': 10, 'energy_tol': 0.95})
                  ]
-    yaml_dump(variables, tmp_path / 'variables.yml')
-    variables_load = yaml_load(tmp_path / 'variables.yml')
+    YamlLoader.dump(variables, tmp_path / 'variables.yml')
+    variables_load = YamlLoader.load(tmp_path / 'variables.yml')
 
     for v in variables_load:
         v_old = variables[variables.index(v)]
         assert v_old.get_domain() == v.get_domain()
         assert v_old.description == v.description
+        assert v_old.compression == v.compression
+
+    x = Variable()
+    y1, y2 = [Variable(), Variable()]
+    x_vars = [Variable(dist='U(0, 1)') for i in range(5)]
+    assert x.name == 'x'
+    assert y1.name.startswith('X_')
+    assert y2.name.startswith('X_')
+    assert all([x_vars[i].name.startswith('X_') for i in range(5)])
 
 
 def test_single_norm():
@@ -81,50 +89,28 @@ def test_nominal_and_domain():
     assert bds == (2, 8) and norm_bds == (0, 1)
 
 
-def test_compression_1d(tmp_path):
+def test_compression_1d():
     """Test svd compression for a single-input, single-output, 1d field quantity."""
-    svd_file = tmp_path / 'pressure_svd.h5'
-    with h5py.File(svd_file, 'w'):
-        pass  # Make sure the file exists to pass data validation
-    A = Variable(var_id='A', dist='U(-5, 5)')
-    p = Variable(var_id='p', field={'compress_method': 'svd', 'compress_datapath': str(svd_file.resolve()),
-                                    'compress_kwargs': {'energy_tol': 0.99}})
+    A = Variable('A', dist='U(-5, 5)')
+    p = Variable('p')
     def model(inputs, coords):
         amp = inputs['A']
-        return {'p': {'coord': coords, 'p': amp[..., np.newaxis] * np.tanh(np.squeeze(coords))}}
+        return {'p': amp[..., np.newaxis] * np.tanh(np.squeeze(coords))}
 
-    # Generate SVD data matrix (TODO: refactor to compress.py)
+    # Generate SVD data matrix
     samples = A.sample(50)
     svd_coords = np.linspace(-2, 2, 200)
-    outputs = model({str(A): samples}, svd_coords)[p]
+    outputs = model({str(A): samples}, svd_coords)
     data_matrix = outputs[p].T  # (dof, num_samples)
-    nan_idx = np.any(np.isnan(data_matrix), axis=0)
-    data_matrix = data_matrix[:, ~nan_idx]
-    u, s, vt = np.linalg.svd(data_matrix)
-    energy_frac = np.cumsum(s ** 2 / np.sum(s ** 2))
-    if energy_tol := p.field['compress_kwargs'].get('energy_tol'):
-        idx = int(np.where(energy_frac >= energy_tol)[0][0])
-        rank = idx + 1
-    elif rank := p.field['compress_kwargs'].get('rank'):
-        energy_tol = energy_frac[rank - 1]
-    else:
-        raise ValueError(f'Must specify either energy_tol or rank for SVD compression for variable "{p}".')
-    projection_matrix = u[:, :rank]  # (dof, rank)
-
-    with h5py.File(svd_file, 'w') as fd:
-        fd.create_dataset('projection_matrix', data=projection_matrix)
-        fd.create_dataset('data_matrix', data=data_matrix)
-        fd.create_dataset('coord', data=svd_coords[... , np.newaxis])
-        fd.create_dataset('rank', data=rank)
-        fd.create_dataset('energy_tol', data=energy_tol)
+    p.compression = SVD(energy_tol=0.99, coords=svd_coords, data_matrix=data_matrix)
 
     # Test compression
     coarse_shape = 25
     coarse_coords = np.linspace(-2, 2, coarse_shape)
     num_test = (5, 20)
     samples = A.sample(num_test)
-    outputs = model({str(A): samples}, coarse_coords)[p]
-    outputs_reduced = p.compress(outputs)
+    outputs = model({str(A): samples}, coarse_coords)
+    outputs_reduced = p.compress(outputs, coord=coarse_coords)
     outputs_reconstruct = p.reconstruct(outputs_reduced)
 
     y = outputs[p]
@@ -217,7 +203,7 @@ def test_variable_list(tmp_path):
     letters = 'abcdefgh'
     means = np.random.rand(len(letters)) * 10 - 5
     std = np.random.rand(len(letters)) * 3
-    variables = [Variable(var_id=letter, tex=f'${letter}_{i}$', dist=f'N({means[i]}, {std[i]})', norm='zscore')
+    variables = [Variable(letter, tex=f'${letter}_{i}$', dist=f'N({means[i]}, {std[i]})', norm='zscore')
                  for i, letter in enumerate(letters)]
 
     # Init from var, dict, list, or varlist
@@ -232,7 +218,7 @@ def test_variable_list(tmp_path):
         assert l1[v] == v
         assert l2.get(v) == v
         assert l3[i] == v
-        assert l4[v.var_id] == v.var_id
+        assert l4[v.name] == v.name
 
     # Fancy indexing
     indices = [(0, 3, 5), slice(1, 4), ['a', 'b', 'h', 'g', 'f']]
@@ -271,8 +257,8 @@ def test_variable_list(tmp_path):
     assert len(l1) == len(letters) - len(del_idx)
 
     # Load/dump from yaml
-    yaml_dump(l4, tmp_path / 'variable_list.yml')
-    variables_load = yaml_load(tmp_path / 'variable_list.yml')
+    YamlLoader.dump(l4, tmp_path / 'variable_list.yml')
+    variables_load = YamlLoader.load(tmp_path / 'variable_list.yml')
 
     for v in variables_load:
         v_old = l4[l4.index(v)]

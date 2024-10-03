@@ -8,9 +8,10 @@ from scipy.optimize import fsolve
 from scipy.stats import gaussian_kde
 from uqtils import ax_default
 
-from amisc.examples.models import fire_sat_system
-from amisc.system import ComponentSpec, SystemSurrogate
-from amisc.variable import Variable
+# from amisc.examples.models import fire_sat_system
+from amisc import Variable, Component, System
+from amisc.utils import relative_error
+
 
 # TODO: Include a swap and insert component test
 
@@ -150,39 +151,37 @@ def test_system_refine(plots=False):
 
 def test_feedforward(plots=False):
     """Test MD system in Figure 5 in Jakeman 2022"""
-    def coupled_system():
-        def f1(x):
-            return {'y': x * np.sin(np.pi * x)}
-        def f2(x):
-            return {'y': 1 / (1 + 25*x**2)}
-        def f(x):
-            return f2(f1(x)['y'])['y']
-        return f1, f2, f
+    def f1(x):
+        return {'y1': x['x'] * np.sin(np.pi * x['x'])}
+    def f2(x):
+        return {'y2': 1 / (1 + 25*x['y1']**2)}
+    def f(x):
+        return f2(f1(x))
 
-    f1, f2, f = coupled_system()
-    x_in = Variable(dist='U(0, 1)')
-    y1, y2 = Variable(dist='U(0, 1)'), Variable(dist='U(0, 1)')
-    comp1 = ComponentSpec(f1, exo_in=x_in, coupling_out=y1)
-    comp2 = ComponentSpec(f2, coupling_in=y1, coupling_out=y2)
-    surr = SystemSurrogate([comp1, comp2], x_in, [y1, y2], init_surr=False)
+    x = Variable(dist='U(0, 1)')
+    y1 = Variable(dist='U(0, 1)')
+    y2 = Variable(dist='U(0, 1)')
+    comp1 = Component(f1, x, y1)
+    comp2 = Component(f2, y1, y2)
+    surr = System(comp1, comp2)
 
-    x = np.linspace(0, 1, 100).reshape((100, 1))
-    y1 = f1(x)['y']
-    y2 = f(x)
+    x = {'x': np.linspace(0, 1, 100)}
+    y1_ret = f1(x)
+    y2_ret = f(x)
+    y_truth = y2_ret.copy()
+    y_truth.update(y1_ret)
     y_surr = surr(x, use_model='best')
-    l2_error = np.sqrt(np.mean((y_surr[:, 1:2] - y2)**2)) / np.sqrt(np.mean(y2**2))
-    assert l2_error < 1e-15
+    l2_error = np.array([relative_error(y_surr[var], y_truth[var]) for var in ['y1', 'y2']])
+    assert np.all(l2_error < 1e-15)
 
     if plots:
-        fig, ax = plt.subplots(1, 2)
-        ax[0].plot(x, y1, '-r', label='$f_1(x)$')
-        ax[0].plot(np.squeeze(x), y_surr[:, 0], '--k', label='Surrogate')
+        fig, ax = plt.subplots(1, 2, figsize=(6, 3), layout='tight')
+        ax[0].plot(x['x'], y_truth['y1'], '-k', label='$f_1(x)$')
+        ax[0].plot(x['x'], y_surr['y1'], '--r', label='Surrogate')
         ax_default(ax[0], '$x$', '$f(x)$', legend=True)
-        ax[1].plot(x, y2, '-r', label='$f(x)$')
-        ax[1].plot(np.squeeze(x), y_surr[:, 1], '--k', label='Surrogate')
+        ax[1].plot(x['x'], y_truth['y2'], '-k', label='$f(x)$')
+        ax[1].plot(x['x'], y_surr['y2'], '--r', label='Surrogate')
         ax_default(ax[1], '$x$', '$f(x)$', legend=True)
-        fig.set_size_inches(6, 3)
-        fig.tight_layout()
         plt.show()
 
 
@@ -264,13 +263,14 @@ def test_system_surrogate(plots=False):
 
 def test_fpi():
     """Test fixed point iteration implementation against scipy fsolve."""
-    f1 = lambda x: {'y': -x[..., 0:1]**3 + 2 * x[..., 1:2]**2}
-    f2 = lambda x: {'y': 3*x[..., 0:1]**2 + 4 * x[..., 1:2]**(-2)}
-    comp1 = ComponentSpec(f1, exo_in=[0], coupling_in={'m2': [0]}, coupling_out=[0], max_beta=(5,), name='m1')
-    comp2 = ComponentSpec(f2, exo_in=[0], coupling_in={'m1': [0]}, coupling_out=[1], max_beta=(5,), name='m2')
-    exo_vars = Variable(dist='U(0, 4)')
-    coupling_vars = [Variable(dist='U(1, 10)'), Variable(dist='U(1, 10)')]
-    surr = SystemSurrogate([comp1, comp2], exo_vars, coupling_vars, init_surr=False)
+    f1 = lambda x: {'y1': -x['x']**3 + 2 * x['y2']**2}
+    f2 = lambda x: {'y2': 3*x['x']**2 + 4 * x['y1']**(-2)}
+    x = Variable('x', dist='U(0, 4)')
+    y1 = Variable('y1', dist='U(1, 10)')
+    y2 = Variable('y2', dist='U(1, 10)')
+    comp1 = Component(f1, [x, y2], y1, name='m1')
+    comp2 = Component(f2, [x, y1], y2, name='m2')
+    surr = System(comp1, comp2)
 
     # Test on random x against scipy.fsolve
     N = 100
@@ -278,7 +278,10 @@ def test_fpi():
     x0 = np.array([5.5, 5.5])
     exo = surr.sample_inputs(N)
     y_surr = surr.predict(exo, use_model='best', anderson_mem=10, max_fpi_iter=200, fpi_tol=tol)  # (N, 2)
-    nan_idx = list(np.any(np.isnan(y_surr), axis=-1).nonzero()[0])
+    nan_idx = np.full(N, False)
+    for var, arr in y_surr.items():
+        nan_idx = np.logical_or(nan_idx, np.isnan(arr))
+    nan_idx = list(nan_idx.nonzero()[0])
     y_true = np.zeros((N, 2))
     bad_idx = []
     warnings.simplefilter('error')
@@ -286,8 +289,8 @@ def test_fpi():
         def fun(x):
             y1 = x[0]
             y2 = x[1]
-            res1 = -exo[i, 0]**3 + 2*y2**2 - y1
-            res2 = 3*exo[i, 0]**2 + 4*y1**(-2) - y2
+            res1 = -exo['x'][i]**3 + 2*y2**2 - y1
+            res2 = 3*exo['x'][i]**2 + 4*y1**(-2) - y2
             return [res1, res2]
 
         try:
@@ -295,9 +298,10 @@ def test_fpi():
         except Exception:
             bad_idx.append(i)
 
+    y_surr = np.vstack([y_surr[var] for var in ['y1', 'y2']]).T
     y_surr = np.delete(y_surr, nan_idx + bad_idx, axis=0)
     y_true = np.delete(y_true, nan_idx + bad_idx, axis=0)
-    l2_error = np.sqrt(np.mean((y_surr - y_true)**2, axis=0)) / np.sqrt(np.mean(y_true**2, axis=0))
+    l2_error = relative_error(y_surr, y_true)
     assert np.max(l2_error) < tol
 
 
@@ -317,7 +321,7 @@ def test_lls():
 
     # custom solver
     t1 = time.time()
-    alpha = np.squeeze(SystemSurrogate._constrained_lls(A, b, C, d), axis=-1)  # (*, N)
+    alpha = np.squeeze(System._constrained_lls(A, b, C, d), axis=-1)  # (*, N)
     t2 = time.time()
 
     # Built in scipy solver

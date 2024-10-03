@@ -6,7 +6,8 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from amisc.system import ComponentSpec, SystemSurrogate
+from amisc.system import System
+from amisc.component import Component
 
 
 def tanh_func(x, *args, A=2, L=1, frac=4, **kwargs):

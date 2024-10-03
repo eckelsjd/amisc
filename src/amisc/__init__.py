@@ -68,7 +68,7 @@ classDiagram
       +leja_1d()
     }
     class Variable {
-      +str var_id
+      +str name
       +tuple domain
       +str units
       +Distribution dist
@@ -100,49 +100,64 @@ underlying surrogate method that is implemented here is Lagrange polynomial inte
 `LagrangeInterpolator`). If one wanted to use neural networks instead, the only change required is a new
 implementation of `BaseInterpolator`.
 """
-from pathlib import Path
+from abc import ABC as _ABC, abstractmethod as _abstractmethod
+from pathlib import Path as _Path
 
-# import numpy as np
-import yaml
+import yaml as _yaml
 
+from amisc.system import System
 from amisc.component import Component
-
-# from amisc.interpolator import BaseInterpolator
 from amisc.variable import Variable, VariableList
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
+__all__ = ['System', 'Component', 'Variable', 'VariableList', 'FileLoader', 'YamlLoader']
 
 
-def yaml_loader():
-    """Custom YAML loader that includes `amisc` object tags."""
-    loader = yaml.Loader
-    loader.add_constructor(Variable.yaml_tag, Variable._yaml_constructor)
-    loader.add_constructor(VariableList.yaml_tag, VariableList._yaml_constructor)
-    loader.add_constructor(Component.yaml_tag, Component._yaml_constructor)
-    return loader
+class FileLoader(_ABC):
+    """Common interface for loading and dumping `amisc` objects to/from file."""
+
+    @classmethod
+    @_abstractmethod
+    def load(cls, file: str | _Path):
+        """Load an `amisc` object from a file."""
+        raise NotImplementedError
+
+    @classmethod
+    @_abstractmethod
+    def dump(cls, obj, file: str | _Path):
+        """Save an `amisc` object to a file."""
+        raise NotImplementedError
 
 
-def yaml_dumper():
-    """Custom YAML dumper that includes `amisc` object tags."""
-    dumper = yaml.Dumper
-    dumper.add_representer(Variable, Variable._yaml_representer)
-    dumper.add_representer(VariableList, VariableList._yaml_representer)
-    dumper.add_representer(Component, Component._yaml_representer)
-    return dumper
+class YamlLoader(FileLoader):
+    """YAML file loader for `amisc` objects."""
 
+    @staticmethod
+    def _yaml_loader():
+        """Custom YAML loader that includes `amisc` object tags."""
+        loader = _yaml.Loader
+        loader.add_constructor(Variable.yaml_tag, Variable._yaml_constructor)
+        loader.add_constructor(VariableList.yaml_tag, VariableList._yaml_constructor)
+        loader.add_constructor(Component.yaml_tag, Component._yaml_constructor)
+        loader.add_constructor(System.yaml_tag, System._yaml_constructor)
+        return loader
 
-def yaml_load(yaml_file: str | Path):
-    """Convenience function for loading from a YAML file that contains `amisc` object tags."""
-    with open(Path(yaml_file), 'r', encoding='utf-8') as fd:
-        return yaml.load(fd, Loader=yaml_loader())
+    @staticmethod
+    def _yaml_dumper():
+        """Custom YAML dumper that includes `amisc` object tags."""
+        dumper = _yaml.Dumper
+        dumper.add_representer(Variable, Variable._yaml_representer)
+        dumper.add_representer(VariableList, VariableList._yaml_representer)
+        dumper.add_representer(Component, Component._yaml_representer)
+        dumper.add_representer(System, System._yaml_representer)
+        return dumper
 
+    @classmethod
+    def load(cls, file: str | _Path):
+        with open(_Path(file).with_suffix('.yml'), 'r', encoding='utf-8') as fd:
+            return _yaml.load(fd, Loader=cls._yaml_loader())
 
-def yaml_dump(data, yaml_file: str | Path):
-    """Convenience function for dumping to a YAML file using `amisc` object tags."""
-    with open(Path(yaml_file), 'w', encoding='utf-8') as fd:
-        yaml.dump(data, fd, Dumper=yaml_dumper(), allow_unicode=True)
-
-
-# Custom types that are used frequently
-# InterpResults = BaseInterpolator | tuple[list[int | tuple | str], np.ndarray, BaseInterpolator]
-IndicesRV = list[int | str | Variable] | int | str | Variable
+    @classmethod
+    def dump(cls, obj, file: str | _Path):
+        with open(_Path(file).with_suffix('.yml'), 'w', encoding='utf-8') as fd:
+            _yaml.dump(obj, fd, Dumper=cls._yaml_dumper(), allow_unicode=True)
