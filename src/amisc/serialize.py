@@ -16,14 +16,14 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Type, Any
+from typing import Any
 
 import yaml
 
 from amisc.utils import parse_function_string
+from amisc.typing import builtin
 
 __all__ = ['Serializable', 'Base64Serializable', 'StringSerializable', 'PickleSerializable', 'YamlSerializable']
-builtin = str | dict | list | int | float | tuple | bool
 
 
 class Serializable(ABC):

@@ -42,16 +42,16 @@ git push -u origin <your-branch-name>
 # For your PR to be merged:
   # squash all your commits on your branch (interactively in an IDE most likely)
   # rebase to the top of origin/main to include new changes from others
-
+  
 git fetch
 git rebase -i main your-branch  # for example
-
+  
 # Resolve any conflicts
 # Your history now looks something like this:
 #              o your-branch
 #             /
 # ---o---o---o main
-
+  
 # You can delete the branch and fork when your PR has been merged!
 ```
 

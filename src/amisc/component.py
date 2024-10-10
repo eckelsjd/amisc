@@ -1,13 +1,14 @@
-"""A Component is an `amisc` wrapper around a single discipline model. It manages surrogate construction and optionally
-a hierarchy of modeling fidelities that may be available. Concrete component classes all inherit from the base
-`ComponentSurrogate` class provided here. Components manage an array of `BaseInterpolator` objects to form a
-multifidelity hierarchy.
+"""A `Component` is an `amisc` wrapper around a single discipline model. It manages surrogate construction and
+a hierarchy of modeling fidelities.
 
 Includes:
 
-- `ComponentSurrogate`: the base class that is fundamental to the adaptive multi-index stochastic collocation strategy
-- `SparseGridSurrogate`: an AMISC component that manages a hierarchy of `LagrangeInterpolator` objects
-- `AnalyticalSurrogate`: a light wrapper around a single discipline model that does not require surrogate approximation
+- `ModelKwargs` — a dataclass for storing model keyword arguments
+- `StringKwargs` — a dataclass for storing model keyword arguments as a string
+- `IndexSet` — a dataclass that maintains a list of multi-indices
+- `MiscTree` — a dataclass that maintains MISC data in a `dict` tree, indexed by `alpha` and `beta`
+- `SurrogateStatus` — an enumeration that keeps track of what state MISC coefficients are in for surrogate evaluation
+- `Component` — a dataclass that manages a single discipline model and its surrogate hierarchy
 """
 from __future__ import annotations
 
@@ -21,113 +22,37 @@ import random
 import string
 import tempfile
 import typing
-from abc import ABC, abstractmethod
+import warnings
+from abc import ABC
 from collections import UserDict, UserList, deque
 from concurrent.futures import ALL_COMPLETED, Executor, wait
-from dataclasses import dataclass, field
 from enum import IntFlag
 from pathlib import Path
-from typing import Annotated, Any, Callable, ClassVar, Iterable, Literal, Optional
+from typing import Any, Callable, ClassVar, Iterable, Literal, Optional
 
 import numpy as np
 import yaml
 from joblib import delayed
-from numpy.typing import ArrayLike
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MaxAbsScaler
 from typing_extensions import TypedDict
 
-from amisc.interpolator import BaseInterpolator, LagrangeInterpolator
-from amisc.serialize import Base64Serializable, YamlSerializable, PickleSerializable, Serializable, StringSerializable
-from amisc.utils import as_tuple, get_logger, format_inputs, format_outputs, search_for_file, _get_yaml_path, \
-    _inspect_assignment
+from amisc.interpolator import InterpolatorState, Interpolator, Lagrange
+from amisc.serialize import YamlSerializable, PickleSerializable, Serializable, StringSerializable
+from amisc.training import TrainingData, SparseGrid
+from amisc.typing import MultiIndex, Dataset
+from amisc.utils import as_tuple, get_logger, format_inputs, format_outputs, search_for_file
+from amisc.utils import _get_yaml_path, _inspect_assignment, _inspect_function
 from amisc.variable import Variable, VariableList
 
-MultiIndex = str | tuple[int, ...]
-Variables = list[Variable | dict] | Variable | dict | VariableList
+__all__ = ["ModelKwargs", "StringKwargs", "SurrogateStatus", "IndexSet", "MiscTree", "Component"]
+_VariableLike = list[Variable | dict | str] | str | Variable | dict | VariableList  # Generic type for Variables
 
 
-class ComponentIO(TypedDict, total=False):
-    """Type hint for the input/output `dicts` of a call to `Component.model`. The keys are the variable IDs and the
-    values are the corresponding data arrays. There are also a few special keys that can be returned by the model:
-
-    - `model_cost` — the computational cost (seconds of CPU time) of a single model evaluation
-    - `output_path` — the path to the output file or directory written by the model
-    - `errors` — a `dict` with the indices where the model evaluation failed with context about the errors
-
-    The model can return additional items that are not part of `Component.outputs`. These items are returned as object
-    arrays in the output.
-    """
-    input_var_ids: float | list | ArrayLike   # Use the actual variable IDs
-    output_var_ids: float | list | ArrayLike
-    extra_outputs: Any
-
-    model_cost: float | list | ArrayLike
-    output_path: str | Path
-    errors: dict
-
-
-@dataclass
-class ModelArgs(Serializable):
-    """Default dataclass for storing model arguments."""
-    data: tuple = ()
-
-    def __init__(self, *args):
-        self.data = args
-
-    def __iter__(self):
-        yield from self.data
-
-    def serialize(self):
-        return list(self.data)
-
-    @classmethod
-    def deserialize(cls, serialized_data):
-        return ModelArgs(*serialized_data)
-
-    @classmethod
-    def from_dict(cls, config: dict) -> ModelArgs:
-        """Create a `ModelArgs` object from a `dict` configuration."""
-        method = config.pop('method', 'default').lower()
-        match method:
-            case 'default':
-                return ModelArgs(*config['args'])
-            case 'string':
-                return StringArgs(*config['args'])
-            case other:
-                raise NotImplementedError(f"Unknown model args method: {method}")
-
-
-class StringArgs(StringSerializable, ModelArgs):
-    def __repr__(self):
-        return str(self.data)
-
-    def __str__(self):
-        def format_value(value):
-            if isinstance(value, str):
-                return f'"{value}"'
-            else:
-                return str(value)
-
-        arg_str = ", ".join([f"{format_value(value)}" for value in self.data])
-        return f"ModelArgs({arg_str})"
-
-
-@dataclass
-class ModelKwargs(Serializable):
+class ModelKwargs(UserDict, Serializable):
     """Default dataclass for storing model keyword arguments."""
-    data: dict = field(default_factory=dict)
-
-    def __init__(self, **kwargs):
-        self.data = kwargs
-
-    def __iter__(self):
-        yield from self.data
-
-    def items(self):
-        return self.data.items()
 
     def serialize(self):
         return self.data
@@ -151,6 +76,7 @@ class ModelKwargs(Serializable):
 
 
 class StringKwargs(StringSerializable, ModelKwargs):
+    """Dataclass for storing model keyword arguments as a string."""
     def __repr__(self):
         return str(self.data)
 
@@ -161,50 +87,8 @@ class StringKwargs(StringSerializable, ModelKwargs):
             else:
                 return str(value)
 
-        kw_str = ", ".join([f"{key}={format_value(value)}" for key, value in self.data.items()])
+        kw_str = ", ".join([f"{key}={format_value(value)}" for key, value in self.items()])
         return f"ModelKwargs({kw_str})"
-
-
-class Interpolator(Serializable, ABC):
-    """Interface for an interpolator object that approximates a model."""
-
-    @classmethod
-    def from_dict(cls, config: dict) -> Interpolator:
-        """Create an `Interpolator` object from a `dict` configuration."""
-        method = config.pop('method', 'lagrange').lower()
-        match method:
-            case 'lagrange':
-                return Lagrange(**config)
-            case other:
-                raise NotImplementedError(f"Unknown interpolator method: {method}")
-
-
-@dataclass
-class Lagrange(Interpolator, StringSerializable):
-    """Implementation of a barycentric Lagrange polynomial interpolator."""
-    interval_capacity: int = 4
-
-
-class InterpolatorState(Serializable, ABC):
-    """Interface for a dataclass that stores the internal state of an interpolator (e.g. weights and biases)."""
-    pass
-
-
-@dataclass
-class LagrangeState(InterpolatorState, Base64Serializable):
-    """The internal state for a barycentric Lagrange polynomial interpolator."""
-    weights: list[ArrayLike, ...] = field(default_factory=list)
-    x_grids: list[ArrayLike, ...] = field(default_factory=list)
-
-    def __eq__(self, other):
-        if isinstance(other, LagrangeState):
-            try:
-                return all([np.allclose(self.weights[i], other.weights[i]) for i in range(len(self.weights))]) and \
-                    all([np.allclose(self.x_grids[i], other.x_grids[i]) for i in range(len(self.x_grids))])
-            except IndexError:
-                return False
-        else:
-            return False
 
 
 class IndexSet(BaseModel, UserList, Serializable):
@@ -444,29 +328,8 @@ class SurrogateStatus(IntFlag):
     RESET = 3
 
 
-class TrainingData(Serializable, ABC):
-    """Interface for storing surrogate training data."""
-
-    @classmethod
-    def from_dict(cls, config: dict) -> TrainingData:
-        """Create a `TrainingData` object from a `dict` configuration."""
-        method = config.pop('method', 'sparse-grid').lower()
-        match method:
-            case 'sparse-grid':
-                return SparseGrid(**config)
-            case other:
-                raise NotImplementedError(f"Unknown training data method: {method}")
-
-
-@dataclass
-class SparseGrid(TrainingData, PickleSerializable):
-    rule: str = 'leja'
-    skip: int = 2
-
-
 class ComponentSerializers(TypedDict, total=False):
     """Type hint for the `Component` class data serializers."""
-    model_args: str | type[Serializable] | YamlSerializable
     model_kwargs: str | type[Serializable] | YamlSerializable
     interpolator: str | type[Serializable] | YamlSerializable
     training_data: str | type[Serializable] | YamlSerializable
@@ -478,34 +341,50 @@ class Component(BaseModel, Serializable):
                               protected_namespaces=(), extra='allow')
     # Configuration
     serializers: Optional[ComponentSerializers] = None
-    model: str | Callable[[dict | ComponentIO, ...], dict | ComponentIO]
-    inputs: Variables
-    outputs: Variables
     name: Optional[str] = None
-    model_args: str | tuple | ModelArgs = ModelArgs()
-    model_kwargs: str | dict | ModelKwargs = ModelKwargs()
+    model: str | Callable[[dict | Dataset, ...], dict | Dataset]
+    model_kwargs: str | dict | ModelKwargs = {}
+    inputs: _VariableLike
+    outputs: _VariableLike
     max_alpha: MultiIndex = ()
-    max_beta: MultiIndex = ()
+    max_beta_train: MultiIndex = ()
+    max_beta_interpolator: MultiIndex = ()
     interpolator: Any | Interpolator = Lagrange()
     vectorized: bool = False
+    call_unpacked: Optional[bool] = None  # If the model expects inputs/outputs like `func(x1, x2, ...)->(y1, y2, ...)
+    ret_unpacked: Optional[bool] = None
 
     # Data storage/states for a MISC component
     active_set: list | IndexSet = IndexSet()
     candidate_set: list | IndexSet = IndexSet()
-    training_data: Any | TrainingData = SparseGrid()
     misc_states: MiscTree = MiscTree()  # (alpha, beta) -> Interpolator state
-    misc_costs: MiscTree = MiscTree()  # (alpha, beta) -> Computational cost
-    misc_coeff: MiscTree = MiscTree()  # (alpha, beta) -> c_[alpha, beta]
+    misc_costs: MiscTree = MiscTree()   # (alpha, beta) -> Added computational cost for this mult-index
+    misc_coeff: MiscTree = MiscTree()   # (alpha, beta) -> c_[alpha, beta]
+    model_costs: dict = dict()  # Average single fidelity model costs (for each alpha)
+    training_data: Any | TrainingData = SparseGrid()
     status: int | SurrogateStatus = SurrogateStatus.RESET
 
     # Internal
     _logger: Optional[logging.Logger] = None
     _executor: Optional[Executor] = None
 
-    def __init__(self, /, model, inputs, outputs, *, executor=None, name=None, **kwargs):
+    def __init__(self, /, model, *args, inputs=None, outputs=None, executor=None, name=None, **kwargs):
         if name is None:
             name = _inspect_assignment('Component')  # try to assign the name from inspection
-        name = name or "Component_" + "".join(random.choices(string.digits, k=3))
+        name = name or model.__name__ or "Component_" + "".join(random.choices(string.digits, k=3))
+
+        # Determine how the model expects to be called and gather inputs/outputs
+        _ = self._validate_model_signature(model, args, inputs, outputs, kwargs.get('call_unpacked', None),
+                                           kwargs.get('ret_unpacked', None))
+        model, inputs, outputs, call_unpacked, ret_unpacked = _
+        kwargs['call_unpacked'] = call_unpacked
+        kwargs['ret_unpacked'] = ret_unpacked
+
+        # Gather all model kwargs (anything else passed in for kwargs is assumed to be a model kwarg)
+        model_kwargs = kwargs.get('model_kwargs', {})
+        for key in kwargs.keys() - self.model_fields.keys():
+            model_kwargs[key] = kwargs.pop(key)
+        kwargs['model_kwargs'] = model_kwargs
 
         # Gather data serializers from type checks (if not passed in as a kwarg)
         serializers = kwargs.get('serializers', {})  # directly passing serializers will override type checks
@@ -537,6 +416,100 @@ class Component(BaseModel, Serializable):
         self._ij = np.empty((2 ** Nij, Nij), dtype=np.uint8)
         for i, ele in enumerate(itertools.product([0, 1], repeat=Nij)):
             self._ij[i, :] = ele
+
+    @classmethod
+    def _validate_model_signature(cls, model, args=(), inputs=None, outputs=None,
+                                  call_unpacked=None, ret_unpacked=None):
+        """Parse model signature and decide how the model expects to be called based on what input/output information
+        is provided or inspected from the model signature.
+        """
+        if inputs is not None:
+            inputs = cls._validate_variables(inputs)
+        if outputs is not None:
+            outputs = cls._validate_variables(outputs)
+        model = cls._validate_model(model)
+
+        # Default to `dict` (i.e. packed) model call/return signatures
+        if call_unpacked is None:
+            call_unpacked = False
+        if ret_unpacked is None:
+            ret_unpacked = False
+        inputs_inspect, outputs_inspect = _inspect_function(model)
+        call_unpacked = call_unpacked or (len(inputs_inspect) > 1)  # Assume multiple inputs require unpacking
+        ret_unpacked = ret_unpacked or (len(outputs_inspect) > 1)   # Assume multiple outputs require unpacking
+
+        # Extract inputs/outputs from args
+        arg_inputs = ()
+        arg_outputs = ()
+        if len(args) > 0:
+            if call_unpacked:
+                if isinstance(args[0], dict | str | Variable):
+                    arg_inputs = args[:len(inputs_inspect)]
+                    arg_outputs = args[len(inputs_inspect):]
+                else:
+                    arg_inputs = args[0]
+                    arg_outputs = args[1:]
+            else:
+                arg_inputs = args[0]    # Assume first arg is a single or list of inputs
+                arg_outputs = args[1:]  # Assume rest are outputs
+
+        # Resolve inputs
+        inputs = inputs or []
+        inputs = VariableList.merge(inputs, arg_inputs)
+        if len(inputs) == 0:
+            inputs = inputs_inspect
+            call_unpacked = True
+            if len(inputs) == 0:
+                raise ValueError("Could not infer input variables from model signature. Either your model does not "
+                                 "accept input arguments or an error occurred during inspection.\nPlease provide the "
+                                 "inputs directly as `Component(inputs=[...])` or fix the model signature.")
+        if call_unpacked:
+            if not all([var == inputs_inspect[i] for i, var in enumerate(inputs)]):
+                warnings.warn(f"Mismatch between provided inputs: {inputs.values()} and inputs inferred from "
+                              f"model signature: {inputs_inspect}. This may cause unexpected results.")
+        else:
+            if len(inputs_inspect) > 1:
+                warnings.warn(f"Model signature expects multiple input arguments: {inputs_inspect}. "
+                              f"Please set `call_unpacked=True` to use this model signature for multiple "
+                              f"inputs.\nOtherwise, move all inputs into a single `dict` argument and all "
+                              f"extra arguments into the `model_kwargs` field.")
+
+            # Can't assume unpacked for single input/output, so warn user if they may be trying to do so
+            if len(inputs) == 1 and len(inputs_inspect) == 1 and str(inputs[0]) == str(inputs_inspect[0]):
+                warnings.warn(f"Single input argument: {inputs[0]} provided to model with input signature: "
+                              f"{inputs_inspect}.\nIf you intended to use a single input argument, set "
+                              f"`call_unpacked=True` to use this model signature.\nOtherwise, the first input will "
+                              f"be passed to your model as a `dict`.\nIf you are expecting a `dict` input already, "
+                              f"change the name of the input to not exactly "
+                              f"match {inputs_inspect} in order to silence this warning.")
+        # Resolve outputs
+        outputs = outputs or []
+        outputs = VariableList.merge(outputs, *arg_outputs)
+        if len(outputs) == 0:
+            outputs = outputs_inspect
+            ret_unpacked = True
+            if len(outputs) == 0:
+                raise ValueError("Could not infer output variables from model inspection. Either your model does not "
+                                 "return outputs or an error occurred during inspection.\nPlease provide the "
+                                 "outputs directly as `Component(outputs=[...])` or fix the model return values.")
+        if ret_unpacked:
+            if not all([var == outputs_inspect[i] for i, var in enumerate(outputs)]):
+                warnings.warn(f"Mismatch between provided outputs: {outputs.values()} and outputs inferred "
+                              f"from model: {outputs_inspect}. This may cause unexpected results.")
+        else:
+            if len(outputs_inspect) > 1:
+                warnings.warn(f"Model expects multiple return values: {outputs_inspect}. Please set "
+                              f"`ret_unpacked=True` to use this model signature for multiple outputs.\n"
+                              f"Otherwise, move all outputs into a single `dict` return value.")
+
+            if len(outputs) == 1 and len(outputs_inspect) == 1 and str(outputs[0]) == str(outputs_inspect[0]):
+                warnings.warn(f"Single output: {outputs[0]} provided to model with single expected return: "
+                              f"{outputs_inspect}.\nIf you intended to output a single return value, set "
+                              f"`ret_unpacked=True` to use this model signature.\nOtherwise, the output should "
+                              f"be returned from your model as a `dict`.\nIf you are returning a `dict` already, "
+                              f"then change its name to not exactly match {outputs_inspect} in order to silence "
+                              f"this warning.")
+        return model, inputs, outputs, call_unpacked, ret_unpacked
 
     def __repr__(self):
         s = f'---- {self.name} ----\n'
@@ -573,18 +546,23 @@ class Component(BaseModel, Serializable):
 
     @field_validator('inputs', 'outputs')
     @classmethod
-    def _validate_variables(cls, variables: Variables) -> VariableList:
+    def _validate_variables(cls, variables: _VariableLike) -> VariableList:
         if isinstance(variables, VariableList):
             return variables
         else:
             return VariableList.deserialize(variables)
 
-    @field_validator('max_alpha', 'max_beta')
+    @field_validator('max_alpha', 'max_beta_train', 'max_beta_interpolator')
     @classmethod
     def _validate_indices(cls, multi_index: MultiIndex) -> tuple[int, ...]:
         return as_tuple(multi_index)
 
-    @field_validator('model_args', 'model_kwargs', 'interpolator', 'training_data')
+    @field_validator('model_costs')
+    @classmethod
+    def _validate_model_costs(cls, model_costs: dict) -> dict:
+        return {as_tuple(key): float(value) for key, value in model_costs.items()}
+
+    @field_validator('model_kwargs', 'interpolator', 'training_data')
     @classmethod
     def _validate_arbitrary_serializable(cls, data: Any, info: ValidationInfo) -> Any:
         serializer = info.data.get('serializers').get(info.field_name).obj
@@ -607,6 +585,10 @@ class Component(BaseModel, Serializable):
         return len(self.outputs)
 
     @property
+    def max_beta(self) -> MultiIndex:
+        return self.max_beta_train + self.max_beta_interpolator
+
+    @property
     def executor(self) -> Executor:
         return self._executor
 
@@ -618,11 +600,15 @@ class Component(BaseModel, Serializable):
     def logger(self) -> logging.Logger:
         return self._logger
 
+    @logger.setter
+    def logger(self, logger: logging.Logger):
+        self._logger = logger
+
     def __eq__(self, other):
         if isinstance(other, Component):
             return (self.model.__code__.co_code == other.model.__code__.co_code and self.inputs == other.inputs
-                    and self.outputs == other.outputs and self.name == other.name and
-                    self.model_args.data == other.model_args.data and self.model_kwargs.data == other.model_kwargs.data
+                    and self.outputs == other.outputs and self.name == other.name
+                    and self.model_kwargs.data == other.model_kwargs.data
                     and self.max_alpha == other.max_alpha and self.max_beta == other.max_beta and
                     self.interpolator == other.interpolator
                     and self.active_set == other.active_set and self.candidate_set == other.candidate_set
@@ -632,8 +618,8 @@ class Component(BaseModel, Serializable):
         else:
             return False
 
-    def call_model(self, inputs: dict | ComponentIO, alpha: Literal['best', 'worst'] | tuple = None,
-                   output_path: str | Path = None, executor: Executor = None) -> dict | ComponentIO:
+    def call_model(self, inputs: dict | Dataset, alpha: Literal['best', 'worst'] | tuple | list = None,
+                   output_path: str | Path = None, executor: Executor = None) -> Dataset:
         """Wrapper function for calling the underlying component model.
 
         This function formats the input data, calls the model, and processes the output data.
@@ -672,50 +658,81 @@ class Component(BaseModel, Serializable):
             inputs = {var.name: inputs[..., i] for i, var in enumerate(self.inputs)}
         inputs, loop_shape = format_inputs(inputs, var_shape={var: var.shape for var in self.inputs})
         N = int(np.prod(loop_shape))
+        list_alpha = isinstance(alpha, list | np.ndarray)
+        alpha_requested = self.model_kwarg_requested('alpha')
         for var in self.inputs:
             if var.name not in inputs:
                 raise ValueError(f"Missing input variable '{var.name}'.")
 
         # Pass extra requested items to the model kwargs
         kwargs = copy.deepcopy(self.model_kwargs.data)
-        if self.model_arg_requested('output_path'):
+        if self.model_kwarg_requested('output_path'):
             kwargs['output_path'] = output_path
-        if self.model_arg_requested('input_vars'):
+        if self.model_kwarg_requested('input_vars'):
             kwargs['input_vars'] = self.inputs
-        if self.model_arg_requested('output_vars'):
+        if self.model_kwarg_requested('output_vars'):
             kwargs['output_vars'] = self.outputs
-        if self.model_arg_requested('alpha'):
-            if alpha == 'best':
-                alpha = self.max_alpha
-            elif alpha == 'worst':
-                alpha = (0,) * len(self.max_alpha)
-            kwargs['alpha'] = alpha
+        if alpha_requested:
+            alpha = np.array(alpha).reshape((N,)) if list_alpha else [alpha] * N
+            for i in range(N):
+                if alpha[i] == 'best':
+                    alpha[i] = self.max_alpha
+                elif alpha[i] == 'worst':
+                    alpha[i] = (0,) * len(self.max_alpha)
 
         # Compute model (vectorized, executor parallel, or serial)
         errors = {}
         if self.vectorized:
-            output_dict = self.model(inputs, *self.model_args, **kwargs)
+            if alpha_requested:
+                kwargs['alpha'] = alpha if list_alpha else alpha[0]
+            output_dict = self.model(*[inputs[var.name] for var in self.inputs], **kwargs) if self.call_unpacked \
+                else self.model(inputs, **kwargs)
+            if self.ret_unpacked:
+                output_dict = (output_dict,) if not isinstance(output_dict, tuple) else output_dict
+                output_dict = {out_var.name: output_dict[i] for i, out_var in enumerate(self.outputs)}
         else:
             executor = executor or self.executor
             if executor is None:  # Serial
                 results = deque(maxlen=N)
                 for i in range(N):
                     try:
-                        results.append(self.model({k: v[i] for k, v in inputs.items()}, *self.model_args, **kwargs))
+                        if alpha_requested:
+                            kwargs['alpha'] = alpha[i]
+                        ret = self.model(*[{k: v[i] for k, v in inputs.items()}[var.name] for var in self.inputs],
+                                         **kwargs) if self.call_unpacked else (
+                            self.model({k: v[i] for k, v in inputs.items()}, **kwargs))
+                        if self.ret_unpacked:
+                            ret = (ret,) if not isinstance(ret, tuple) else ret
+                            ret = {out_var.name: ret[i] for i, out_var in enumerate(self.outputs)}
+                        results.append(ret)
                     except Exception as e:
                         results.append({'inputs': {k: v[i] for k, v in inputs.items()}, 'index': i,
-                                        'model_args': self.model_args.data, 'model_kwargs': kwargs, 'error': str(e)})
+                                        'model_kwargs': kwargs.copy(), 'error': str(e)})
             else:  # Parallel
                 results = deque(maxlen=N)
-                futures = [executor.submit(self.model, {k: v[i] for k, v in inputs.items()},
-                                           *self.model_args.data, **kwargs) for i in range(np.prod(loop_shape))]
+                futures = []
+                for i in range(N):
+                    if alpha_requested:
+                        kwargs['alpha'] = alpha[i]
+                    fs = executor.submit(self.model,
+                                         *[{k: v[i] for k, v in inputs.items()}[var.name] for var in self.inputs],
+                                         **kwargs) if self.call_unpacked else (
+                        executor.submit(self.model, {k: v[i] for k, v in inputs.items()}, **kwargs))
+                    futures.append(fs)
                 wait(futures, timeout=None, return_when=ALL_COMPLETED)
+
                 for i, fs in enumerate(futures):
                     try:
-                        results.append(fs.result())
+                        if alpha_requested:
+                            kwargs['alpha'] = alpha[i]
+                        ret = fs.result()
+                        if self.ret_unpacked:
+                            ret = (ret,) if not isinstance(ret, tuple) else ret
+                            ret = {out_var.name: ret[i] for i, out_var in enumerate(self.outputs)}
+                        results.append(ret)
                     except Exception as e:
                         results.append({'inputs': {k: v[i] for k, v in inputs.items()}, 'index': i,
-                                        'model_args': self.model_args.data, 'model_kwargs': kwargs, 'error': str(e)})
+                                        'model_kwargs': kwargs.copy(), 'error': str(e)})
 
             # Collect parallel/serial results
             output_dict = {}
@@ -738,6 +755,16 @@ class Component(BaseModel, Serializable):
                                 output_dict.setdefault(key, np.full((N,), None, dtype=object))
                             output_dict[key][i]
 
+        # Save average model costs for each alpha fidelity
+        if alpha is not None and output_dict.get('model_cost') is not None:
+            alpha_costs = {}
+            for i, cost in enumerate(output_dict['model_cost']):
+                alpha_costs.setdefault(alpha[i], [])
+                alpha_costs[alpha[i]].append(cost)
+            for a, costs in alpha_costs.items():
+                self.model_costs.setdefault(a, np.empty(0))
+                self.model_costs[a] = np.nanmean(np.hstack((costs, self.model_costs[a])))
+
         # Reshape loop dimensions to match the original input shape
         output_dict = format_outputs(output_dict, loop_shape)
 
@@ -750,8 +777,8 @@ class Component(BaseModel, Serializable):
             output_dict['errors'] = errors
         return output_dict
 
-    def predict(self, x: dict | ComponentIO, use_model: Literal['best', 'worst'] | tuple = None,
-                model_dir: str | Path = None, training: bool = False, index_set: IndexSet = None) -> dict | ComponentIO:
+    def predict(self, x: dict | Dataset, use_model: Literal['best', 'worst'] | tuple = None,
+                model_dir: str | Path = None, training: bool = False, index_set: IndexSet = None) -> Dataset:
         """Evaluate the MISC approximation at new inputs `x`.
 
         !!! Note
@@ -772,6 +799,7 @@ class Component(BaseModel, Serializable):
         x, loop_shape = format_inputs(x, var_shape={var: var.shape for var in self.inputs})  # {'x': (N, ...)}
         y = {}
 
+        # TODO: handle prediction with empty active set (return nan)
         # TODO: Compress input fields and call surrogates
         for alpha, beta in index_set:
             comb_coeff = misc_coeff[str(alpha)][str(beta)]
@@ -782,19 +810,122 @@ class Component(BaseModel, Serializable):
 
         return format_outputs(y, loop_shape)
 
-    def model_arg_requested(self, arg_name):
-        """Return whether the underlying component model requested this `arg_name`. Special args include:
+    def _forward_neighbors(self, alpha, beta, active_set=None):
+        """Get all possible forward multi-index neighbors (distance of one unit vector away)"""
+        active_set = active_set or self.active_set
+        ind = list(alpha + beta)
+        new_candidates = []
+        for i in range(len(ind)):
+            ind_new = ind.copy()
+            ind_new[i] += 1
+
+            # Don't add if we surpass a refinement limit
+            if np.any(np.array(ind_new) > np.array(self.max_alpha + self.max_beta)):
+                continue
+
+            # Add the new index if it maintains downward-closedness
+            new_cand = (tuple(ind_new[:len(alpha)]), tuple(ind_new[len(alpha):]))
+            down_closed = True
+            for j in range(len(ind)):
+                ind_check = ind_new.copy()
+                ind_check[j] -= 1
+                if ind_check[j] >= 0:
+                    tup_check = (tuple(ind_check[:len(alpha)]), tuple(ind_check[len(alpha):]))
+                    if tup_check not in active_set and tup_check != (alpha, beta):
+                        down_closed = False
+                        break
+            if down_closed:
+                new_candidates.append(new_cand)
+
+        return new_candidates
+
+    def activate_index(self, alpha: MultiIndex, beta: MultiIndex, model_dir: str | Path = None,
+                       executor: Executor = None):
+        """Add a multi-index to the active set and all neighbors to the candidate set.
+
+        !!! Warning
+            The user of this function is responsible for ensuring that the index set maintains downward-closedness.
+            That is, only activate indices that are neighbors of the current active set.
+
+        :param alpha: A multi-index specifying model fidelity
+        :param beta: A multi-index specifying surrogate fidelity
+        :param model_dir: Directory to save model output files
+        :param executor: Executor for parallel execution of model on training data if the model is not vectorized
+        """
+        if (alpha, beta) in self.active_set:
+            self.logger.warning(f'Multi-index {(alpha, beta)} is already in the active index set. Ignoring...')
+            return
+
+        # Collect all neighbor candidate indices
+        executor = executor or self.executor
+        neighbors = self._forward_neighbors(alpha, beta)
+        new_candidates = [(alpha, beta)] + neighbors if (alpha, beta) not in self.candidate_set else neighbors
+
+        # Collect all model inputs (i.e. training points) requested by the new candidates
+        alpha_list = []   # keep track of model fidelities
+        design_list = []  # keep track of training data coordinates/locations/indices
+        model_inputs = {}
+        for a, b in new_candidates:
+            design_idx, design_pts = self.training_data.refine(a, b[:len(self.max_beta_train)], self.inputs)
+            alpha_list.extend([a] * len(design_idx))
+            design_list.append(design_idx)
+            for var in self.inputs:
+                model_inputs[var] = design_pts[var] if model_inputs.get(var) is None else (
+                    np.concatenate((model_inputs[var], design_pts[var]), axis=0))
+
+        # Evaluate model at designed training points
+        self.logger.info(f"Running {len(alpha_list)} total model evaluations for component "
+                         f"'{self.name}' new candidate indices: {new_candidates}...")
+        model_outputs = self.call_model(model_inputs, alpha=alpha_list, output_path=model_dir, executor=executor)
+
+        # Unpack model inputs/outputs and update states
+        start_idx = 0
+        errors = model_outputs.pop('errors', {})
+        for i, (a, b) in enumerate(new_candidates):
+            num_train_pts = len(design_list[i])
+            end_idx = start_idx + num_train_pts
+            yi_dict = {var: model_outputs[var][start_idx:end_idx, ...] for var in model_outputs}
+
+            # Check for errors
+            for idx in list(errors.keys()):
+                if idx < end_idx:
+                    err_info = errors.pop(idx)
+                    err_info['index'] = idx - start_idx
+                    self.logger.warning(f"Model error occurred while adding candidate ({a}, {b}) for component "
+                                        f"{self.name}: {err_info['error']}.\nLeaving NaN values in training data...")
+                    yi_dict.setdefault('errors', dict())
+                    yi_dict['errors'][idx - start_idx] = err_info
+
+            # Store training data, computational cost, and new interpolator state
+            self.training_data.set(a, b[:len(self.max_beta_train)], design_list[i], yi_dict)
+            self.misc_costs[a, b] = self.model_costs[a] * num_train_pts
+            self.misc_states[a, b] = self.interpolator.refine(b[len(self.max_beta_train):],
+                                                              self.training_data.get(a, b[:len(self.max_beta_train)]),
+                                                              self.misc_states.get((alpha, beta)),
+                                                              self.inputs)
+            start_idx = end_idx
+
+        # Move to the active index set
+        if (alpha, beta) in self.candidate_set:
+            self.candidate_set.remove((alpha, beta))
+        self.active_set.append((alpha, beta))
+        new_candidates = [cand for cand in new_candidates if cand not in self.candidate_set]
+        self.candidate_set.extend(new_candidates)
+        self.status = SurrogateStatus.RESET  # Makes sure misc coeffs get recomputed next time
+
+    def model_kwarg_requested(self, kwarg_name):
+        """Return whether the underlying component model requested this `kwarg_name`. Special kwargs include:
 
         - `output_path` — a save directory created by `amisc` will be passed to the model for saving model output files.
         - `alpha` — a tuple of model fidelity indices will be passed to the model to adjust fidelity.
         - `input_vars` — a list of `Variable` objects will be passed to the model for input variable information.
         - `output_vars` — a list of `Variable` objects will be passed to the model for output variable information.
 
-        :param arg_name: the argument to check for in the underlying component model's function signature
+        :param kwarg_name: the argument to check for in the underlying component model's function signature kwargs
         """
         signature = inspect.signature(self.model)
         for param in signature.parameters.values():
-            if param.name == arg_name:
+            if param.name == kwarg_name and param.default != param.empty:
                 return True
         return False
 
@@ -815,16 +946,25 @@ class Component(BaseModel, Serializable):
                         break
         self._logger = logger or get_logger(self.name, log_file=log_file, stdout=stdout)
 
-    def update_model(self, new_model=None, model_args: tuple = None, model_kwargs: dict = None, **kwargs):
-        """Update the underlying component model or its args/kwargs."""
+    def update_model(self, new_model=None, model_kwargs: dict = None, **kwargs):
+        """Update the underlying component model or its kwargs."""
         if new_model is not None:
             self.model = new_model
-        if model_args is not None:
-            self.model_args = model_args
         new_kwargs = self.model_kwargs.data
         new_kwargs.update(model_kwargs or {})
         new_kwargs.update(kwargs)
         self.model_kwargs = new_kwargs
+
+    def get_cost(self, alpha: tuple, beta: tuple) -> float:
+        """Return the total cost (wall time s) required to add $(\\alpha, \\beta)$ to the MISC approximation.
+
+        :param alpha: A multi-index specifying model fidelity
+        :param beta: A multi-index specifying surrogate fidelity
+        """
+        try:
+            return self.misc_costs[alpha, beta]
+        except Exception:
+            return 0.0
 
     @staticmethod
     def is_downward_closed(indices: IndexSet) -> bool:
@@ -866,14 +1006,20 @@ class Component(BaseModel, Serializable):
                     d[key] = value.serialize(**serialize_kwargs.get(key, {}))
                 elif key == 'model' and not keep_yaml_objects:
                     d[key] = YamlSerializable(obj=value).serialize()
-                elif key in ['max_beta', 'max_alpha']:
-                    d[key] = str(value)
+                elif key in ['max_beta_train', 'max_beta_interpolator', 'max_alpha']:
+                    if len(value) > 0:
+                        d[key] = str(value)
                 elif key in ['status']:
                     d[key] = int(value)
                 elif key in ['active_set', 'candidate_set']:
-                    d[key] = value.serialize()
+                    if len(value) > 0:
+                        d[key] = value.serialize()
                 elif key in ['misc_costs', 'misc_coeff', 'misc_states']:
-                    d[key] = value.serialize(keep_yaml_objects=keep_yaml_objects)
+                    if len(value) > 0:
+                        d[key] = value.serialize(keep_yaml_objects=keep_yaml_objects)
+                elif key in ['model_costs']:
+                    if len(value) > 0:
+                        d[key] = {str(k): float(v) for k, v in value.items()}
                 elif key in ComponentSerializers.__annotations__.keys():
                     d[key] = value.serialize(*serialize_args.get(key, ()), **serialize_kwargs.get(key, {}))
                 else:
@@ -895,6 +1041,8 @@ class Component(BaseModel, Serializable):
         """
         if isinstance(serialized_data, Component):
             return serialized_data
+        elif callable(serialized_data):
+            return cls(serialized_data)  # try to construct a component from a raw model function
 
         search_paths = search_paths or []
         search_keys = search_keys or []
@@ -906,7 +1054,7 @@ class Component(BaseModel, Serializable):
                 comp[key] = search_for_file(filename, search_paths=search_paths)
 
         for key in ['inputs', 'outputs']:
-            for var in comp[key]:
+            for var in comp.get(key, []):
                 if isinstance(var, dict):
                     if (compression := var.get('compression', None)) is not None:
                         var['compression'] = search_for_file(compression, search_paths=search_paths)
@@ -981,172 +1129,6 @@ class ComponentSurrogate(ABC):
     :vartype costs: MiscTree
     :vartype misc_coeff: MiscTree
     """
-
-    def __init__(self, x_vars: list[Variable] | Variable, model: callable,
-                 multi_index: IndexSet = None,
-                 truth_alpha: tuple = (), max_alpha: tuple = (), max_beta: tuple = (),
-                 log_file: str | Path = None, executor: Executor = None,
-                 model_args: tuple = (), model_kwargs: dict = None):
-        """Construct the MISC surrogate and initialize with any multi-indices passed in.
-
-        !!! Info "Model specification"
-            The model is a callable function of the form `ret = model(x, *args, **kwargs)`. The return value is a
-            dictionary of the form `ret = {'y': y, 'files': files, 'cost': cost}`. In the return dictionary, you
-            specify the raw model output `y` as an `np.ndarray` at a _minimum_. Optionally, you can specify paths to
-            output files and the average model cost (in units of seconds of cpu time), and anything else you want.
-
-        !!! Warning
-            If the model has multiple fidelities, then the function signature must be `model(x, alpha, *args, **kwargs)`
-            ; the first argument after `x` will always be the fidelity indices `alpha`. The rest of `model_args` will
-            be passed in after (you do not need to include `alpha` in `model_args`, it is done automatically).
-
-        :param x_vars: `[X1, X2, ...]` list of variables specifying bounds/pdfs for each input
-        :param model: the function to approximate, callable as `ret = model(x, *args, **kwargs)`
-        :param multi_index: `[((alpha1), (beta1)), ... ]` list of concatenated multi-indices $(\\alpha, \\beta)$
-        :param truth_alpha: specifies the highest model fidelity indices necessary for a "ground truth" comparison
-        :param max_alpha: the maximum model refinement indices to allow, defaults to `(2,...)` if applicable
-        :param max_beta: the maximum surrogate refinement indices, defaults to `(2,...)` of length `x_dim`
-        :param log_file: specifies a log file (optional)
-        :param executor: parallel executor used to add candidate indices in parallel (optional)
-        :param model_args: optional args to pass when calling the model
-        :param model_kwargs: optional kwargs to pass when calling the model
-        """
-        self.logger = get_logger(self.__class__.__name__, log_file=log_file)
-        self.log_file = log_file
-        self.executor = executor
-        self.training_flag = None  # Keep track of which MISC coeffs are active
-        # (True=active set, False=active+candidate sets, None=Neither/unknown)
-
-        multi_index = list() if multi_index is None else multi_index
-        assert self.is_downward_closed(multi_index), 'Must be a downward closed set.'
-        self.ydim = None
-        self.index_set = []  # The active index set for the MISC approximation
-        self.candidate_set = []  # Candidate indices for refinement
-        self._model = model
-        self._model_args = model_args
-        self._model_kwargs = model_kwargs if model_kwargs is not None else {}
-        self.truth_alpha = truth_alpha
-        self.x_vars = x_vars if isinstance(x_vars, list) else [x_vars]
-        max_alpha = truth_alpha if max_alpha == () else max_alpha
-        max_beta = (2,) * len(self.x_vars) if max_beta == () else max_beta
-        self.max_refine = list(max_alpha + max_beta)  # Max refinement indices
-
-        # Initialize important tree-like structures
-        self.surrogates = dict()  # Maps alphas -> betas -> surrogates
-        self.costs = dict()  # Maps alphas -> betas -> wall clock run times
-        self.misc_coeff = dict()  # Maps alphas -> betas -> MISC coefficients
-
-        # Construct vectors of [0,1]^dim(alpha+beta)
-        Nij = len(self.max_refine)
-        self.ij = np.zeros((2 ** Nij, Nij), dtype=np.uint8)
-        for i, ele in enumerate(itertools.product([0, 1], repeat=Nij)):
-            self.ij[i, :] = ele
-
-        # Initialize any indices that were passed in
-        multi_index = list() if multi_index is None else multi_index
-        for alpha, beta in multi_index:
-            self.activate_index(alpha, beta)
-
-    def activate_index(self, alpha: tuple, beta: tuple):
-        """Add a multi-index to the active set and all neighbors to the candidate set.
-
-        :param alpha: A multi-index specifying model fidelity
-        :param beta: A multi-index specifying surrogate fidelity
-        """
-        # User is responsible for making sure index set is downward-closed
-        alpha, beta = tuple([int(i) for i in alpha]), tuple([int(i) for i in beta])  # Make sure these are python ints
-        self.add_surrogate(alpha, beta)
-        ele = (alpha, beta)
-        if ele in self.index_set:
-            self.logger.warning(f'Multi-index {ele} is already in the active index set. Ignoring...')
-            return
-
-        # Add all possible new candidates (distance of one unit vector away)
-        ind = list(alpha + beta)
-        new_candidates = []
-        for i in range(len(ind)):
-            ind_new = ind.copy()
-            ind_new[i] += 1
-
-            # Don't add if we surpass a refinement limit
-            if np.any(np.array(ind_new) > np.array(self.max_refine)):
-                continue
-
-            # Add the new index if it maintains downward-closedness
-            new_cand = (tuple(ind_new[:len(alpha)]), tuple(ind_new[len(alpha):]))
-            down_closed = True
-            for j in range(len(ind)):
-                ind_check = ind_new.copy()
-                ind_check[j] -= 1
-                if ind_check[j] >= 0:
-                    tup_check = (tuple(ind_check[:len(alpha)]), tuple(ind_check[len(alpha):]))
-                    if tup_check not in self.index_set and tup_check != ele:
-                        down_closed = False
-                        break
-            if down_closed:
-                new_candidates.append(new_cand)
-
-        # Build an interpolator for each new candidate
-        if self.executor is None:  # Sequential
-            for a, b in new_candidates:
-                self.add_surrogate(a, b)
-        else:  # Parallel
-            temp_exc = self.executor
-            self.executor = None
-            for a, b in new_candidates:
-                if str(a) not in self.surrogates:
-                    self.surrogates[str(a)] = dict()
-                    self.costs[str(a)] = dict()
-                    self.misc_coeff[str(a)] = dict()
-            self.parallel_add_candidates(new_candidates, temp_exc)
-            self.executor = temp_exc
-
-        # Move to the active index set
-        if ele in self.candidate_set:
-            self.candidate_set.remove(ele)
-        self.index_set.append(ele)
-        new_candidates = [cand for cand in new_candidates if cand not in self.candidate_set]
-        self.candidate_set.extend(new_candidates)
-        self.training_flag = None  # Makes sure misc coeffs get recomputed next time
-
-    def add_surrogate(self, alpha: tuple, beta: tuple):
-        """Build a `BaseInterpolator` object for a given $(\\alpha, \\beta)$
-
-        :param alpha: A multi-index specifying model fidelity
-        :param beta: A multi-index specifying surrogate fidelity
-        """
-        # Create a dictionary for each alpha model to store multiple surrogate fidelities (beta)
-        if str(alpha) not in self.surrogates:
-            self.surrogates[str(alpha)] = dict()
-            self.costs[str(alpha)] = dict()
-            self.misc_coeff[str(alpha)] = dict()
-
-        # Create a new interpolator object for this multi-index (abstract method)
-        if self.surrogates[str(alpha)].get(str(beta), None) is None:
-            self.logger.info(f'Building interpolator for index {(alpha, beta)} ...')
-            x_new_idx, x_new, interp = self.build_interpolator(alpha, beta)
-            self.surrogates[str(alpha)][str(beta)] = interp
-            cost = self.update_interpolator(x_new_idx, x_new, interp)  # Awkward, but needed to separate the model evals
-            self.costs[str(alpha)][str(beta)] = cost
-            if self.ydim is None:
-                self.ydim = interp.ydim()
-
-    def init_coarse(self):
-        """Initialize the coarsest interpolation and add to the active index set"""
-        alpha = (0,) * len(self.truth_alpha)
-        beta = (0,) * len(self.max_refine[len(self.truth_alpha):])
-        self.activate_index(alpha, beta)
-
-    def iterate_candidates(self):
-        """Iterate candidate indices one by one into the active index set.
-
-        :yields alpha, beta: the multi-indices of the current candidate that has been moved to active set
-        """
-        for alpha, beta in list(self.candidate_set):
-            # Temporarily add a candidate index to active set
-            self.index_set.append((alpha, beta))
-            yield alpha, beta
-            del self.index_set[-1]
 
     def predict(self, x: np.ndarray | float, use_model: str | tuple = None, model_dir: str | Path = None,
                 training: bool = False, index_set: IndexSet = None, ppool=None) -> np.ndarray:
@@ -1273,103 +1255,6 @@ class ComponentSurrogate(ABC):
 
         return misc_coeff
 
-    def get_sub_surrogate(self, alpha: tuple, beta: tuple) -> BaseInterpolator:
-        """Get the specific sub-surrogate corresponding to the $(\\alpha, \\beta)$ fidelity.
-
-        :param alpha: A multi-index specifying model fidelity
-        :param beta: A multi-index specifying surrogate fidelity
-        :returns: the corresponding `BaseInterpolator` object
-        """
-        return self.surrogates[str(alpha)][str(beta)]
-
-    def get_cost(self, alpha: tuple, beta: tuple) -> float:
-        """Return the total cost (wall time s) required to add $(\\alpha, \\beta)$ to the MISC approximation.
-
-        :param alpha: A multi-index specifying model fidelity
-        :param beta: A multi-index specifying surrogate fidelity
-        """
-        try:
-            return self.costs[str(alpha)][str(beta)]
-        except Exception:
-            return 0.0
-
-    def update_input_bds(self, idx: int, bds: tuple):
-        """Update the bounds of the input variable at the given index.
-
-        :param idx: the index of the input variable to update
-        :param bds: the new bounds
-        """
-        self.x_vars[int(idx)].update(domain=bds)
-
-        # Update the bounds in all associated surrogates
-        for alpha in self.surrogates:
-            for beta in self.surrogates[alpha]:
-                self.surrogates[alpha][beta].update_input_bds(idx, bds)
-
-    def save_enabled(self):
-        """Return whether this model wants to save outputs to file.
-
-        !!! Note
-            You can specify that a model wants to save outputs to file by providing an `'output_dir'` kwarg.
-        """
-        return self._model_kwargs.get('output_dir') is not None
-
-    def _set_output_dir(self, output_dir: str | Path):
-        """Update the component model output directory.
-
-        :param output_dir: the new directory for model output files
-        """
-        if output_dir is not None:
-            output_dir = str(Path(output_dir).resolve())
-        self._model_kwargs['output_dir'] = output_dir
-        for alpha in self.surrogates:
-            for beta in self.surrogates[alpha]:
-                self.surrogates[alpha][beta]._model_kwargs['output_dir'] = output_dir
-
-    def __repr__(self):
-        """Shows all multi-indices in the current approximation and their corresponding MISC coefficients."""
-        s = f'Inputs \u2014 {[str(var) for var in self.x_vars]}\n'
-        if self.training_flag is None:
-            self.update_misc_coeffs()
-            self.training_flag = True
-
-        if self.training_flag:
-            s += '(Training mode)\n'
-            for alpha, beta in self.index_set:
-                s += f"[{int(self.misc_coeff[str(alpha)][str(beta)])}] \u2014 {alpha}, {beta}\n"
-            for alpha, beta in self.candidate_set:
-                s += f"[-] \u2014 {alpha}, {beta}\n"
-        else:
-            s += '(Evaluation mode)\n'
-            for alpha, beta in self.index_set + self.candidate_set:
-                s += f"[{int(self.misc_coeff[str(alpha)][str(beta)])}] \u2014 {alpha}, {beta}\n"
-        return s
-
-    def __str__(self):
-        """Everyone will view these objects the same way."""
-        return self.__repr__()
-
-    def _bypass_surrogate(self, x, use_model, model_dir):
-        """Bypass surrogate evaluation and use the specified model"""
-        output_dir = self._model_kwargs.get('output_dir')
-        if self.save_enabled():
-            self._model_kwargs['output_dir'] = model_dir
-
-        alpha_use = {'best': self.truth_alpha, 'worst': (0,) * len(self.truth_alpha)}.get(use_model, use_model)
-        kwargs = copy.deepcopy(self._model_kwargs)
-        if len(alpha_use) > 0:
-            kwargs['alpha'] = alpha_use
-        ret = self._model(x, *self._model_args, **kwargs)
-
-        if output_dir is not None:
-            self._model_kwargs['output_dir'] = output_dir
-
-        if not isinstance(ret, dict):
-            self.logger.warning(f"Function {self._model} did not return a dict of the form {{'y': y}}. Please make sure"
-                                f" you do so to avoid conflicts. Returning the value directly instead...")
-
-        return ret['y'] if isinstance(ret, dict) else ret
-
     def _combination(self, index_set, training):
         """Decide which index set and corresponding misc coefficients to use."""
         misc_coeff = copy.deepcopy(self.misc_coeff)
@@ -1392,90 +1277,6 @@ class ComponentSurrogate(ABC):
             self.training_flag = None
 
         return index_set, misc_coeff
-
-    @staticmethod
-    def is_one_level_refinement(beta_old: tuple, beta_new: tuple) -> bool:
-        """Check if a new `beta` multi-index is a one-level refinement from a previous `beta`.
-
-        !!! Example
-            Refining from `(0, 1, 2)` to the new multi-index `(1, 1, 2)` is a one-level refinement. But refining to
-            either `(2, 1, 2)` or `(1, 2, 2)` are not, since more than one refinement occurs at the same time.
-
-        :param beta_old: the starting multi-index
-        :param beta_new: the new refined multi-index
-        :returns: whether `beta_new` is a one-level refinement from `beta_old`
-        """
-        level_diff = np.array(beta_new, dtype=int) - np.array(beta_old, dtype=int)
-        ind = np.nonzero(level_diff)[0]
-        return ind.shape[0] == 1 and level_diff[ind] == 1
-
-    @staticmethod
-    def is_downward_closed(indices: IndexSet) -> bool:
-        """Return if a list of $(\\alpha, \\beta)$ multi-indices is downward-closed.
-
-        MISC approximations require a downward-closed set in order to use the combination-technique formula for the
-        coefficients (as implemented here).
-
-        !!! Example
-            The list `[( (0,), (0,) ), ( (1,), (0,) ), ( (1,), (1,) )]` is downward-closed. You can visualize this as
-            building a stack of cubes: in order to place a cube, all adjacent cubes must be present (does the logo
-            make sense now?).
-
-        :param indices: list() of (`alpha`, `beta`) multi-indices
-        :returns: whether the set of indices is downward-closed
-        """
-        # Iterate over every multi-index
-        for alpha, beta in indices:
-            # Every smaller multi-index must also be included in the indices list
-            sub_sets = [np.arange(tuple(alpha + beta)[i] + 1) for i in range(len(alpha) + len(beta))]
-            for ele in itertools.product(*sub_sets):
-                tup = (tuple(ele[:len(alpha)]), tuple(ele[len(alpha):]))
-                if tup not in indices:
-                    return False
-        return True
-
-    @abstractmethod
-    def build_interpolator(self, alpha: tuple, beta: tuple):
-        """Return a `BaseInterpolator` object and new refinement points for a given $(\\alpha, \\beta)$ multi-index.
-
-        :param alpha: A multi-index specifying model fidelity
-        :param beta: A multi-index specifying surrogate fidelity
-        :returns: `idx`, `x`, `interp` - list of new grid indices, the new grid points `(N_new, x_dim)`, and the
-                  `BaseInterpolator` object. Similar to `BaseInterpolator.refine()`.
-        """
-        pass
-
-    @abstractmethod
-    def update_interpolator(self, x_new_idx: list[int | tuple | str],
-                            x_new: np.ndarray, interp: BaseInterpolator) -> float:
-        """Secondary method to actually compute and save model evaluations within the interpolator.
-
-        !!! Note
-            This distinction with `build_interpolator` was necessary to separately construct the interpolator and be
-            able to evaluate the model at the new interpolation points. You can see that `parallel_add_candidates`
-            uses this distinction to compute the model in parallel on MPI workers, for example.
-
-        :param x_new_idx: list of new grid point indices
-        :param x_new: `(N_new, x_dim)`, the new grid point locations
-        :param interp: the `BaseInterpolator` object to compute model evaluations with
-        :returns cost: the cost (in wall time seconds) required to add this `BaseInterpolator` object
-        """
-        pass
-
-    @abstractmethod
-    def parallel_add_candidates(self, candidates: IndexSet, executor: Executor):
-        """Defines a function to handle adding candidate indices in parallel.
-
-        !!! Note
-            While `build_interpolator` can make changes to 'self', these changes will not be saved in the master task
-            if running in parallel over MPI workers, for example. This method is a workaround so that all required
-            mutable changes to 'self' are made in the master task, before distributing tasks to parallel workers
-            using this method. You can pass if you don't plan to add candidates in parallel.
-
-        :param candidates: list of [(alpha, beta),...] multi-indices
-        :param executor: the executor used to iterate candidates in parallel
-        """
-        pass
 
 
 class SparseGridSurrogate(ComponentSurrogate):
@@ -1673,144 +1474,6 @@ class SparseGridSurrogate(ComponentSurrogate):
                     x_interp = self.xi_map[str(alpha)][str(grid_coord)].reshape((1, xdim))
                     y_interp = imputer.predict(x_interp)
                     self.yi_nan_map[str(alpha)][str(grid_coord)] = np.atleast_1d(np.squeeze(y_interp))
-
-    # Override
-    def get_sub_surrogate(self, alpha: tuple, beta: tuple, include_grid: bool = False) -> BaseInterpolator:
-        """Get the specific sub-surrogate corresponding to the $(\\alpha, \\beta)$ fidelity.
-
-        :param alpha: A multi-index specifying model fidelity
-        :param beta: A multi-index specifying surrogate fidelity
-        :param include_grid: whether to add the `xi/yi` interpolation points to the returned `BaseInterpolator` object
-        :returns: the `BaseInterpolator` object corresponding to $(\\alpha, \\beta)$
-        """
-        interp = super().get_sub_surrogate(alpha, beta)
-        if include_grid:
-            interp.xi, interp.yi = self.get_tensor_grid(alpha, beta)
-        return interp
-
-    def build_interpolator(self, alpha, beta):
-        """Abstract method implementation for constructing the tensor-product grid interpolator."""
-        # Create a new tensor-product grid interpolator for the base index (0, 0, ...)
-        if np.sum(beta) == 0:
-            kwargs = copy.deepcopy(self._model_kwargs)
-            if len(alpha) > 0:
-                kwargs['alpha'] = alpha
-            interp = LagrangeInterpolator(beta, self.x_vars, model=self._model, model_args=self._model_args,
-                                          model_kwargs=kwargs, init_grids=True, reduced=True)
-            x_pt = np.array([float(interp.x_grids[n][beta[n]]) for n in range(interp.xdim())], dtype=np.float32)
-            self.curr_max_beta[str(alpha)] = list(beta)
-            self.x_grids[str(alpha)] = copy.deepcopy(interp.x_grids)
-            self.xi_map[str(alpha)] = {str(beta): x_pt}
-            self.yi_map[str(alpha)] = dict()
-            self.yi_nan_map[str(alpha)] = dict()
-            if self.save_enabled():
-                self.yi_files[str(alpha)] = dict()
-
-            return [beta], x_pt.reshape((1, len(self.x_vars))), interp
-        # Otherwise, all other indices are a refinement of previous grids
-
-        # Look for first multi-index neighbor that is one level of refinement away
-        refine_tup = None
-        for beta_old_str in list(self.surrogates[str(alpha)].keys()):
-            beta_old = ast.literal_eval(beta_old_str)
-            if self.is_one_level_refinement(beta_old, beta):
-                idx_refine = int(np.nonzero(np.array(beta, dtype=int) - np.array(beta_old, dtype=int))[0][0])
-                refine_level = beta[idx_refine]
-                if refine_level > self.curr_max_beta[str(alpha)][idx_refine]:
-                    # Generate next refinement grid and save (refine_tup = tuple(x_new_idx, x_new, interp))
-                    refine_tup = self.surrogates[str(alpha)][beta_old_str].refine(beta, auto=False)
-                    self.curr_max_beta[str(alpha)][idx_refine] = refine_level
-                    self.x_grids[str(alpha)][idx_refine] = copy.deepcopy(refine_tup[2].x_grids[idx_refine])
-                else:
-                    # Access the refinement grid from memory (it is already computed)
-                    num_pts = self.surrogates[str(alpha)][beta_old_str].get_grid_sizes(beta)[idx_refine]
-                    x_refine = self.x_grids[str(alpha)][idx_refine][:num_pts]
-                    refine_tup = self.surrogates[str(alpha)][beta_old_str].refine(beta, x_refine=x_refine,
-                                                                                  auto=False)
-                break  # Only need to grab one neighbor
-
-        # Gather new interpolation grid points
-        x_new_idx, x_new, interp = refine_tup
-        xn_coord = []  # Save multi-index coordinates of points to compute model at for refinement
-        xn_pts = np.zeros((0, interp.xdim()), dtype=np.float32)  # Save physical x location of new points
-        for i, multi_idx in enumerate(x_new_idx):
-            if str(multi_idx) not in self.yi_map[str(alpha)]:
-                # We have not computed this grid coordinate yet
-                xn_coord.append(multi_idx)
-                xn_pts = np.concatenate((xn_pts, x_new[i, np.newaxis, :]), axis=0)  # (N_new, xdim)
-                self.xi_map[str(alpha)][str(multi_idx)] = x_new[i, :]
-
-        return xn_coord, xn_pts, interp
-
-    def update_interpolator(self, x_new_idx, x_new, interp):
-        """Awkward solution, I know, but actually compute and save the model evaluations here."""
-        # Compute and store model output at new refinement points in a hash structure
-        yi_ret = interp.set_yi(x_new=(x_new_idx, x_new))
-
-        if self.ydim is None:
-            for coord_str, yi in yi_ret['y'].items():
-                self.ydim = yi.shape[0]
-                break
-
-        alpha = interp._model_kwargs.get('alpha', ())
-        self.update_yi(alpha, interp.beta, yi_ret['y'])
-        if self.save_enabled():
-            self.yi_files[str(alpha)].update(yi_ret['files'])
-        cost = interp.model_cost * len(x_new_idx)
-
-        return cost
-
-    def parallel_add_candidates(self, candidates: IndexSet, executor: Executor):
-        """Work-around to make sure mutable instance variable changes are made before/after
-        splitting tasks using this method over parallel (potentially MPI) workers. You can pass if you are not
-        interested in such parallel ideas.
-
-        !!! Warning
-            MPI workers cannot save changes to `self` so this method should only distribute static tasks to the workers.
-
-        :param candidates: list of [(alpha, beta),...] multi-indices
-        :param executor: the executor used to iterate candidates in parallel
-        """
-        # Do sequential tasks first (i.e. make mutable changes to self), build up parallel task args
-        task_args = []
-        for alpha, beta in candidates:
-            x_new_idx, x_new, interp = self.build_interpolator(alpha, beta)
-            task_args.append((alpha, beta, x_new_idx, x_new, interp))
-
-        def parallel_task(alpha, beta, x_new_idx, x_new, interp):
-            # Must return anything you want changed in self or interp (mutable changes aren't saved over MPI workers)
-            logger = get_logger(self.__class__.__name__, log_file=self.log_file, stdout=False)
-            logger.info(f'Building interpolator for index {(alpha, beta)} ...')
-            yi_ret = interp.set_yi(x_new=(x_new_idx, x_new))
-            model_cost = interp.model_cost if interp.model_cost is not None else 1
-            return yi_ret, model_cost
-
-        # Wait for all parallel workers to return
-        fs = [executor.submit(parallel_task, *args) for args in task_args]
-        wait(fs, timeout=None, return_when=ALL_COMPLETED)
-
-        # Update self and interp with the results from all workers (and check for errors)
-        for i, future in enumerate(fs):
-            try:
-                a = task_args[i][0]
-                b = task_args[i][1]
-                x_new_idx = task_args[i][2]
-                interp = task_args[i][4]
-                yi_ret, model_cost = future.result()
-                interp.model_cost = model_cost
-                self.surrogates[str(a)][str(b)] = interp
-                self.update_yi(a, b, yi_ret['y'])
-                if self.save_enabled():
-                    self.yi_files[str(a)].update(yi_ret['files'])
-                self.costs[str(a)][str(b)] = interp.model_cost * len(x_new_idx)
-
-                if self.ydim is None:
-                    for coord_str, yi in self.yi_map[str(a)].items():
-                        self.ydim = yi.shape[0]
-                        break
-            except:
-                self.logger.error(f'An exception occurred in a thread handling build_interpolator{candidates[i]}')
-                raise
 
 
 class AnalyticalSurrogate(ComponentSurrogate):

@@ -2,7 +2,8 @@ import numpy as np
 
 from amisc import YamlLoader
 from amisc.utils import relative_error
-from amisc.variable import Variable, VariableList, SVD
+from amisc.variable import Variable, VariableList
+from amisc.compression import SVD
 
 
 def test_load_and_dump_variables(tmp_path):

@@ -1,6 +1,36 @@
-import numpy as np
+import time
 
-from amisc.utils import get_logger, parse_function_string, format_inputs
+import numpy as np
+from scipy.linalg import lapack
+
+from amisc.utils import get_logger, parse_function_string, format_inputs, _inspect_function, constrained_lls
+
+
+def test_inspect_function():
+    """Test inspection of a function."""
+    def func1(a, b=2, **kwargs):
+        y1 = a + b
+        return y1
+
+    def another_function(x, y, z):
+        hello = 'world'
+        _there_is = 'no spoon'
+        nothing = x * y + z
+        left = 'right'
+        return hello, _there_is, nothing, left
+
+    def sum_function(*args, **kwargs):
+        return sum(args) + sum(kwargs.values())
+
+    test_cases = [(func1, ['a'], ['y1']),
+                  (another_function, ['x', 'y', 'z'], ['hello', '_there_is', 'nothing', 'left']),
+                  (sum_function, [], [])
+                  ]
+
+    for func, expected_args, expected_outputs in test_cases:
+        args, outputs = _inspect_function(func)
+        assert args == expected_args
+        assert outputs == expected_outputs
 
 
 def test_format_inputs():
@@ -51,3 +81,41 @@ def test_logging():
     """Test logging and plotting utils"""
     logger = get_logger('tester', stdout=True)
     logger.info('Testing logger...')
+
+
+def test_lls():
+    """Test constrained linear least squares routine against scipy lapack."""
+    X = 100
+    Y = 100
+    M = 10
+    N = 10
+    P = 1
+    tol = 1e-8
+
+    A = np.random.rand(X, Y, M, N)
+    b = np.random.rand(X, Y, M, 1)
+    C = np.random.rand(X, Y, P, N)
+    d = np.random.rand(X, Y, P, 1)
+
+    # custom solver
+    t1 = time.time()
+    alpha = np.squeeze(constrained_lls(A, b, C, d), axis=-1)  # (*, N)
+    t2 = time.time()
+
+    # Built in scipy solver
+    alpha2 = np.zeros((X, Y, N))
+    t3 = time.time()
+    for i in range(X):
+        for j in range(Y):
+            Ai = A[i, j, ...]
+            bi = b[i, j, ...]
+            Ci = C[i, j, ...]
+            di = d[i, j, ...]
+            ret = lapack.dgglse(Ai, Ci, bi, di)
+            alpha2[i, j, :] = ret[3]
+    t4 = time.time()
+
+    # Results
+    diff = alpha - alpha2
+    assert np.max(np.abs(diff)) < tol
+    print(f'Custom CLLS time: {t2-t1} s. Scipy time: {t4-t3} s.')

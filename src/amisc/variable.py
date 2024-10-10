@@ -2,27 +2,20 @@
 
 Includes:
 
-- `Distribution` — an object for specifying a PDF. `Normal`, `Uniform`, `Relative`, and `Tolerance` are available.
-- `Transform` — an object for specifying a transformation. `Linear`, `Log`, `Minmax`, and `Zscore` are available.
-- `Compression` — an object for specifying a compression method for field quantities. `SVD` is available.
-- `CompressionData` — a dictionary spec for passing data to/from `Variable.compress()`
 - `Variable` — an object that stores information about a variable and includes methods for sampling, pdf evaluation,
                normalization, compression, loading from file, etc.
 - `VariableList` — a container for Variables that provides dict-like access of Variables by `name` along with normal
                    indexing and slicing
 
-The preferred serialization of `Variable` and `VariableList` is to/from yaml. `Distribution` and `Transform`
-objects can be serialized via conversion to/from string. `Compression` objects can be serialized via pickle.
+The preferred serialization of `Variable` and `VariableList` is to/from yaml. This is done by default with the
+`!Variable` and `!VariableList` yaml tags.
 """
 from __future__ import annotations
 
 import ast
-import inspect
 import random
 import string
-from abc import ABC, abstractmethod
 from collections import OrderedDict
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Optional, Union
 
@@ -30,612 +23,16 @@ import numpy as np
 import yaml
 from numpy.typing import ArrayLike
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
-from scipy.interpolate import RBFInterpolator
-from typing_extensions import TypedDict
 
-from amisc.serialize import Serializable, PickleSerializable
-from amisc.utils import parse_function_string, search_for_file, _get_yaml_path, _inspect_assignment
-
-__all__ = ['Distribution', 'Uniform', 'Normal', 'Relative', 'Tolerance', 'CompressionData', 'Compression', 'SVD',
-           'Transform', 'Linear', 'Log', 'Minmax', 'Zscore', 'Variable', 'VariableList']
-
-
-class Distribution(ABC):
-    """Base class for PDF distributions that provide sample and pdf methods."""
-
-    def __init__(self, dist_args: tuple):
-        self.dist_args = dist_args
-
-    def __str__(self):
-        """Serialize a `Distribution` object to/from string."""
-        return f'{type(self).__name__}{self.dist_args}'
-
-    def __repr__(self):
-        return self.__str__()
-
-    def domain(self, dist_args: tuple = None) -> tuple:
-        """Return the domain of this distribution. Defaults to `dist_args`
-
-        :param dist_args: overrides `self.dist_args`
-        """
-        return dist_args or self.dist_args
-
-    def nominal(self, dist_args: tuple = None) -> float:
-        """Return the nominal value of this distribution. Defaults to middle of domain.
-
-        :param dist_args: overrides `self.dist_args`
-        """
-        lb, ub = self.domain(dist_args=dist_args)
-        return (lb + ub) / 2
-
-    @classmethod
-    def from_string(cls, dist_string: str) -> Distribution | None:
-        """Convert a string to a `Distribution` object.
-
-        :param dist_string: specifies a PDF or distribution. Can be `Normal(mu, std)`, `Uniform(lb, ub)`,
-                            `Relative(pct)`, or `Tolerance(tol)`. The shorthands `N(0, 1)`, `U(0, 1)`, `rel(5)`, or
-                            `tol(1)` are also accepted.
-        :return: the corresponding `Distribution` object
-        """
-        if not dist_string:
-            return None
-
-        dist_name, args, kwargs = parse_function_string(dist_string)
-        if dist_name in ['N', 'Normal', 'normal']:
-            # Normal distribution like N(0, 1)
-            try:
-                mu = float(kwargs.get('mu', args[0]))
-                std = float(kwargs.get('std', args[1]))
-                return Normal((mu, std))
-            except Exception as e:
-                raise ValueError(f'Normal distribution string "{dist_string}" is not valid: Try N(0, 1).') from e
-        elif dist_name in ['U', 'Uniform', 'uniform']:
-            # Uniform distribution like U(0, 1)
-            try:
-                lb = float(kwargs.get('lb', args[0]))
-                ub = float(kwargs.get('ub', args[1]))
-                return Uniform((lb, ub))
-            except Exception as e:
-                raise ValueError(f'Uniform distribution string "{dist_string}" is not valid: Try U(0, 1).') from e
-        elif dist_name in ['R', 'Relative', 'relative', 'rel']:
-            # Relative uniform distribution like rel(+-5%)
-            try:
-                pct = float(kwargs.get('pct', args[0]))
-                return Relative((pct,))
-            except Exception as e:
-                raise ValueError(f'Relative distribution string "{dist_string}" is not valid: Try rel(5).') from e
-        elif dist_name in ['T', 'Tolerance', 'tolerance', 'tol']:
-            # Uniform distribution within a tolerance like tol(+-1)
-            try:
-                tol = float(kwargs.get('tol', args[0]))
-                return Tolerance((tol,))
-            except Exception as e:
-                raise ValueError(f'Tolerance distribution string "{dist_string}" is not valid: Try tol(1).') from e
-        else:
-            raise NotImplementedError(f'The distribution "{dist_string}" is not recognized.')
-
-    @abstractmethod
-    def sample(self, shape: int | tuple, nominal: float | np.ndarray = None, dist_args: tuple = None) -> np.ndarray:
-        """Sample from the distribution.
-
-        :param shape: shape of the samples to return
-        :param nominal: a nominal value(s) for sampling (e.g. for relative distributions)
-        :param dist_args: overrides `Distribution.dist_args`
-        :return: the samples of the given shape
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def pdf(self, x: np.ndarray, dist_args: tuple = None) -> np.ndarray:
-        """Evaluate the pdf of this distribution at the `x` locations.
-
-        :param x: the locations at which to evaluate the pdf
-        :param dist_args: overrides `Distribution.dist_args`
-        :return: the pdf evaluations
-        """
-        raise NotImplementedError
-
-
-class Uniform(Distribution):
-    """A Uniform distribution. Specify by string as "Uniform(lb, ub)" or "U(lb, ub)" in shorthand."""
-
-    def __str__(self):
-        return f'U({self.dist_args[0]}, {self.dist_args[1]})'
-
-    def sample(self, shape, nominal=None, dist_args=None):
-        lb, ub = dist_args or self.dist_args
-        return np.random.rand(*shape) * (ub - lb) + lb
-
-    def pdf(self, x, dist_args=None):
-        lb, ub = dist_args or self.dist_args
-        pdf = np.broadcast_to(1 / (ub - lb), x.shape).copy()
-        pdf[np.where(x > ub)] = 0
-        pdf[np.where(x < lb)] = 0
-        return pdf
-
-
-class Normal(Distribution):
-    """A Normal distribution. Specify by string as "Normal(mu, std)" or "N(mu, std)" in shorthand."""
-
-    def __str__(self):
-        return f'N({self.dist_args[0]}, {self.dist_args[1]})'
-
-    def domain(self, dist_args=None):
-        mu, std = dist_args or self.dist_args
-        return mu - 3 * std, mu + 3 * std
-
-    def sample(self, shape, nominal=None, dist_args=None):
-        mu, std = dist_args or self.dist_args
-        return np.random.randn(*shape) * std + mu
-
-    def pdf(self, x, dist_args=None):
-        mu, std = dist_args or self.dist_args
-        return (1 / (np.sqrt(2 * np.pi) * std)) * np.exp(-0.5 * ((x - mu) / std) ** 2)
-
-
-class Relative(Distribution):
-    """A Relative distribution. Specify by string as "Relative(pct)" or "rel(pct%)" in shorthand.
-    Will attempt to sample uniformly within the given percent of a nominal value.
-    """
-
-    def __str__(self):
-        return rf'rel({self.dist_args[0]})'
-
-    def domain(self, dist_args=None):
-        return None
-
-    def nominal(self, dist_args=None):
-        return None
-
-    def sample(self, shape, nominal=None, dist_args=None):
-        if nominal is None:
-            raise ValueError('Cannot sample relative distribution when no nominal value is provided.')
-        dist_args = dist_args or self.dist_args
-        tol = abs((dist_args[0] / 100) * nominal)
-        return np.random.rand(*shape) * 2 * tol - tol + nominal
-
-    def pdf(self, x, dist_args=None):
-        return np.ones(x.shape)
-
-
-class Tolerance(Distribution):
-    """A Tolerance distribution. Specify by string as "Tolerance(tol)" or "tol(tol)" in shorthand.
-    Will attempt to sample uniformly within a given absolute tolerance of a nominal value.
-    """
-
-    def __str__(self):
-        return rf'tol({self.dist_args[0]})'
-
-    def domain(self, dist_args=None):
-        return None
-
-    def nominal(self, dist_args=None):
-        return None
-
-    def sample(self, shape, nominal=None, dist_args=None):
-        if nominal is None:
-            raise ValueError('Cannot sample tolerance distribution when no nominal value is provided.')
-        dist_args = dist_args or self.dist_args
-        tol = abs(dist_args[0])
-        return np.random.rand(*shape) * 2 * tol - tol + nominal
-
-    def pdf(self, x, dist_args=None):
-        return np.ones(x.shape)
-
-
-@dataclass
-class Compression(PickleSerializable, ABC):
-    """Base class for compression methods."""
-    fields: list[str] = field(default_factory=list)
-    method: str = 'svd'
-    shape: tuple = ()
-    coords: np.ndarray = None  # (num_pts, dim)
-    interpolate_method: str = 'rbf'
-    interpolate_opts: dict = field(default_factory=dict)
-    _map_computed: bool = False
-
-    @property
-    def map_exists(self):
-        """All compression methods should have `coords` when their map has been constructed."""
-        return self.coords is not None and self._map_computed
-
-    @property
-    def dim(self):
-        """Number of physical grid coordinates for the field quantity, (i.e. x,y,z spatial dims)"""
-        return self.coords.shape[1] if (self.coords is not None and len(self.coords.shape) > 1) else 1
-
-    @property
-    def num_pts(self):
-        """Number of physical points in the compression grid"""
-        return self.coords.shape[0] if self.coords is not None else None
-
-    @property
-    def num_qoi(self):
-        """Number of quantities of interest at each grid point, (i.e. ux, uy, uz for 3d velocity data)"""
-        return len(self.fields) if self.fields is not None else 1
-
-    @property
-    def dof(self):
-        """Total degrees of freedom in the compression grid."""
-        return self.num_pts * self.num_qoi if self.num_pts is not None else None
-
-    def _correct_coords(self, coords):
-        """Correct the coordinates to be in the correct shape for compression."""
-        coords = np.atleast_1d(coords)
-        if len(coords.shape) == 1:
-            coords = coords[..., np.newaxis] if self.dim == 1 else coords[np.newaxis, ...]
-        return coords
-
-    def interpolator(self):
-        """The interpolator to use during compression and reconstruction. Interpolator expects to be used as:
-
-        ```python
-        xg = np.ndarray    # (num_pts, dim)  grid coordinates
-        yg = np.ndarray    # (num_pts, ...)  scalar values on grid
-        xp = np.ndarray    # (Q, dim)        evaluation points
-
-        interp = interpolate_method(xg, yg, **interpolate_opts)
-
-        yp = interp(xp)    # (Q, ...)        interpolated values
-        ```
-        """
-        method = self.interpolate_method or 'rbf'
-        match method.lower():
-            case 'rbf':
-                return RBFInterpolator
-            case other:
-                raise NotImplementedError(f"Interpolation method '{other}' is not implemented.")
-
-    def interpolate_from_grid(self, states, new_coords):
-        """Interpolate the states on the compression grid to new coordinates.
-
-        :param states: `(*loop_shape, dof)` - the states on the compression grid
-        :param new_coords: `(*coord_shape, dim)` - the new coordinates to interpolate to
-        :return: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the interpolated states
-        """
-        new_coords = self._correct_coords(new_coords)
-        grid_coords = self._correct_coords(self.coords)
-        skip_interp = (new_coords.shape == grid_coords.shape and np.allclose(new_coords, grid_coords))
-
-        ret_dict = {}
-        loop_shape = states.shape[:-1]
-        coords_shape = new_coords.shape[:-1]
-        states = states.reshape((*loop_shape, self.num_pts, self.num_qoi))
-        new_coords = new_coords.reshape((-1, self.dim))
-        for i, qoi in enumerate(self.fields):
-            if skip_interp:
-                ret_dict[qoi] = states[..., i]
-            else:
-                reshaped_states = states[..., i].reshape(-1, self.num_pts).T  # (num_pts, ...)
-                interp = self.interpolator()(grid_coords, reshaped_states, **self.interpolate_opts)
-                yp = interp(new_coords)
-                ret_dict[qoi] = yp.T.reshape(*loop_shape, *coords_shape)
-
-        return ret_dict
-
-    def interpolate_to_grid(self, field_coords, field_values):
-        """Interpolate the field values at given coordinates to the compression grid.
-
-        :param field_coords: `(*coord_shape, dim)` - the coordinates of the field values
-        :param field_values: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the field values at the coordinates
-        :return: `(*loop_shape, dof)` - the interpolated values on the compression grid
-        """
-        field_coords = self._correct_coords(field_coords)
-        grid_coords = self._correct_coords(self.coords)
-        skip_interp = (field_coords.shape == grid_coords.shape and np.allclose(field_coords, grid_coords))
-
-        coords_shape = field_coords.shape[:-1]
-        loop_shape = next(iter(field_values.values())).shape[:-len(coords_shape)]
-        states = np.empty((*loop_shape, self.num_pts, self.num_qoi))
-        field_coords = field_coords.reshape(-1, self.dim)
-        for i, qoi in enumerate(self.fields):
-            field_vals = field_values[qoi].reshape((*loop_shape, -1))  # (..., Q)
-            if skip_interp:
-                states[..., i] = field_vals
-            else:
-                field_vals = field_vals.reshape((-1, field_vals.shape[-1])).T  # (Q, ...)
-                interp = self.interpolator()(field_coords, field_vals, **self.interpolate_opts)
-                yg = interp(grid_coords)
-                states[..., i] = yg.T.reshape(*loop_shape, self.num_pts)
-
-        return states.reshape((*loop_shape, self.dof))
-
-    @abstractmethod
-    def compute_map(self, **kwargs):
-        """Compute and store the compression map. Must set the value of `coords` and `_is_computed`."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def compress(self, data: np.ndarray) -> np.ndarray:
-        """Compress the data into a latent space.
-
-        :param data: `(..., dof)` - the data to compress from full size of `dof`
-        :return: `(..., rank)` - the compressed latent space data
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def reconstruct(self, compressed: np.ndarray) -> np.ndarray:
-        """Reconstruct the compressed data back into the full `dof` space.
-
-        :param compressed: `(..., rank)` - the compressed data to reconstruct
-        :return: `(..., dof)` - the reconstructed data with full `dof`
-        """
-        raise NotImplementedError
-
-    @classmethod
-    def from_dict(cls, spec: dict) -> Compression:
-        """Construct a `Compression` object from a spec dictionary."""
-        method = spec.pop('method', 'svd').lower()
-        match method:
-            case 'svd':
-                return SVD(**spec)
-            case other:
-                raise NotImplementedError(f"Compression method '{other}' is not implemented.")
-
-
-@dataclass
-class SVD(Compression):
-    """A Singular Value Decomposition (SVD) compression method."""
-    data_matrix: np.ndarray = None          # (dof, num_samples)
-    projection_matrix: np.ndarray = None    # (dof, rank)
-    rank: int = None
-    energy_tol: float = None
-
-    def __post_init__(self):
-        if (data_matrix := self.data_matrix) is not None:
-            self.compute_map(data_matrix, rank=self.rank, energy_tol=self.energy_tol)
-
-    def compute_map(self, data_matrix: np.ndarray, rank: int = None, energy_tol: float = None):
-        """Compute the SVD compression map from the data matrix.
-
-        :param data_matrix: `(dof, num_samples)` - the data matrix
-        :param rank: the rank of the SVD decomposition
-        :param energy_tol: the energy tolerance of the SVD decomposition
-        """
-        nan_idx = np.any(np.isnan(data_matrix), axis=0)
-        data_matrix = data_matrix[:, ~nan_idx]
-        u, s, vt = np.linalg.svd(data_matrix)
-        energy_frac = np.cumsum(s ** 2 / np.sum(s ** 2))
-        if rank := (rank or self.rank):
-            energy_tol = energy_frac[rank - 1]
-        else:
-            energy_tol = energy_tol or self.energy_tol or 0.95
-            idx = int(np.where(energy_frac >= energy_tol)[0][0])
-            rank = idx + 1
-
-        self.rank = rank
-        self.energy_tol = energy_tol
-        self.projection_matrix = u[:, :rank]  # (dof, rank)
-        self._map_computed = True
-
-    def compress(self, data):
-        return np.squeeze(self.projection_matrix.T @ data[..., np.newaxis], axis=-1)
-
-    def reconstruct(self, compressed):
-        return np.squeeze(self.projection_matrix @ compressed[..., np.newaxis], axis=-1)
-
-
-class CompressionData(TypedDict, total=False):
-    """Configuration `dict` for passing compression data to/from `Variable.compress()`.
-
-    !!! Info "Field quantity shapes"
-        Field quantity data can take on any arbitrary shape, which we indicate with `qty.shape`. For example, a 3d
-        structured grid might have `qty.shape = (10, 15, 10)`. Unstructured data might just have `qty.shape = (N,)`
-        for $N$ points in an unstructured grid. Regardless, `Variable.compress()` will flatten this and compress
-        to a single latent vector of size `latent_size`. That is, `qty.shape` &rarr; `latent_size`.
-
-    !!! Info "Compression coordinates"
-        Field quantity data must be specified along with its coordinate locations. If the coordinate locations are
-        different from what was used when building the compression map (i.e. the SVD data matrix), then they will be
-        interpolated to/from the SVD coordinates.
-
-    :ivar coord: `(qty.shape, dim)` the coordinate locations of the qty data; coordinates exist in `dim` space (e.g.
-                 `dim=2` for 2d Cartesian coordinates). Defaults to the coordinates used when building the construction
-                  map (i.e. the coordinates of the data in the SVD data matrix)
-    :ivar latent: `(..., latent_size)` array of latent space coefficients for a field quantity; this is what is
-                  _returned_ by `Variable.compress()` and what is _expected_ as input by `Variable.reconstruct()`.
-    :ivar qty: `(..., qty.shape)` array of uncompressed field quantity data for this qty within
-               the `fields` list. Each qty in this list will be its own `key:value` pair in the
-               `CompressionData` structure
-    """
-    coord: np.ndarray
-    latent: np.ndarray
-    qty: np.ndarray
-
-
-class Transform(ABC):
-    """A base class for all transformations.
-
-    :ivar transform_args: the arguments for the transformation
-    :vartype transform_args: tuple
-    """
-
-    def __init__(self, transform_args: tuple):
-        self.transform_args = transform_args
-
-    def __str__(self):
-        """Serialize a `Transform` object to string."""
-        return f'{type(self).__name__}{self.transform_args}'
-
-    @classmethod
-    def from_string(cls, transform_spec: str | list[str]) -> list[Transform] | None:
-        """Return a list of Transforms given a list of string specifications. Available transformations are:
-
-        - **linear** — $x_{norm} = mx + b$ specified as `linear(m, b)` or `linear(slope=m, offset=b)`. `m=1, b=0` if not
-                       specified.
-        - **log** — $x_{norm} = \\log_b(x)$ specified as `log` or `log10` for the natural or common logarithms. For a
-                    different base, use `log(b)`. Optionally, specify `offset` for `log(x+offset)`.
-        - **minmax** — $x_{norm} = \\frac{x - a}{b - a}(u - l) + l$ specified as `minmax(a, b, l, u)` or
-                       `minmax(lb=a, ub=b, lb_norm=l, ub_norm=u)`. Scales `x` from the range `(a, b)` to `(l, u)`. By
-                       default, `(a, b)` is the Variable's domain and `(l, u)` is `(0, 1)`. Use simply as `minmax`
-                       to use all defaults.
-        - **zscore** — $x_{norm} = \\frac{x - m}{s}$ specified as `zscore(m, s)` or `zscore(mu=m, std=s)`. If the
-                       Variable is specified as `dist=normal`, then `zscore` defaults to the Variable's own `mu, std`.
-
-        !!! Example
-            ```python
-            transforms = Transform.from_string(['log10', 'linear(2, 4)'])
-            print(transforms)
-            ```
-            will give
-            ```shell
-            [ Log(10), Linear(2, 4) ]  # the corresponding `Transform` objects
-            ```
-
-        !!! Warning
-            You may optionally leave the `minmax` arguments blank to defer to the bounds of the parent `Variable`.
-            You may also optionally leave the `zscore` arguments blank to defer to the `(mu, std)` of the parent
-            `Variable`, but this will throw a runtime error if `Variable.dist` is not `Normal(mu, std)`.
-        """
-        if transform_spec is None:
-            return None
-        if isinstance(transform_spec, str | Transform):
-            transform_spec = [transform_spec]
-
-        transforms = []
-        for spec_string in transform_spec:
-            if isinstance(spec_string, Transform):
-                transforms.append(spec_string)
-                continue
-
-            name, args, kwargs = parse_function_string(spec_string)
-            if name.lower() == 'linear':
-                try:
-                    slope = float(kwargs.get('slope', args[0] if len(args) > 0 else 1))
-                    offset = float(kwargs.get('offset', args[1] if len(args) > 1 else 0))
-                    transforms.append(Linear((slope, offset)))
-                except Exception as e:
-                    raise ValueError(f'Linear transform spec "{spec_string}" is not valid: Try "linear(m, b)".') from e
-            elif name.lower() in ['log', 'log10']:
-                try:
-                    log_base = float(kwargs.get('base', args[0] if len(args) > 0 else (np.e if name.lower() == 'log'
-                                                                                       else 10)))
-                    offset = float(kwargs.get('offset', args[1] if len(args) > 1 else 0))
-                    transforms.append(Log((log_base, offset)))
-                except Exception as e:
-                    raise ValueError(f'Log transform spec "{spec_string}" is not valid: Try "log(base, offset)"') from e
-            elif name.lower() in ['minmax', 'maxabs']:
-                try:
-                    # Defer bounds to the Variable by setting np.nan
-                    lb = float(kwargs.get('lb', args[0] if len(args) > 0 else np.nan))
-                    ub = float(kwargs.get('ub', args[1] if len(args) > 1 else np.nan))
-                    lb_norm = float(kwargs.get('lb_norm', args[2] if len(args) > 2 else 0))
-                    ub_norm = float(kwargs.get('ub_norm', args[3] if len(args) > 3 else 1))
-                    transforms.append(Minmax((lb, ub, lb_norm, ub_norm)))
-                except Exception as e:
-                    raise ValueError(f'Minmax transform spec "{spec_string}" is not valid: Try "minmax(lb, ub)"') from e
-            elif name.lower() in ['z', 'zscore']:
-                try:
-                    # Defer (mu, std) to the Variable by setting np.nan
-                    mu = float(kwargs.get('mu', args[0] if len(args) > 0 else np.nan))
-                    std = float(kwargs.get('std', args[1] if len(args) > 1 else np.nan))
-                    transforms.append(Zscore((mu, std)))
-                except Exception as e:
-                    raise ValueError(f'Z-score normalization string "{spec_string}" is not valid: '
-                                     f'Try "zscore(mu, std)".') from e
-            else:
-                raise NotImplementedError(f'Transform method "{name}" is not implemented.')
-
-        return transforms
-
-    def transform(self, x: ArrayLike, inverse: bool = False, transform_args: tuple = None) -> ArrayLike:
-        """Transform the given values `x`.
-
-        :param x: the values to transform
-        :param inverse: whether to do the inverse transform instead
-        :param transform_args: overrides `Transform.transform_args`
-        :return: the transformed values
-        """
-        input_type = type(x)
-        result = self._transform(np.atleast_1d(x), inverse, transform_args)
-        if input_type in [int, float]:
-            return float(result[0])
-        elif input_type is list:
-            return result.tolist()
-        elif input_type is tuple:
-            return tuple(result.tolist())
-        else:
-            return result  # just keep as np.ndarray for everything else
-
-    @abstractmethod
-    def _transform(self, x, inverse=False, transform_args=None):
-        """Abstract method that subclass `Transform` objects should implement."""
-        raise NotImplementedError
-
-
-class Linear(Transform):
-    """A Linear transform: $y=mx+b$.
-
-    :ivar transform_args: `(m, b)` the slope and offset
-    """
-    def _transform(self, x, inverse=False, transform_args=None):
-        slope, offset = transform_args or self.transform_args
-        return (x - offset) / slope if inverse else slope * x + offset
-
-
-class Log(Transform):
-    """A Log transform: $y=\\log_b{x + offset}$.
-
-    :ivar transform_args: `(base, offset)` the log base and offset
-    """
-    def _transform(self, x, inverse=False, transform_args=None):
-        log_base, offset = transform_args or self.transform_args
-        return np.exp(x * np.log(log_base)) - offset if inverse else np.log(x + offset) / np.log(log_base)
-
-
-class Minmax(Transform):
-    """A Minmax transform: $x: (lb, ub) \\mapsto (lb_{norm}, ub_{norm})$.
-
-    :ivar transform_args: `(lb, ub, lb_norm, ub_norm)` the original lower and upper bounds and the normalized bounds
-    """
-    def _transform(self, x, inverse=False, transform_args=None):
-        transform_args = transform_args or self.transform_args
-        if np.any(np.isnan(transform_args)):
-            raise RuntimeError(f'Transform args may have missing values: {transform_args}')
-        lb, ub, lb_norm, ub_norm = transform_args
-        if inverse:
-            return (x - lb_norm) / (ub_norm - lb_norm) * (ub - lb) + lb
-        else:
-            return (x - lb) / (ub - lb) * (ub_norm - lb_norm) + lb_norm
-
-    def update(self, lb=None, ub=None, lb_norm=None, ub_norm=None):
-        """Update the parameters of this transform.
-
-        :param lb: the lower bound in the original variable space
-        :param ub: the upper bound in the original variable space
-        :param lb_norm: the lower bound of the transformed space
-        :param ub_norm: the upper bound of the transformed space
-        """
-        transform_args = (lb, ub, lb_norm, ub_norm)
-        self.transform_args = tuple([ele if ele is not None else self.transform_args[i]
-                                     for i, ele in enumerate(transform_args)])
-
-
-class Zscore(Transform):
-    """A Zscore transform: $y=(x-\\mu)/\\sigma$.
-
-    :ivar transform_args: `(mu, std)` the mean and standard deviation
-    """
-    def _transform(self, x, inverse=False, transform_args=None):
-        transform_args = transform_args or self.transform_args
-        if np.any(np.isnan(transform_args)):
-            raise RuntimeError(f'Transform args may have missing values: {transform_args}')
-        mu, std = transform_args
-        return x * std + mu if inverse else (x - mu) / std
-
-    def update(self, mu=None, std=None):
-        """Update the parameters of this transform.
-
-        :param mu: the mean of the transform
-        :param std: the standard deviation of the transform
-        """
-        transform_args = (mu, std)
-        self.transform_args = tuple([ele if ele is not None else self.transform_args[i]
-                                     for i, ele in enumerate(transform_args)])
-
-
-Transformation = Union[str, Transform, list[str | Transform]]
+from amisc.compression import Compression
+from amisc.distribution import Distribution, Normal
+from amisc.serialize import Serializable
+from amisc.transform import Transform, Minmax, Zscore
+from amisc.utils import as_tuple, search_for_file, _get_yaml_path, _inspect_assignment
+from amisc.typing import CompressionData
+
+__all__ = ['Variable', 'VariableList']
+_Transformation = Union[str, Transform, list[str | Transform]]  # something that can be converted to a Transform
 
 
 class Variable(BaseModel, Serializable):
@@ -651,7 +48,7 @@ class Variable(BaseModel, Serializable):
     - Use `Variable.norm` to specify a transformed-space that is more amenable to surrogate construction
       (e.g. mapping to the range (0,1)). See the `Transform` classes.
     - Use `Variable.compression` to specify high-dimensional, coordinate-based field quantities,
-      such as from the output of many simulation software programs. See [`Compression`][amisc.variable.Compression].
+      such as from the output of many simulation software programs. See the `Compression` classes.
     - Use `Variable.category` as an additional layer for using Variable's in different ways (e.g. set a "calibration"
       category for Bayesian inference).
 
@@ -663,7 +60,7 @@ class Variable(BaseModel, Serializable):
         pdf = temp.pdf(samples)
 
         # Field quantity
-        vel = Variable(name='u', description='Velocity', units='m/s', field={'quantities': ['ux', 'uy', 'uz']})
+        vel = Variable(name='u', description='Velocity', units='m/s', compression={'quantities': ['ux', 'uy', 'uz']})
         vel_data = ...  # from a simulation
         reduced_vel = vel.compress(vel_data)
         ```
@@ -679,10 +76,11 @@ class Variable(BaseModel, Serializable):
     :ivar units: assumed units for the variable (if applicable)
     :ivar category: an additional descriptor for how this variable is used, e.g. calibration, operating, design, etc.
     :ivar tex: latex format for the variable, i.e. r"$x_i$"
+    :ivar shape: the shape of the variable (e.g. for field quantities) -- empty for scalar variables (default)
     :ivar compression: specifies field quantities and links to relevant compression data
-    :ivar dist: a string specifier of a probability distribution function (or a `Distribution` object)
+    :ivar dist: a string specifier of a probability distribution function (see the `Distribution` types)
     :ivar domain: the explicit domain bounds of the variable (limits of where you expect to use it)
-    :ivar norm: specifier of a map to a transformed-space for surrogate construction (or a `Transformation` type)
+    :ivar norm: specifier of a map to a transformed-space for surrogate construction (see the `Transform` types)
     """
     yaml_tag: ClassVar[str] = u'!Variable'
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True)
@@ -693,10 +91,11 @@ class Variable(BaseModel, Serializable):
     units: Optional[str] = None
     category: Optional[str] = None
     tex: Optional[str] = None
+    shape: Optional[str | tuple[int, ...]] = None
     compression: Optional[str | dict | Compression] = None
     dist: Optional[str | Distribution] = None
     domain: Optional[str | tuple[float, float]] = None
-    norm: Optional[Transformation] = None
+    norm: Optional[_Transformation] = None
 
     def __init__(self, /, name=None, **kwargs):
         # Try to set the variable name if instantiated as "x = Variable()"
@@ -715,6 +114,13 @@ class Variable(BaseModel, Serializable):
         if not tex[-1] == '$':
             tex = rf'{tex}$'
         return tex
+
+    @field_validator('shape')
+    @classmethod
+    def _validate_shape(cls, shape) -> tuple[int, ...]:
+        if shape is None:
+            return ()
+        return as_tuple(shape)
 
     @field_validator('compression')
     @classmethod
@@ -760,7 +166,7 @@ class Variable(BaseModel, Serializable):
 
     @field_validator('norm')
     @classmethod
-    def _validate_norm(cls, norm: Transformation, info: ValidationInfo) -> list[Transform] | None:
+    def _validate_norm(cls, norm: _Transformation, info: ValidationInfo) -> list[Transform] | None:
         if norm is None:
             return norm
         norm = Transform.from_string(norm)
@@ -867,6 +273,19 @@ class Variable(BaseModel, Serializable):
             return np.random.rand(*shape) * (domain[1] - domain[0]) + domain[0]
         else:
             raise RuntimeError(f'Variable "{self.name}" does not have a domain specified.')
+
+    def update_domain(self, domain: tuple[float, float], transform: bool = False):
+        """Update the domain of this variable.
+
+        :param domain: the new domain to set
+        :param transform: whether to update the domain in the transformed space instead
+        """
+        curr_domain = self.get_domain(transform=transform)
+        curr_lb, curr_ub = curr_domain if curr_domain is not None else (None, None)
+        lb, ub = domain
+        lb = min(lb, curr_lb) if curr_lb is not None else lb
+        ub = max(ub, curr_ub) if curr_ub is not None else ub
+        self.domain = self.denormalize((lb, ub)) if transform else (lb, ub)
 
     def pdf(self, x: np.ndarray, transform: bool = False) -> np.ndarray:
         """Compute the PDF of the Variable at the given `x` locations.
@@ -1036,32 +455,34 @@ class Variable(BaseModel, Serializable):
         """Alias for `compress(reconstruct=True)`"""
         return self.compress(values, coord=coord, reconstruct=True)
 
-    @property
-    def shape(self):
-        return self.compression.shape if self.compression else ()
-
     def serialize(self, save_path: str | Path = '.') -> dict:
         """Convert a `Variable` to a `dict` with only standard Python types
         (i.e. convert custom objects like `dist` and `norm` to strings).
         """
-        instance_variables = {key: value for key, value in self.__dict__.items() if value is not None}
-        if domain := instance_variables.get('domain'):
-            instance_variables['domain'] = str(domain)
-        if dist := instance_variables.get('dist'):
-            instance_variables['dist'] = str(dist)
-        if norm := instance_variables.get('norm'):
-            instance_variables['norm'] = str(norm) if isinstance(norm, str | Transform) else [str(transform) for
-                                                                                              transform in norm]
-        if compression := instance_variables.get('compression'):
-            fname = f'{self.name}_compression.pkl'
-            instance_variables['compression'] = compression.serialize(save_path=Path(save_path) / fname)
-        return instance_variables
+        d = {}
+        for key, value in self.__dict__.items():
+            if value is not None and not key.startswith('_'):
+                if key in ['domain', 'shape']:
+                    if len(value) > 0:
+                        d[key] = str(value)
+                elif key == 'dist':
+                    d[key] = str(value)
+                elif key == 'norm':
+                    d[key] = [str(transform) for transform in value]
+                elif key == 'compression':
+                    fname = f'{self.name}_compression.pkl'
+                    d[key] = value.serialize(save_path=Path(save_path) / fname)
+                else:
+                    d[key] = value
+        return d
 
     @classmethod
     def deserialize(cls, data: dict, search_paths=None) -> Variable:
         """Convert a `dict` to a `Variable` object. Let `pydantic` handle validation and conversion of fields."""
         if isinstance(data, Variable):
             return data
+        elif isinstance(data, str):
+            return cls(name=data)
         else:
             if (compression := data.get('compression', None)) is not None:
                 if isinstance(compression, str):
@@ -1128,14 +549,14 @@ class VariableList(OrderedDict, Serializable):
                 return i
         raise ValueError(f"'{key}' is not in list")
 
-    def update(self, data: list[Variable] | Variable | OrderedDict | dict = None, **kwargs):
+    def update(self, data: list[Variable | str] | str | Variable | OrderedDict | dict = None, **kwargs):
         """Update from a list or dict of `Variable` objects, or from `key=value` pairs."""
         if data:
             if isinstance(data, OrderedDict | dict):
                 for key, value in data.items():
                     self.__setitem__(key, value)
             else:
-                data = [data] if not isinstance(data, list) else data
+                data = [data] if not isinstance(data, list | tuple) else data
                 for variable in data:
                     self.__setitem__(str(variable), variable)
         if kwargs:
@@ -1155,6 +576,8 @@ class VariableList(OrderedDict, Serializable):
             k = list(self.keys())[key]
             self.__setitem__(k, value)
             return
+        if isinstance(value, str):
+            value = Variable(name=value)
         if not isinstance(key, str | Variable):
             raise TypeError(f'VariableList key "{key}" is not a Variable or string.')
         if not isinstance(value, Variable):
@@ -1197,6 +620,29 @@ class VariableList(OrderedDict, Serializable):
 
     def serialize(self, save_path='.') -> list[dict]:
         return [var.serialize(save_path=save_path) for var in self.values()]
+
+    @classmethod
+    def merge(cls, *variable_lists) -> VariableList:
+        """Merge multiple sets of variables into a single `VariableList` object.
+
+        !!! Note
+            Variables with the same name will be merged by keeping the one with the most information provided.
+        """
+        merged_vars = cls()
+
+        def _get_best_variable(var1, var2):
+            var1_dict = {key: value for key, value in var1.__dict__.items() if value is not None}
+            var2_dict = {key: value for key, value in var2.__dict__.items() if value is not None}
+            return var1 if len(var1_dict) >= len(var2_dict) else var2
+
+        for var_list in variable_lists:
+            for var in cls(var_list):
+                if var.name in merged_vars:
+                    merged_vars[var.name] = _get_best_variable(merged_vars[var.name], var)
+                else:
+                    merged_vars[var.name] = var
+
+        return merged_vars
 
     @classmethod
     def deserialize(cls, data: dict | list[dict], search_paths=None) -> VariableList:

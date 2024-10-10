@@ -5,12 +5,15 @@
 - Specifying component models and variables in yaml (and saving/loading)
 - Interpolators, States, and TrainingData ABCs and default implementation for SG + Lagrange
 - Specifying custom serializers for component data (interpolator, states, training data, etc.) -- can specify these in construction, use defaults, or allow auto-detection from types of other Component(**kwargs), or dict specification in yaml config
-- Model wrapper call_model() -- only top-level callables
+- Model wrapper call_model() -- only top-level callables, also inspection of args and unpacked calling
 - Might want custom args/kwargs/interp/training classes so you can have custom serialization/methods. Each will implement
 an interface that does common things (and may inherit default serialization). Each interface will provide a from_dict
 method to additionally allow constructing the custom class from a dict (which would be used for loading from a config file).
 The custom classes will then be stored in component.serializers, from which every subsequent save to file will serialize
 with the custom methods.
+- tutorial notebooks
+- extra model args only specified/saved as model_kwargs, can use Component(model_kwargs={}) or Component(**kwargs)
+- All model args are inputs. Must pass outputs=[]
 
 
 Serialization
