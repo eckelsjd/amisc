@@ -1,4 +1,4 @@
-"""The `SystemSurrogate` is a framework for multidisciplinary models. It manages multiple single discipline component
+"""The `System` object is a framework for multidisciplinary models. It manages multiple single discipline component
 models and the connections between them. It provides a top-level interface for constructing and evaluating surrogates.
 
 Features
@@ -13,20 +13,10 @@ Features
 - Supports parallel execution with OpenMP and MPI protocols
 - Abstract and flexible interfacing with component models
 
-!!! Info "Model specification"
-    Models are callable Python wrapper functions of the form `ret = model(x, *args, **kwargs)`, where `x` is an
-    `np.ndarray` of model inputs (and `*args, **kwargs` allow passing any other required configurations for your model).
-    The return value is a Python dictionary of the form `ret = {'y': y, 'files': files, 'cost': cost, etc.}`. In the
-    return dictionary, you specify the raw model output `y` as an `np.ndarray` at a _minimum_. Optionally, you can
-    specify paths to output files and the average model cost (in seconds of cpu time), and anything else you want. Your
-    `model()` function can do anything it wants in order to go from `x` &rarr; `y`. Python has the flexibility to call
-    virtually any external codes, or to implement the function natively with `numpy`.
+Includes:
 
-!!! Info "Component specification"
-    A component adds some extra configuration around a callable `model`. These configurations are defined in a Python
-    dictionary, which we give the custom type `ComponentSpec`. At a bare _minimum_, you must specify a callable
-    `model` and its connections to other models within the multidisciplinary system. The limiting case is a single
-    component model, for which the configuration is simply `component = ComponentSpec(model)`.
+- `TrainHistory` — a history of training iterations for the system surrogate
+- `System` — the top-level object for managing multidisciplinary models
 """
 # ruff: noqa: E702
 from __future__ import annotations
@@ -36,30 +26,107 @@ import datetime
 import functools
 import logging
 import os
-import pickle
 import random
 import string
 import time
-from collections import ChainMap, deque
-from concurrent.futures import Executor
+from collections import ChainMap, deque, UserList
+from concurrent.futures import Executor, wait, ALL_COMPLETED
 from datetime import timezone
 from pathlib import Path
-from typing import ClassVar, Annotated, Optional
+from typing import ClassVar, Annotated, Optional, Callable
 
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import yaml
-from joblib import Parallel, delayed
-from joblib.externals.loky import set_loky_pickler
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from uqtils import ax_default
 
-from amisc.component import IndexSet, ComponentIO
-from amisc.component import Component
+from amisc.component import Component, IndexSet
 from amisc.serialize import Serializable
-from amisc.utils import get_logger, format_inputs, format_outputs
-from amisc.variable import Variable, VariableList
+from amisc.utils import get_logger, format_inputs, format_outputs, constrained_lls, as_tuple, relative_error
+from amisc.variable import VariableList
+from amisc.typing import Dataset, TrainIteration
+
+__all__ = ['TrainHistory', 'System']
+
+
+class TrainHistory(BaseModel, UserList, Serializable):
+    """Stores the training history of a system surrogate."""
+    model_config = ConfigDict(validate_assignment=True, validate_default=True)
+    data: list[TrainIteration]  # underlying `list` data structure
+
+    def __init__(self, *args, data: list = None):
+        data_list = data or []
+        data_list.extend(args)
+        super().__init__(data=data_list)
+
+    def __str__(self):
+        return str(self.data)
+
+    def __repr__(self):
+        return str(self)
+
+    def __iter__(self):
+        yield from self.data
+
+    def __eq__(self, other):
+        if isinstance(other, TrainHistory):
+            for res1, res2 in zip(self.data, other.data):
+                if res1 != res2:
+                    return False
+            return True
+        else:
+            return False
+
+    def serialize(self) -> list[dict]:
+        """Return a list of each result in the history serialized to a dictionary."""
+        ret_list = []
+        for res in self:
+            new_res = res.copy()
+            new_res['alpha'] = str(res['alpha'])
+            new_res['beta'] = str(res['beta'])
+            ret_list.append(new_res)
+        return ret_list
+
+    @classmethod
+    def deserialize(cls, serialized_data: list[dict]) -> TrainHistory:
+        """Deserialize using pydantic model validation on `TrainHistory.data`."""
+        return TrainHistory(data=serialized_data)
+
+    @field_validator('data', mode='before')
+    @classmethod
+    def _validate_data(cls, data: list[dict]) -> list[TrainIteration]:
+        ret_list = []
+        for item in data:
+            item = cls._validate_item(item)
+            ret_list.append(item)
+        return ret_list
+
+    @classmethod
+    def _validate_item(cls, item: dict):
+        """Format a `TrainIteration` `dict` item before appending to the history."""
+        item.setdefault('test_error', None)
+        item['alpha'] = as_tuple(item['alpha'])
+        item['beta'] = as_tuple(item['beta'])
+        item['num_evals'] = int(item['num_evals'])
+        return item
+
+    def append(self, item: dict):
+        super().append(self._validate_item(item))
+
+    def __add__(self, other):
+        other_list = other.data if isinstance(other, TrainHistory) else other
+        return TrainHistory(data=self.data + other_list)
+
+    def extend(self, items):
+        super().extend([self._validate_item(item) for item in items])
+
+    def insert(self, index, item):
+        super().insert(index, self._validate_item(item))
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, self._validate_item(value))
 
 
 class System(BaseModel, Serializable):
@@ -67,9 +134,9 @@ class System(BaseModel, Serializable):
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True,
                               extra='allow')
 
-    components: Component | list[Component]
     name: Annotated[str, Field(default_factory=lambda: "System_" + "".join(random.choices(string.digits, k=3)))]
-    train_history: dict = dict()  # TODO: custom type/validator?
+    components: Callable | Component | list[Callable | Component]
+    train_history: TrainHistory = TrainHistory()
 
     _graph: nx.DiGraph
     _root_dir: Optional[str]
@@ -80,13 +147,19 @@ class System(BaseModel, Serializable):
         if components is None:
             components = []
             for a in args:
-                if isinstance(a, Component):
+                if isinstance(a, Component) or callable(a):
                     components.append(a)
                 else:
                     try:
                         components.extend(a)
                     except TypeError as e:
                         raise ValueError(f"Invalid component: {a}") from e
+
+        # Make sure nested pydantic validation works for train_history
+        if (value := kwargs.get('train_history', None)) is not None:
+            kwargs['train_history'] = {'data': value} if (not isinstance(value, dict) or
+                                                          value.get('data', None) is None) else value
+
         super().__init__(components=components, **kwargs)
         self.root_dir = root_dir
         self.executor = executor
@@ -108,7 +181,15 @@ class System(BaseModel, Serializable):
     def _validate_components(cls, comps) -> list[Component]:
         if not isinstance(comps, list):
             comps = [comps]
-        return [Component.deserialize(c) for c in comps]
+        comps = [Component.deserialize(c) for c in comps]
+
+        # Merge all variables to avoid name conflicts
+        merged_vars = VariableList.merge(*[comp.inputs for comp in comps], *[comp.outputs for comp in comps])
+        for comp in comps:
+            comp.inputs.update({var.name: var for var in merged_vars.values() if var in comp.inputs})
+            comp.outputs.update({var.name: var for var in merged_vars.values() if var in comp.outputs})
+
+        return comps
 
     def build_graph(self):
         """Build a directed graph of the system components based on their input-output relationships."""
@@ -127,17 +208,32 @@ class System(BaseModel, Serializable):
     def graph(self) -> nx.DiGraph:
         return self._graph
 
-    def insert_component(self, component: Component):
-        """Insert a new component into the system."""
-        self.components.append(component)
+    def _save_on_error(func):
+        """Gracefully exit and save the `System` object on any errors."""
+        @functools.wraps(func)
+        def wrap(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except:
+                self.save_to_file('system_error.yml')
+                self.logger.critical(f'An error occurred during execution of {func.__name__}. Saving '
+                                     f'System object to system_error.yml', exc_info=True)
+                self.logger.info(f'Final system surrogate on exit: \n {self}')
+                raise
+        return wrap
+    _save_on_error = staticmethod(_save_on_error)
+
+    def insert_components(self, components: list | Callable | Component):
+        """Insert new components into the system."""
+        components = components if isinstance(components, list) else [components]
+        self.components = self.components + components
         self.build_graph()
 
-    def swap_component(self, old_component: str | Component, new_component: Component):
+    def swap_component(self, old_component: str | Component, new_component: Callable | Component):
         """Replace an old component with a new component."""
         old_name = old_component if isinstance(old_component, str) else old_component.name
-        comp_names = [comp.name for comp in self.components]
-        idx = comp_names.index(old_name)
-        self.components[idx] = new_component
+        comps = [comp if comp.name != old_name else new_component for comp in self.components]
+        self.components = comps
         self.build_graph()
 
     def remove_component(self, component: str | Component):
@@ -154,17 +250,29 @@ class System(BaseModel, Serializable):
         :returns: A [`VariableList`][amisc.variable.VariableList] containing all inputs from the components.
         """
         all_inputs = ChainMap(*[comp.inputs for comp in self.components])
-        return VariableList({k: all_inputs[k] for k in all_inputs.keys() -
-                             ChainMap(*[comp.outputs for comp in self.components]).keys()})
+        return VariableList({k: all_inputs[k] for k in all_inputs.keys() - self.outputs().keys()})
 
     def outputs(self) -> VariableList:
         """Collect all outputs from each component in the `System` and combine them into a
-        single [`VariableList`][amisc.variable.VariableList] object, excluding variables that are also outputs of
-        any component.
+        single [`VariableList`][amisc.variable.VariableList] object.
 
-        :returns: A [`VariableList`][amisc.variable.VariableList] containing all inputs from the components.
+        :returns: A [`VariableList`][amisc.variable.VariableList] containing all outputs from the components.
         """
         return VariableList({k: v for k, v in ChainMap(*[comp.outputs for comp in self.components]).items()})
+
+    def coupling_variables(self) -> VariableList:
+        """Collect all coupling variables from each component in the `System` and combine them into a
+        single [`VariableList`][amisc.variable.VariableList] object.
+
+        :returns: A [`VariableList`][amisc.variable.VariableList] containing all coupling variables from the components.
+        """
+        all_outputs = self.outputs()
+        return VariableList({k: all_outputs[k] for k in (all_outputs.keys() &
+                             ChainMap(*[comp.inputs for comp in self.components]).keys())})
+
+    def variables(self):
+        """Iterator over all variables in the system (inputs and outputs)."""
+        yield from ChainMap(*self.inputs(), *self.outputs()).values()
 
     @property
     def refine_level(self) -> int:
@@ -183,6 +291,12 @@ class System(BaseModel, Serializable):
     @property
     def logger(self) -> logging.Logger:
         return self._logger
+
+    @logger.setter
+    def logger(self, logger: logging.Logger):
+        self._logger = logger
+        for comp in self.components:
+            comp.logger = logger
 
     @staticmethod
     def timestamp() -> str:
@@ -221,7 +335,7 @@ class System(BaseModel, Serializable):
             if not (pth := self.root_dir / 'components').is_dir():
                 os.mkdir(pth)
             for comp in self.components:
-                if comp.model_arg_requested('output_path'):
+                if comp.model_kwarg_requested('output_path'):
                     if not (comp_pth := pth / comp.name).is_dir():
                         os.mkdir(comp_pth)
             for f in os.listdir(self.root_dir):
@@ -257,7 +371,7 @@ class System(BaseModel, Serializable):
             comp.set_logger(log_file=log_file, stdout=stdout, logger=logger)
 
     def sample_inputs(self, size: tuple | int, comp: str = 'System', use_pdf: bool = False, transform: bool = False,
-                      nominal: dict[str: float] = None, constants: set[str] = None) -> dict | ComponentIO:
+                      nominal: dict[str: float] = None, constants: set[str] = None) -> Dataset:
         """Return samples of the inputs according to provided options.
 
         :param size: tuple or integer specifying shape or number of samples to obtain
@@ -299,9 +413,221 @@ class System(BaseModel, Serializable):
 
         return samples
 
-    def predict(self, x: dict | ComponentIO, max_fpi_iter: int = 100, anderson_mem: int = 10, fpi_tol: float = 1e-10,
+    def simulate_fit(self):
+        """Loop back through training history and simulate each iteration to obtain the error indicator or new
+        test metrics etc.
+        """
+        # TODO
+        raise NotImplementedError
+
+    @_save_on_error
+    def fit(self, targets: list = None, num_refine: int = 100, max_iter: int = 20, max_tol: float = 1e-3,
+            runtime: float = 1., save_interval: int = 0, update_bounds: bool = True, test_set: tuple = None,
+            executor: Executor = None):
+        """Train the system surrogate adaptively by iterative refinement until an end condition is met.
+
+        :param targets: list of system output variables to focus refinement on, use all outputs if not specified
+        :param num_refine: number of input samples to compute error indicators on
+        :param max_iter: the maximum number of refinement steps to take
+        :param max_tol: the max allowable value in relative L2 error to achieve
+        :param runtime: the threshold wall clock time (hr) at which to stop further refinement (will go
+                        until all models finish the current iteration)
+        :param save_interval: number of refinement steps between each progress save, none if 0
+        :param update_bounds: whether to continuously update coupling variable bounds during refinement
+        :param test_set: `tuple` of `(xtest, ytest)` to show convergence of surrogate to the true model. The test set
+                         inputs and outputs are specified as `dicts` of `np.ndarrays` with keys corresponding to the
+                         variable names.
+        :param executor: a `concurrent.futures.Executor` object to parallelize the refinement process (defaults to
+                         `system.executor` if available)
+        """
+        targets = targets or self.outputs()
+        xtest, ytest = test_set or (None, None)
+        max_iter = self.refine_level + max_iter
+        curr_error = np.inf
+        t_start = time.time()
+
+        # Track convergence progress on the error indicator and test set (plot to file)
+        if self.root_dir is not None:
+            err_record = [res['added_error'] for res in self.train_history]
+
+            if test_set is not None:
+                num_plot = min(len(targets), 3)
+                test_record = np.full((self.refine_level, num_plot), np.nan)
+                for j, res in enumerate(self.train_history):
+                    for i, var in enumerate(targets[:num_plot]):
+                        if (perf := res.get('test_error')) is not None:
+                            test_record[j, i] = perf[var]
+
+        while True:
+            # Adaptive refinement step
+            train_result = self.refine(targets=targets, num_refine=num_refine, update_bounds=update_bounds,
+                                       executor=executor)
+            if train_result['component'] is None:
+                self._print_title_str('Termination criteria reached: No candidates left to refine')
+                break
+
+            curr_error = train_result['added_error']
+
+            # Plot progress of error indicator
+            if self.root_dir is not None:
+                err_record.append(curr_error)
+                fig, ax = plt.subplots(figsize=(6, 5), layout='tight')
+                ax.plot(err_record, '-k')
+                ax.set_yscale('log'); ax.grid()
+                ax_default(ax, 'Iteration', r'Relative error indicator', legend=False)
+                fig.savefig(str(Path(self.root_dir) / 'error_indicator.pdf'), format='pdf', bbox_inches='tight')
+
+            # Save performance on a test set
+            if test_set is not None:
+                perf = self.test_set_performance(xtest, ytest)
+                train_result['test_error'] = perf.copy()
+
+                if self.root_dir is not None:
+                    test_record = np.vstack((test_record, np.array([perf[var] for var in targets[:num_plot]])))
+                    fig, ax = plt.subplots(1, num_plot, figsize=(3.5*num_plot, 4), layout='tight', squeeze=False,
+                                           sharey='row')
+                    for i in range(num_plot):
+                        ax[0, i].plot(test_record[:, i], '-k')
+                        ax[0, i].set_yscale('log'); ax.grid()
+                        ax[0, i].set_title(self.outputs()[targets[i]].get_tex(units=True))
+                        ax_default(ax[0, i], 'Iteration', r'Test set relative error' if i == 0 else '', legend=False)
+                    fig.savefig(str(Path(self.root_dir) / 'test_set_error.pdf'), format='pdf', bbox_inches='tight')
+
+            self.train_history.append(train_result)
+            if save_interval > 0 and self.refine_level % save_interval == 0:
+                self.save_to_file(f'system_iter{self.refine_level}.yml')
+
+            # Check all end conditions
+            if self.refine_level >= max_iter:
+                self._print_title_str(f'Termination criteria reached: Max iteration {self.refine_level}/{max_iter}')
+                break
+            if curr_error < max_tol:
+                self._print_title_str(f'Termination criteria reached: relative error {curr_error} < tol {max_tol}')
+                break
+            if ((time.time() - t_start) / 3600.0) >= runtime:
+                actual = datetime.timedelta(seconds=time.time() - t_start)
+                target = datetime.timedelta(seconds=runtime * 3600)
+                self._print_title_str(f'Termination criteria reached: runtime {str(actual)} > {str(target)}')
+                break
+
+        self.save_to_file(f'system_iter{self.refine_level}.yml')
+        self.logger.info(f'Final system surrogate: \n {self}')
+
+    def test_set_performance(self, xtest, ytest, training: bool = True):
+        """Compute the relative L2 error on a test set for the given target output variables.
+
+        :param xtest: `dict` of test set input samples
+        :param ytest: `dict` of test set output samples
+        :param training: whether to call the system surrogate in training or evaluation mode
+        :returns: `dict` of relative L2 errors for each target output variable
+        """
+        ysurr = self.predict(xtest, training=training)
+        return {var: relative_error(ysurr[var], ytest[var]) for var in ytest}
+
+    def refine(self, targets: list = None, num_refine: int = 100, update_bounds: bool = True,
+               executor: Executor = None):
+        """Perform a single adaptive refinement step on the system surrogate.
+
+        :param targets: list of system output variables to focus refinement on, use all outputs if not specified
+        :param num_refine: number of input samples to compute error indicators on
+        :param update_bounds: whether to continuously update coupling variable bounds during refinement
+        :param executor: a `concurrent.futures.Executor` object to parallelize the refinement process (defaults to
+                         `system.executor` if available)
+        :returns: `dict` of the refinement results indicating the chosen component and candidate index
+        """
+        self._print_title_str(f'Refining system surrogate: iteration {self.refine_level + 1}')
+        targets = targets or self.outputs()
+        executor = executor or self.executor
+
+        # Check for uninitialized components and refine those first
+        for comp in self.components:
+            if len(comp.active_set) == 0:
+                alpha_star = (0,) * len(comp.max_alpha)
+                beta_star = (0,) * len(comp.max_beta)
+                self.logger.info(f"Initializing component {comp.name}: adding {(alpha_star, beta_star)} to active set")
+                comp.activate_index(alpha_star, beta_star)
+                cost_star = max(1., comp.get_cost(alpha_star, beta_star))  # Cpu time (s)
+                err_star = np.nan
+                num_evals = round(cost_star / comp.model_costs.get(alpha_star, 1.))
+                return {'component': comp.name, 'alpha': alpha_star, 'beta': beta_star, 'num_evals': num_evals,
+                        'added_cost': cost_star, 'added_error': err_star}
+
+        # Compute entire integrated-surrogate on a random test set for global system QoI error estimation
+        x_samples = self.sample_inputs(num_refine)
+        y_curr = self.predict(x_samples, training=True, targets=targets)
+        coupling_vars = {k: v for k, v in self.coupling_variables().items() if k in y_curr}
+
+        y_min, y_max = None, None
+        if update_bounds:
+            y_min = {var: np.min(y_curr[var], axis=0, keepdims=True) for var in coupling_vars}  # (1, ydim)
+            y_max = {var: np.max(y_curr[var], axis=0, keepdims=True) for var in coupling_vars}  # (1, ydim)
+
+        # Find the candidate surrogate with the largest error indicator
+        error_max, error_indicator = -np.inf, -np.inf
+        comp_star, alpha_star, beta_star, err_star, cost_star = None, None, None, -np.inf, 0
+        for comp in self.components:
+            self.logger.info(f"Estimating error for component '{comp.name}'...")
+
+            if len(comp.candidate_set) > 0:
+                if executor is None:
+                    ret = [self.predict(x_samples, training=True, targets=targets,
+                                        index_set={comp.name: comp.active_set.data + [(alpha, beta)]})
+                           for alpha, beta in comp.candidate_set]
+                else:
+                    temp_buffer = self._remove_unpickleable()
+                    futures = [executor.submit(self.predict, x_samples, training=True, targets=targets,
+                                               index_set={comp.name: comp.active_set.data + [(alpha, beta)]})
+                               for alpha, beta in comp.candidate_set]
+                    wait(futures, timeout=None, return_when=ALL_COMPLETED)
+                    ret = [f.result() for f in futures]
+                    self._restore_unpickleable(temp_buffer)
+
+                for i, y_cand in enumerate(ret):
+                    alpha, beta = comp.candidate_set[i]
+                    error = {}
+                    for var, array in y_cand.items():
+                        error[var] = relative_error(array, y_curr[var])
+
+                        if update_bounds and var in coupling_vars:
+                            y_min[var] = np.min(np.concatenate((y_min, array), axis=0), axis=0, keepdims=True)
+                            y_max[var] = np.max(np.concatenate((y_max, array), axis=0), axis=0, keepdims=True)
+
+                    delta_error = np.nanmax([np.nanmax(error[var]) for var in y_cand])  # Max error over all QoIs
+                    delta_work = max(1., comp.get_cost(alpha, beta))  # Cpu time (s)
+                    error_indicator = delta_error / delta_work
+
+                    self.logger.info(f"Candidate multi-index: {(alpha, beta)}. Relative error: {delta_error}. "
+                                     f"Error indicator: {error_indicator}.")
+
+                    if error_indicator > error_max:
+                        error_max = error_indicator
+                        comp_star, alpha_star, beta_star, err_star, cost_star = (
+                            comp.name, alpha, beta, delta_error, delta_work)
+            else:
+                self.logger.info(f"Component '{comp.name}' has no available candidates left!")
+
+        # Update all coupling variable ranges
+        if update_bounds:
+            for var in coupling_vars:
+                var.update_domain((y_min[var], y_max[var]), transform=False)
+
+        # Add the chosen multi-index to the chosen component
+        if comp_star is not None:
+            self.logger.info(f"Candidate multi-index {(alpha_star, beta_star)} chosen for component '{comp_star}'.")
+            model_dir = (pth / 'components' / comp_star) if (pth := self.root_dir) is not None else None
+            self[comp_star].activate_index(alpha_star, beta_star, model_dir=model_dir, executor=executor)
+            num_evals = round(cost_star / self[comp_star].model_costs.get(alpha_star, 1.))
+        else:
+            self.logger.info(f"No candidates left for refinement, iteration: {self.refine_level}")
+            num_evals = 0
+
+        # Return the results of the refinement step
+        return {'component': comp_star, 'alpha': alpha_star, 'beta': beta_star, 'num_evals': num_evals,
+                'added_cost': cost_star, 'added_error': err_star}
+
+    def predict(self, x: dict | Dataset, max_fpi_iter: int = 100, anderson_mem: int = 10, fpi_tol: float = 1e-10,
                 use_model: str | tuple | dict = None, model_dir: str | Path = None, verbose: bool = False,
-                training: bool = False, index_set: dict[str: IndexSet] = None, ret_outputs=None) -> dict | ComponentIO:
+                training: bool = False, index_set: dict[str: IndexSet] = None, targets=None) -> Dataset:
         """Evaluate the system surrogate at inputs `x`. Return `y = system(x)`.
 
         !!! Warning "Computing the true model with feedback loops"
@@ -321,7 +647,7 @@ class System(BaseModel, Serializable):
         :param verbose: whether to print out iteration progress during execution
         :param training: whether to call the system surrogate in training or evaluation mode, ignored if `use_model`
         :param index_set: `dict(comp=[indices])` to override default index set for a component
-        :param ret_outputs: list of output variables to return, defaults to returning all system outputs
+        :param targets: list of output variables to return, defaults to returning all system outputs
         :returns: `dict` of output variables - the surrogate approximation of the system outputs (or the true model)
         """
         # TODO: argument to return latent coeff instead of reconstructed fields
@@ -332,7 +658,7 @@ class System(BaseModel, Serializable):
         N = int(np.prod(loop_shape))
         t1 = 0
         output_dir = None
-        is_computed = {var: False for var in (ret_outputs or self.outputs())}
+        is_computed = {var: False for var in (targets or self.outputs())}
 
         class _Converged:
             """Store indices to track which samples have converged."""
@@ -525,7 +851,7 @@ class System(BaseModel, Serializable):
                     C = np.ones((N_curr, 1, mk))
                     b = np.zeros((N_curr, N_couple, 1))
                     d = np.ones((N_curr, 1, 1))
-                    alpha = np.expand_dims(self._constrained_lls(res_snap, b, C, d), axis=-3)   # (..., 1, mk, 1)
+                    alpha = np.expand_dims(constrained_lls(res_snap, b, C, d), axis=-3)   # (..., 1, mk, 1)
                     coupling_new = np.squeeze(coupling_snap[:, :, np.newaxis, :] @ alpha, axis=(-1, -2))
                     start_idx = 0
                     for j, var in enumerate(coupling_vars):
@@ -573,20 +899,15 @@ class System(BaseModel, Serializable):
         """Log an important message."""
         self.logger.info('-' * int(len(title_str)/2) + title_str + '-' * int(len(title_str)/2))
 
-    def _save_on_error(func):
-        """Gracefully exit and save the `System` object on any errors."""
-        @functools.wraps(func)
-        def wrap(self, *args, **kwargs):
-            try:
-                return func(self, *args, **kwargs)
-            except:
-                self.save_to_file('system_error.pkl')
-                self.logger.critical(f'An error occurred during execution of {func.__name__}. Saving '
-                                     f'System object to system_error.pkl', exc_info=True)
-                self.logger.info(f'Final system surrogate on exit: \n {self}')
-                raise
-        return wrap
-    _save_on_error = staticmethod(_save_on_error)
+    def _remove_unpickleable(self) -> dict:
+        """Remove and return unpickleable attributes before pickling (just the executor)."""
+        buffer = {'executor': self.executor}
+        self.executor = None
+        return buffer
+
+    def _restore_unpickleable(self, buffer: dict):
+        """Restore the unpickleable attributes after unpickling."""
+        self.executor = buffer['executor']
 
     def save_to_file(self, filename: str, save_dir: str | Path = None, dumper=None):
         """Save surrogate to file. Defaults to `root/surrogates/filename.yml` with the default yaml encoder.
@@ -603,7 +924,7 @@ class System(BaseModel, Serializable):
         encoder.dump(self, Path(save_dir) / filename)
 
     @staticmethod
-    def load_from_file(filename: str, root_dir: str | Path = None, loader=None):
+    def load_from_file(filename: str | Path, root_dir: str | Path = None, loader=None):
         """Load surrogate from file. Defaults to yaml loading. Tries to infer `amisc` directory structure.
 
         :param filename: the name of the load file
@@ -636,6 +957,9 @@ class System(BaseModel, Serializable):
                                              serialize_args=serialize_args.get(comp.name),
                                              serialize_kwargs=serialize_kwargs.get(comp.name))
                               for comp in value]
+                elif key == 'train_history':
+                    if len(value) > 0:
+                        d[key] = value.serialize()
                 else:
                     d[key] = value
         return d
@@ -661,34 +985,6 @@ class System(BaseModel, Serializable):
         else:
             raise NotImplementedError(f'The "{System.yaml_tag}" yaml tag can only be used on a yaml sequence or '
                                       f'mapping, not a "{type(node)}".')
-
-    @staticmethod
-    def _constrained_lls(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray) -> np.ndarray:
-        """Minimize $||Ax-b||_2$, subject to $Cx=d$, i.e. constrained linear least squares.
-
-        !!! Note
-            See http://www.seas.ucla.edu/~vandenbe/133A/lectures/cls.pdf for more detail.
-
-        :param A: `(..., M, N)`, vandermonde matrix
-        :param b: `(..., M, 1)`, data
-        :param C: `(..., P, N)`, constraint operator
-        :param d: `(..., P, 1)`, constraint condition
-        :returns: `(..., N, 1)`, the solution parameter vector `x`
-        """
-        M = A.shape[-2]
-        dims = len(A.shape[:-2])
-        T_axes = tuple(np.arange(0, dims)) + (-1, -2)
-        Q, R = np.linalg.qr(np.concatenate((A, C), axis=-2))
-        Q1 = Q[..., :M, :]
-        Q2 = Q[..., M:, :]
-        Q1_T = np.transpose(Q1, axes=T_axes)
-        Q2_T = np.transpose(Q2, axes=T_axes)
-        Qtilde, Rtilde = np.linalg.qr(Q2_T)
-        Qtilde_T = np.transpose(Qtilde, axes=T_axes)
-        Rtilde_T_inv = np.linalg.pinv(np.transpose(Rtilde, axes=T_axes))
-        w = np.linalg.pinv(Rtilde) @ (Qtilde_T @ Q1_T @ b - Rtilde_T_inv @ d)
-
-        return np.linalg.pinv(R) @ (Q1_T @ b - Q2_T @ w)
 
 
 # class SystemSurrogate:
@@ -739,101 +1035,6 @@ class System(BaseModel, Serializable):
 #             #     node_obj['surrogate'].activate_index(alpha, beta)
 #             self.logger.info(f"Initialized component '{node}'.")
 #
-#     def fit(self, qoi_ind = None, num_refine: int = 100, max_iter: int = 20, max_tol: float = 1e-3,
-#             max_runtime: float = 1, save_interval: int = 0, update_bounds: bool = True, test_set: dict = None,
-#             n_jobs: int = 1):
-#         """Train the system surrogate adaptively by iterative refinement until an end condition is met.
-#
-#         :param qoi_ind: list of system QoI variables to focus refinement on, use all QoI if not specified
-#         :param num_refine: number of samples of exogenous inputs to compute error indicators on
-#         :param max_iter: the maximum number of refinement steps to take
-#         :param max_tol: the max allowable value in relative L2 error to achieve
-#         :param max_runtime: the maximum wall clock time (hr) to run refinement for (will go until all models finish)
-#         :param save_interval: number of refinement steps between each progress save, none if 0
-#         :param update_bounds: whether to continuously update coupling variable bounds during refinement
-#         :param test_set: `dict(xt=(Nt, x_dim), yt=(Nt, y_dim)` to show convergence of surrogate to the truth model
-#         :param n_jobs: number of cpu workers for computing error indicators (on master MPI task), 1=sequential
-#         """
-#         qoi_ind = self._get_qoi_ind(qoi_ind)
-#         Nqoi = len(qoi_ind)
-#         max_iter = self.refine_level + max_iter
-#         curr_error = np.inf
-#         t_start = time.time()
-#         test_stats, xt, yt, t_fig, t_ax = None, None, None, None, None
-#
-#         # Record of (error indicator, component, alpha, beta, num_evals, total added cost (s)) for each iteration
-#         train_record = self.build_metrics.get('train_record', [])
-#         if test_set is not None:
-#             xt, yt = test_set['xt'], test_set['yt']
-#         xt, yt = self.build_metrics.get('xt', xt), self.build_metrics.get('yt', yt)  # Overrides test set param
-#
-#         # Track convergence progress on a test set and on the max error indicator
-#         err_fig, err_ax = plt.subplots()
-#         if xt is not None and yt is not None:
-#             self.build_metrics['xt'] = xt
-#             self.build_metrics['yt'] = yt
-#             if self.build_metrics.get('test_stats') is not None:
-#                 test_stats = self.build_metrics.get('test_stats')
-#             else:
-#                 # Get initial perf metrics, (2, Nqoi)
-#                 test_stats = np.expand_dims(self.get_test_metrics(xt, yt, qoi_ind=qoi_ind), axis=0)
-#             t_fig, t_ax = plt.subplots(1, Nqoi) if Nqoi > 1 else plt.subplots()
-#
-#         # Set up a parallel pool of workers, sequential if n_jobs=1
-#         with Parallel(n_jobs=n_jobs, verbose=0) as ppool:
-#             while True:
-#                 # Check all end conditions
-#                 if self.refine_level >= max_iter:
-#                     self._print_title_str(f'Termination criteria reached: Max iteration {self.refine_level}/{max_iter}')
-#                     break
-#                 if curr_error == -np.inf:
-#                     self._print_title_str('Termination criteria reached: No candidates left to refine')
-#                     break
-#                 if curr_error < max_tol:
-#                     self._print_title_str(f'Termination criteria reached: L2 error {curr_error} < tol {max_tol}')
-#                     break
-#                 if ((time.time() - t_start)/3600.0) >= max_runtime:
-#                     actual = datetime.timedelta(seconds=time.time()-t_start)
-#                     target = datetime.timedelta(seconds=max_runtime*3600)
-#                     self._print_title_str(f'Termination criteria reached: runtime {str(actual)} > {str(target)}')
-#                     break
-#
-#                 # Refine surrogate and save progress
-#                 refine_res = self.refine(qoi_ind=qoi_ind, num_refine=num_refine, update_bounds=update_bounds,
-#                                          ppool=ppool)
-#                 curr_error = refine_res[0]
-#                 if save_interval > 0 and self.refine_level % save_interval == 0:
-#                     self._save_progress(f'sys_iter_{self.refine_level}.pkl')
-#
-#                 # Plot progress of error indicator
-#                 train_record.append(refine_res)
-#                 error_record = [res[0] for res in train_record]
-#                 self.build_metrics['train_record'] = train_record
-#                 err_ax.clear(); err_ax.grid(); err_ax.plot(error_record, '-k')
-#                 ax_default(err_ax, 'Iteration', r'Relative $L_2$ error indicator', legend=False)
-#                 err_ax.set_yscale('log')
-#                 if self.root_dir is not None:
-#                     err_fig.savefig(str(Path(self.root_dir) / 'error_indicator.png'), dpi=300, format='png')
-#
-#                 # Plot progress on test set
-#                 if xt is not None and yt is not None:
-#                     stats = self.get_test_metrics(xt, yt, qoi_ind=qoi_ind)
-#                     test_stats = np.concatenate((test_stats, stats[np.newaxis, ...]), axis=0)
-#                     for i in range(Nqoi):
-#                         ax = t_ax if Nqoi == 1 else t_ax[i]
-#                         ax.clear(); ax.grid(); ax.set_yscale('log')
-#                         ax.plot(test_stats[:, 1, i], '-k')
-#                         ax.set_title(self.coupling_vars[qoi_ind[i]].get_tex(units=True))
-#                         ax_default(ax, 'Iteration', r'Relative $L_2$ error', legend=False)
-#                     t_fig.set_size_inches(3.5*Nqoi, 3.5)
-#                     t_fig.tight_layout()
-#                     if self.root_dir is not None:
-#                         t_fig.savefig(str(Path(self.root_dir) / 'test_set.png'), dpi=300, format='png')
-#                     self.build_metrics['test_stats'] = test_stats
-#
-#         self._save_progress('sys_final.pkl')
-#         self.logger.info(f'Final system surrogate: \n {self}')
-#
 #     def get_allocation(self, idx: int = None):
 #         """Get a breakdown of cost allocation up to a certain iteration number during training (starting at 1).
 #
@@ -880,121 +1081,7 @@ class System(BaseModel, Serializable):
 #                 offline_alloc[node][str(alpha)] += [round(added_cost/base_cost), float(added_cost)]
 #
 #         return cost_alloc, offline_alloc, np.cumsum(cost_cum)
-#
-#     def get_test_metrics(self, xt: np.ndarray, yt: np.ndarray, qoi_ind = None,
-#                          training: bool = True) -> np.ndarray:
-#         """Get relative L2 error metric over a test set.
-#
-#         :param xt: `(Nt, x_dim)` random test set of inputs
-#         :param yt: `(Nt, y_dim)` random test set outputs
-#         :param qoi_ind: list of indices of QoIs to get metrics for
-#         :param training: whether to evaluate the surrogate in training or evaluation mode
-#         :returns: `stats` - `(2, Nqoi)` array &rarr; `[num_candidates, rel_L2_error]` for each QoI
-#         """
-#         qoi_ind = self._get_qoi_ind(qoi_ind)
-#         ysurr = self(xt, training=training)
-#         ysurr = ysurr[:, qoi_ind]
-#         yt = yt[:, qoi_ind]
-#         with np.errstate(divide='ignore', invalid='ignore'):
-#             rel_l2_err = np.sqrt(np.mean((yt - ysurr) ** 2, axis=0)) / np.sqrt(np.mean(yt ** 2, axis=0))
-#             rel_l2_err = np.nan_to_num(rel_l2_err, posinf=np.nan, neginf=np.nan, nan=np.nan)
-#         num_cands = 0
-#         for node, node_obj in self.graph.nodes.items():
-#             num_cands += len(node_obj['surrogate'].index_set) + len(node_obj['surrogate'].candidate_set)
-#
-#         # Get test stats for each QoI
-#         stats = np.zeros((2, yt.shape[-1]))
-#         self.logger.debug(f'{"QoI idx": >10} {"Iteration": >10} {"len(I_k)": >10} {"Relative L2": >15}')
-#         for i in range(yt.shape[-1]):
-#             stats[:, i] = np.array([num_cands, rel_l2_err[i]])
-#             self.logger.debug(f'{i: 10d} {self.refine_level: 10d} {num_cands: 10d} {rel_l2_err[i]: 15.5f}')
-#
-#         return stats
-#
-#     def refine(self, qoi_ind = None, num_refine: int = 100, update_bounds: bool = True,
-#                ppool: Parallel = None) -> tuple:
-#         """Find and refine the component surrogate with the largest error on system-level QoI.
-#
-#         :param qoi_ind: indices of system QoI to focus surrogate refinement on, use all QoI if not specified
-#         :param num_refine: number of samples of exogenous inputs to compute error indicators on
-#         :param update_bounds: whether to continuously update coupling variable bounds
-#         :param ppool: a `Parallel` instance from `joblib` to compute error indicators in parallel, None=sequential
-#         :returns refine_res: a tuple of `(error_indicator, component, node_star, alpha_star, beta_star, N, cost)`
-#                              indicating the chosen candidate index and incurred cost
-#         """
-#         self._print_title_str(f'Refining system surrogate: iteration {self.refine_level + 1}')
-#         set_loky_pickler('dill')    # Dill can serialize 'self' for parallel workers
-#         temp_exc = self.executor    # It can't serialize an executor though, so must save this temporarily
-#         self.set_executor(None)
-#         qoi_ind = self._get_qoi_ind(qoi_ind)
-#
-#         # Compute entire integrated-surrogate on a random test set for global system QoI error estimation
-#         x_exo = self.sample_inputs((num_refine,))
-#         y_curr = self(x_exo, training=True)
-#         y_min, y_max = None, None
-#         if update_bounds:
-#             y_min = np.min(y_curr, axis=0, keepdims=True)  # (1, ydim)
-#             y_max = np.max(y_curr, axis=0, keepdims=True)  # (1, ydim)
-#
-#         # Find the candidate surrogate with the largest error indicator
-#         error_max, error_indicator = -np.inf, -np.inf
-#         node_star, alpha_star, beta_star, l2_star, cost_star = None, None, None, -np.inf, 0
-#         for node, node_obj in self.graph.nodes.items():
-#             self.logger.info(f"Estimating error for component '{node}'...")
-#             candidates = node_obj['surrogate'].candidate_set.copy()
-#
-#             def compute_error(alpha, beta):
-#                 # Helper function for computing error indicators for a given candidate (alpha, beta)
-#                 index_set = node_obj['surrogate'].index_set.copy()
-#                 index_set.append((alpha, beta))
-#                 y_cand = self(x_exo, training=True, index_set={node: index_set})
-#                 ymin = np.min(y_cand, axis=0, keepdims=True)
-#                 ymax = np.max(y_cand, axis=0, keepdims=True)
-#                 error = y_cand[:, qoi_ind] - y_curr[:, qoi_ind]
-#                 rel_l2 = np.sqrt(np.nanmean(error ** 2, axis=0)) / np.sqrt(np.nanmean(y_cand[:, qoi_ind] ** 2, axis=0))
-#                 rel_l2 = np.nan_to_num(rel_l2, nan=np.nan, posinf=np.nan, neginf=np.nan)
-#                 delta_error = np.nanmax(rel_l2)  # Max relative L2 error over all system QoIs
-#                 delta_work = max(1, node_obj['surrogate'].get_cost(alpha, beta))  # Cpu time (s)
-#
-#                 return ymin, ymax, delta_error, delta_work
-#
-#             if len(candidates) > 0:
-#                 ret = ppool(delayed(compute_error)(alpha, beta) for alpha, beta in candidates) if ppool is not None \
-#                     else [compute_error(alpha, beta) for alpha, beta in candidates]
-#
-#                 for i, (ymin, ymax, d_error, d_work) in enumerate(ret):
-#                     if update_bounds:
-#                         y_min = np.min(np.concatenate((y_min, ymin), axis=0), axis=0, keepdims=True)
-#                         y_max = np.max(np.concatenate((y_max, ymax), axis=0), axis=0, keepdims=True)
-#                     alpha, beta = candidates[i]
-#                     error_indicator = d_error / d_work
-#                     self.logger.info(f"Candidate multi-index: {(alpha, beta)}. L2 error: {d_error}. Error indicator: "
-#                                      f"{error_indicator}.")
-#
-#                     if error_indicator > error_max:
-#                         error_max = error_indicator
-#                         node_star, alpha_star, beta_star, l2_star, cost_star = node, alpha, beta, d_error, d_work
-#             else:
-#                 self.logger.info(f"Component '{node}' has no available candidates left!")
-#
-#         # Update all coupling variable ranges
-#         if update_bounds:
-#             for i in range(y_curr.shape[-1]):
-#                 self._update_coupling_bds(i, (y_min[0, i], y_max[0, i]))
-#
-#         # Add the chosen multi-index to the chosen component
-#         self.set_executor(temp_exc)
-#         if node_star is not None:
-#             self.logger.info(f"Candidate multi-index {(alpha_star, beta_star)} chosen for component '{node_star}'")
-#             self.graph.nodes[node_star]['surrogate'].activate_index(alpha_star, beta_star)
-#             self.refine_level += 1
-#             num_evals = round(cost_star / self[node_star].get_sub_surrogate(alpha_star, beta_star).model_cost)
-#         else:
-#             self.logger.info(f"No candidates left for refinement, iteration: {self.refine_level}")
-#             num_evals = 0
-#
-#         return l2_star, node_star, alpha_star, beta_star, num_evals, cost_star
-#
+
 #     def _estimate_coupling_bds(self, num_est: int, anderson_mem: int = 10, fpi_tol: float = 1e-10,
 #                                max_fpi_iter: int = 100):
 #         """Estimate and set the coupling variable bounds.

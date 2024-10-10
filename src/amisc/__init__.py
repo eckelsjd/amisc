@@ -102,12 +102,13 @@ implementation of `BaseInterpolator`.
 """
 from abc import ABC as _ABC, abstractmethod as _abstractmethod
 from pathlib import Path as _Path
+from typing import Any as _Any
 
 import yaml as _yaml
 
-from amisc.system import System
-from amisc.component import Component
 from amisc.variable import Variable, VariableList
+from amisc.component import Component
+from amisc.system import System
 
 __version__ = "0.4.0"
 __all__ = ['System', 'Component', 'Variable', 'VariableList', 'FileLoader', 'YamlLoader']
@@ -118,14 +119,14 @@ class FileLoader(_ABC):
 
     @classmethod
     @_abstractmethod
-    def load(cls, file: str | _Path):
-        """Load an `amisc` object from a file."""
+    def load(cls, stream: str | _Path | _Any):
+        """Load an `amisc` object from a stream. If a file path is given, will attempt to open the file."""
         raise NotImplementedError
 
     @classmethod
     @_abstractmethod
-    def dump(cls, obj, file: str | _Path):
-        """Save an `amisc` object to a file."""
+    def dump(cls, obj, stream: str | _Path | _Any):
+        """Save an `amisc` object to a stream. If a file path is given, will attempt to write to the file."""
         raise NotImplementedError
 
 
@@ -153,11 +154,17 @@ class YamlLoader(FileLoader):
         return dumper
 
     @classmethod
-    def load(cls, file: str | _Path):
-        with open(_Path(file).with_suffix('.yml'), 'r', encoding='utf-8') as fd:
-            return _yaml.load(fd, Loader=cls._yaml_loader())
+    def load(cls, stream):
+        try:
+            with open(_Path(stream).with_suffix('.yml'), 'r', encoding='utf-8') as fd:
+                return _yaml.load(fd, Loader=cls._yaml_loader())
+        except:
+            return _yaml.load(stream, Loader=cls._yaml_loader())
 
     @classmethod
-    def dump(cls, obj, file: str | _Path):
-        with open(_Path(file).with_suffix('.yml'), 'w', encoding='utf-8') as fd:
-            _yaml.dump(obj, fd, Dumper=cls._yaml_dumper(), allow_unicode=True)
+    def dump(cls, obj, stream):
+        try:
+            with open(_Path(stream).with_suffix('.yml'), 'w', encoding='utf-8') as fd:
+                return _yaml.dump(obj, fd, Dumper=cls._yaml_dumper(), allow_unicode=True, sort_keys=False)
+        except:
+            return _yaml.dump(obj, stream, Dumper=cls._yaml_dumper(), allow_unicode=True, sort_keys=False)

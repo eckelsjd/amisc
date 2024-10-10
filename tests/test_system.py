@@ -13,8 +13,6 @@ from amisc import Variable, Component, System
 from amisc.utils import relative_error
 
 
-# TODO: Include a swap and insert component test
-
 def test_fire_sat(tmp_path, plots=False):
     """Test the fire satellite coupled system from Chaudhuri (2018)"""
     N = 100
@@ -66,25 +64,23 @@ def test_fire_sat(tmp_path, plots=False):
 
 def test_system_refine(plots=False):
     """Test iterative refinement for Figure 5 in Jakeman 2022"""
-    def coupled_system():
-        def f1(x):
-            return {'y': x * np.sin(np.pi * x)}
-        def f2(x):
-            return {'y': 1 / (1 + 25 * x ** 2)}
-        return f1, f2
+    def f1(x):
+        y1 = x * np.sin(np.pi * x)
+        return y1
 
-    f1, f2 = coupled_system()
-    exo_vars = [Variable(dist='U(0, 1)')]
-    coupling_vars = [Variable(dist='U(0, 1)'), Variable(dist='U(0, 1)')]
-    comp1 = ComponentSpec(f1, name='Model1', exo_in=0, coupling_out=0)
-    comp2 = ComponentSpec(f2, name='Model2', coupling_in=0, coupling_out=1)
-    surr = SystemSurrogate([comp1, comp2], exo_vars, coupling_vars, init_surr=True)
+    def f2(y1):
+        y2 = 1 / (1 + 25 * y1 ** 2)
+        return y2
+
+    surr = System(f1, f2)
+    for var in surr.variables():
+        var.domain = (0, 1)
 
     Niter = 4
-    x = np.linspace(0, 1, 100).reshape((100, 1))
-    y1 = f1(x)['y']
-    y2 = f2(x)['y']
-    y3 = f2(y1)['y']
+    x = np.linspace(0, 1, 100)
+    y1 = f1(x)
+    y2 = f2(x)
+    y3 = f2(y1)
     fig, ax = plt.subplots(Niter, 3, sharex='col', sharey='row')
     for i in range(Niter):
         # Plot actual function values
@@ -93,8 +89,8 @@ def test_system_refine(plots=False):
         ax[i, 2].plot(x, y3, '-r', label='$f(x)$')
 
         # Plot first component surrogates
-        comp = surr.get_component('Model1')
-        ax[i, 0].plot(x, comp(x, training=True), '--k', label='$f_1$ current')
+        comp = surr.get_component('f1')
+        ax[i, 0].plot(x, comp.predict({'x': x}, training=True)['y1'], '--k', label='$f_1$ current')
         beta_max = 0
         for alpha, beta in comp.index_set:
             if beta[0] > beta_max:
@@ -303,41 +299,3 @@ def test_fpi():
     y_true = np.delete(y_true, nan_idx + bad_idx, axis=0)
     l2_error = relative_error(y_surr, y_true)
     assert np.max(l2_error) < tol
-
-
-def test_lls():
-    """Test constrained linear least squares routine against scipy lapack."""
-    X = 100
-    Y = 100
-    M = 10
-    N = 10
-    P = 1
-    tol = 1e-8
-
-    A = np.random.rand(X, Y, M, N)
-    b = np.random.rand(X, Y, M, 1)
-    C = np.random.rand(X, Y, P, N)
-    d = np.random.rand(X, Y, P, 1)
-
-    # custom solver
-    t1 = time.time()
-    alpha = np.squeeze(System._constrained_lls(A, b, C, d), axis=-1)  # (*, N)
-    t2 = time.time()
-
-    # Built in scipy solver
-    alpha2 = np.zeros((X, Y, N))
-    t3 = time.time()
-    for i in range(X):
-        for j in range(Y):
-            Ai = A[i, j, ...]
-            bi = b[i, j, ...]
-            Ci = C[i, j, ...]
-            di = d[i, j, ...]
-            ret = lapack.dgglse(Ai, Ci, bi, di)
-            alpha2[i, j, :] = ret[3]
-    t4 = time.time()
-
-    # Results
-    diff = alpha - alpha2
-    assert np.max(np.abs(diff)) < tol
-    print(f'Custom CLLS time: {t2-t1} s. Scipy time: {t4-t3} s.')

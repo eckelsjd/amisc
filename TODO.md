@@ -5,5 +5,8 @@
 Places where scalar input assumption is made:
 - Variable - dist, transform, nominal, domain, serialize
 
+- simulate training
+- retroactively add outputs (load training data from saved files)
 
-- component.predict(use_model, output_path, index_Set)
+- write test case to make sure all the different Component() inits work (call/ret unpacked/packed)
+- make sure thread pool works/is efficient on refine and finish system.refine()

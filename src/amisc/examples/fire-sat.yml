@@ -1,40 +1,60 @@
-exo:
-  !Variable
-  - name: H
-    dist: N(18e6, 1e6)
-  - name: Φ
-    dist: N(235e3, 10e3)
-  - name: Po
-    dist: N(1000, 50)
-  - name: Fs
-    dist: N(1400, 20)
-  - name: Lsp
-    dist: N(2, 0.4)
-  - name: q
-    dist: N(0.5, 0.1)
-  - name: La
-    dist: N(2, 0.4)
-  - name: Cd
-    dist: N(1, 0.2)
-coupling:
-  !Variable
-  - name: Vsat
-    dist: U(2000, 6000)
-  - name: To
-    dist: U(20000, 60000)
-  - name: Te
-    dist: U(1000, 5000)
-  - name: Slew
-    dist: U(0, 4)
-  - name: Imin
-    dist: U(0, 12000)
-  - name: Imax
-    dist: U(0, 12000)
-  - name: Ptot
-    dist: U(0, 10000)
-  - name: Asa
-    dist: U(0, 50)
-  - name: Pat
-    dist: U(0, 100)
-  - name: tau_tot
-    dist: U(0, 5)
+!System
+name: FireSat
+components: !Component
+  - name: 'Orbit'
+    model: !!python/name:amisc.examples.models.orbit_fun
+    inputs: !VariableList
+      - name: H
+        dist: N(18e6, 1e6)
+      - name: Φ
+        dist: N(235e3, 10e3)
+    outputs: !VariableList
+      - name: Vsat
+        dist: U(2000, 6000)
+      - name: To
+        dist: U(20000, 60000)
+      - name: Te
+        dist: U(1000, 5000)
+      - name: Slew
+        dist: U(0, 4)
+  - name: 'Power'
+    model: !!python/name:amisc.examples.models.power_fun
+    inputs: !VariableList
+      - name: Po
+        dist: N(1000, 50)
+      - name: Fs
+        dist: N(1400, 20)
+      - name: To
+      - name: Te
+      - name: Pat
+        dist: U(0, 100)
+    outputs: !VariableList
+      - name: Imin
+        dist: U(0, 12000)
+      - name: Imax
+        dist: U(0, 12000)
+      - name: Ptot
+        dist: U(0, 10000)
+      - name: Asa
+        dist: U(0, 50)
+  - name: 'Attitude'
+    model: !!python/name:amisc.examples.models.attitude_fun
+    inputs: !VariableList
+      - name: H
+      - name: Fs
+      - name: Lsp
+        dist: N(2, 0.4)
+      - name: q
+        dist: N(0.5, 0.1)
+      - name: La
+        dist: N(2, 0.4)
+      - name: Cd
+        dist: N(1, 0.2)
+      - name: Vsat
+      - name: Slew
+      - name: Imin
+      - name: Imax
+    outputs: !VariableList
+      - name: Pat
+      - name: tau_tot
+        dist: U(0, 5)

@@ -2,6 +2,7 @@
 
 Includes:
 
+- `constrained_lls` — solve a constrained linear least squares problem
 - `search_for_file` — search for a file in the current working directory and additional search paths
 - `format_inputs` — broadcast and reshape all inputs to the same shape
 - `format_outputs` — reshape all outputs to a common loop shape
@@ -21,9 +22,83 @@ import numpy as np
 import yaml
 
 __all__ = ['as_tuple', 'parse_function_string', 'relative_error', 'get_logger', 'format_inputs', 'format_outputs',
-           'search_for_file']
+           'search_for_file', 'constrained_lls']
 
-LOG_FORMATTER = logging.Formatter(u"%(asctime)s — [%(levelname)s] — %(name)-25s — %(message)s")
+from amisc.typing import Dataset
+
+LOG_FORMATTER = logging.Formatter(u"%(asctime)s — [%(levelname)s] — %(name)-20s — %(message)s")
+
+
+def constrained_lls(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray) -> np.ndarray:
+    """Minimize $||Ax-b||_2$, subject to $Cx=d$, i.e. constrained linear least squares.
+
+    !!! Note
+        See http://www.seas.ucla.edu/~vandenbe/133A/lectures/cls.pdf for more detail.
+
+    :param A: `(..., M, N)`, vandermonde matrix
+    :param b: `(..., M, 1)`, data
+    :param C: `(..., P, N)`, constraint operator
+    :param d: `(..., P, 1)`, constraint condition
+    :returns: `(..., N, 1)`, the solution parameter vector `x`
+    """
+    M = A.shape[-2]
+    dims = len(A.shape[:-2])
+    T_axes = tuple(np.arange(0, dims)) + (-1, -2)
+    Q, R = np.linalg.qr(np.concatenate((A, C), axis=-2))
+    Q1 = Q[..., :M, :]
+    Q2 = Q[..., M:, :]
+    Q1_T = np.transpose(Q1, axes=T_axes)
+    Q2_T = np.transpose(Q2, axes=T_axes)
+    Qtilde, Rtilde = np.linalg.qr(Q2_T)
+    Qtilde_T = np.transpose(Qtilde, axes=T_axes)
+    Rtilde_T_inv = np.linalg.pinv(np.transpose(Rtilde, axes=T_axes))
+    w = np.linalg.pinv(Rtilde) @ (Qtilde_T @ Q1_T @ b - Rtilde_T_inv @ d)
+
+    return np.linalg.pinv(R) @ (Q1_T @ b - Q2_T @ w)
+
+
+def _inspect_function(func):
+    """Try to inspect the inputs and outputs of a callable function.
+
+    !!! Example
+        ```python
+        def my_func(a, b, c, **kwargs):
+            # Do something
+            return y1, y2
+
+        _inspect_function(my_func)
+        # Returns (['a', 'b', 'c'], ['y1', 'y2'])
+        ```
+
+    :param func: The callable function to inspect.
+    :returns: A tuple of the positional arguments and return values of the function.
+    """
+    try:
+        sig = inspect.signature(func)
+        pos_args = [param.name for param in sig.parameters.values() if param.default == param.empty
+                    and param.kind in (param.POSITIONAL_OR_KEYWORD, param.POSITIONAL_ONLY)]
+        source = inspect.getsource(func).strip()
+        tree = ast.parse(source)
+
+        # Find the return values
+        class ReturnVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.return_values = []
+
+            def visit_Return(self, node):
+                if isinstance(node.value, ast.Tuple):
+                    self.return_values = [elt.id for elt in node.value.elts]
+                elif isinstance(node.value, ast.Name):
+                    self.return_values = [node.value.id]
+                else:
+                    self.return_values = []
+
+        return_visitor = ReturnVisitor()
+        return_visitor.visit(tree)
+
+        return pos_args, return_visitor.return_values
+    except:
+        return [], []
 
 
 def _inspect_assignment(class_name: str, stack_idx: int = 2) -> str | None:
@@ -54,12 +129,6 @@ def _inspect_assignment(class_name: str, stack_idx: int = 2) -> str | None:
         stack = inspect.stack()
         frame_info = stack[stack_idx]
         code_line = frame_info.code_context[frame_info.index].strip()
-        # current_frame = inspect.currentframe()
-        # caller_frame = current_frame.f_back
-        # code_obj = caller_frame.f_code
-        # line_number = caller_frame.f_lineno
-        # function_source, first_line = inspect.getsourcelines(code_obj)
-        # code_line = function_source[line_number - first_line].strip()
         parsed_code = ast.parse(code_line)
         if isinstance(parsed_code.body[0], ast.Assign):
             assignment = parsed_code.body[0]
@@ -121,7 +190,7 @@ def search_for_file(filename: str | Path, search_paths=None):
     return filename
 
 
-def format_inputs(inputs: dict, var_shape: dict = None) -> tuple[dict, tuple[int, ...]]:
+def format_inputs(inputs: Dataset, var_shape: dict = None) -> tuple[Dataset, tuple[int, ...]]:
     """Broadcast and reshape all inputs to the same shape. Loop shape is inferred from broadcasting the leading dims
     of all input arrays. Input arrays are broadcast to this shape and then flattened.
 
@@ -190,7 +259,7 @@ def format_inputs(inputs: dict, var_shape: dict = None) -> tuple[dict, tuple[int
     return ret_inputs, loop_shape
 
 
-def format_outputs(outputs: dict, loop_shape: tuple[int, ...]) -> dict:
+def format_outputs(outputs: Dataset, loop_shape: tuple[int, ...]) -> Dataset:
     """Reshape all outputs to the common loop shape. Loop shape is as obtained from a call to `format_inputs`.
     Assumes that all outputs are the same along the first dimension. This first dimension gets reshaped back into
     the `loop_shape`. Singleton outputs are squeezed along the last dimension. A singleton loop shape is squeezed
@@ -325,7 +394,9 @@ def parse_function_string(call_string: str) -> tuple[str, list, dict]:
 
 
 def relative_error(pred, targ, axis=None):
-    return np.sqrt(np.sum((pred - targ)**2, axis=axis) / np.sum(targ**2, axis=axis))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        err = np.sqrt(np.sum((pred - targ)**2, axis=axis) / np.sum(targ**2, axis=axis))
+    return np.nan_to_num(err, nan=np.nan, posinf=np.nan, neginf=np.nan)
 
 
 def get_logger(name: str, stdout=True, log_file: str | Path = None) -> logging.Logger:

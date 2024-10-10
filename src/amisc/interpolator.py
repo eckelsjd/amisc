@@ -1,22 +1,84 @@
-"""Provides interpolator classes. Interpolators manage training data and specify how to refine/gather more data.
+"""Provides interpolator classes. Interpolators approximate the input &rarr; output mapping of a model given
+a set of training data. The training data consists of input-output pairs, and the interpolator can be
+refined with new training data.
 
 Includes:
 
 - `BaseInterpolator`: Abstract class providing basic structure of an interpolator
 - `LagrangeInterpolator`: Concrete implementation for tensor-product barycentric Lagrange interpolation
 """
+from __future__ import annotations
+
 import copy
 import itertools
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.optimize import direct
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MaxAbsScaler
+from numpy.typing import ArrayLike
 
+from amisc.serialize import Serializable, Base64Serializable, StringSerializable
 from amisc.utils import get_logger
-from amisc.variable import Variable
+from amisc.variable import Variable, VariableList
+
+__all__ = ["InterpolatorState", "LagrangeState", "Interpolator", "Lagrange"]
+
+
+class InterpolatorState(Serializable, ABC):
+    """Interface for a dataclass that stores the internal state of an interpolator (e.g. weights and biases)."""
+    pass
+
+
+@dataclass
+class LagrangeState(InterpolatorState, Base64Serializable):
+    """The internal state for a barycentric Lagrange polynomial interpolator."""
+    betas: set[tuple] = field(default_factory=set)
+    weights: dict[str, ArrayLike] = field(default_factory=dict)
+    x_grids: dict[str, ArrayLike] = field(default_factory=dict)
+
+    def __eq__(self, other):
+        if isinstance(other, LagrangeState):
+            try:
+                return all([np.allclose(self.weights[i], other.weights[i]) for i in range(len(self.weights))]) and \
+                    all([np.allclose(self.x_grids[i], other.x_grids[i]) for i in range(len(self.x_grids))])
+            except IndexError:
+                return False
+        else:
+            return False
+
+
+class Interpolator(Serializable, ABC):
+    """Interface for an interpolator object that approximates a model."""
+
+    @abstractmethod
+    def refine(self, beta: tuple, training_data: tuple[dict, dict],
+               old_state: InterpolatorState, x_vars: VariableList) -> InterpolatorState:
+        """Refine the interpolator state with new training data."""
+        raise NotImplementedError
+
+    @classmethod
+    def from_dict(cls, config: dict) -> Interpolator:
+        """Create an `Interpolator` object from a `dict` configuration."""
+        method = config.pop('method', 'lagrange').lower()
+        match method:
+            case 'lagrange':
+                return Lagrange(**config)
+            case other:
+                raise NotImplementedError(f"Unknown interpolator method: {method}")
+
+
+@dataclass
+class Lagrange(Interpolator, StringSerializable):
+    """Implementation of a tensor-product barycentric Lagrange polynomial interpolator."""
+    interval_capacity: int = 4
+
+    def refine(self, beta: tuple, training_data: tuple[dict, dict],
+               old_state: InterpolatorState, x_vars: VariableList) -> LagrangeState:
+        """Refine the interpolator state with new training data."""
+        pass
 
 
 class BaseInterpolator(ABC):
@@ -661,39 +723,3 @@ class LagrangeInterpolator(BaseInterpolator):
                         hess[..., m, n] += d2LJ_dx2 * yi[i, :]
 
         return np.atleast_1d(np.squeeze(hess)) if shape_1d else hess
-
-    @staticmethod
-    def get_grid_sizes(beta: tuple, k: int = 2) -> list[int]:
-        """Compute number of grid points in each input dimension.
-
-        :param beta: refinement level indices
-        :param k: level-to-grid-size multiplier (probably just always `k=2`)
-        :returns: list of grid sizes in each dimension
-        """
-        return [k*beta[i] + 1 for i in range(len(beta))]
-
-    @staticmethod
-    def leja_1d(N: int, z_bds: tuple, z_pts: np.ndarray = None, wt_fcn: callable = None) -> np.ndarray:
-        """Find the next `N` points in the Leja sequence of `z_pts`.
-
-        :param N: number of new points to add to the sequence
-        :param z_bds: bounds on the 1d domain
-        :param z_pts: current univariate Leja sequence `(Nz,)`, start at middle of `z_bds` if `None`
-        :param wt_fcn: weighting function, uses a constant weight if `None`, callable as `wt_fcn(z)`
-        :returns: the Leja sequence `z_pts` augmented by `N` new points
-        """
-        # if wt_fcn is None:
-        wt_fcn = lambda z: 1  # UPDATE: ignore RV weighting, unbounded pdfs like Gaussian cause problems
-        if z_pts is None:
-            z_pts = (z_bds[1] + z_bds[0]) / 2
-            N = N - 1
-        z_pts = np.atleast_1d(z_pts).astype(np.float32)
-
-        # Construct Leja sequence by maximizing the Leja objective sequentially
-        for i in range(N):
-            obj_fun = lambda z: -wt_fcn(np.array(z).astype(np.float32)) * np.prod(np.abs(z - z_pts))
-            res = direct(obj_fun, [z_bds])  # Use global DIRECT optimization over 1d domain
-            z_star = res.x
-            z_pts = np.concatenate((z_pts, z_star))
-
-        return z_pts

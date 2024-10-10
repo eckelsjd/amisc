@@ -9,38 +9,14 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from amisc import YamlLoader
-from amisc.component import (
-    Component,
-    IndexSet,
-    Interpolator,
-    InterpolatorState,
-    LagrangeState,
-    MiscTree,
-    ModelArgs,
-    StringArgs,
-    ModelKwargs,
-    StringKwargs,
-    TrainingData,
-)
+from amisc.component import Component, IndexSet, MiscTree, ModelKwargs, StringKwargs
+from amisc.interpolator import LagrangeState, Interpolator, InterpolatorState
 from amisc.serialize import Base64Serializable, Serializable, StringSerializable
+from amisc.training import TrainingData
 from amisc.variable import Variable
 
 
-def test_model_args_kwargs():
-    # Test ModelArgs
-    cases = [(1, 2, 3), (1.1, -1.3e6, True), ('hello', '12', 'False', (2, 2)),
-             (None, [1, 2, 3], {'key': 'value'}), (3.14, 2.718, 1.618), (True, False, None)]
-    for case in cases:
-        args = ModelArgs(*case)
-        str_args = ModelArgs.from_dict({'method': 'string', 'args': case})
-        serialized_args = args.serialize()
-        str_serial = str_args.serialize()
-        deserialized_args = ModelArgs.deserialize(serialized_args)
-        str_deserialized = StringArgs.deserialize(str_serial)
-        assert deserialized_args.data == args.data
-        assert str_deserialized.data == args.data
-
-    # Test ModelKwargs
+def test_model_kwargs():
     cases = [{'a': 1, 'b': 2, 'c': 3}, {'a': 1.1, 'b': -1.3e6, 'c': True},
              {'hello': False, 'False': (2, 2), '1': '2'},
              {'x': None, 'y': [1, 2, 3], 'z': {'key': 'value'}},
@@ -98,12 +74,12 @@ def test_misctree():
     assert deserialized_tree == tree
 
 
-def simple_model(x, alpha, error=0.1, output_path='.'):
+def simple_model(x, alpha=(1,), error=0.1, output_path='.'):
     return alpha * error + x ** 2
 
 
 def test_component_validation(tmp_path):
-    # Test completely basic component init
+    # Test basic component init
     def my_model(x):
         return x
     inputs = [Variable() for i in range(3)]
@@ -111,8 +87,7 @@ def test_component_validation(tmp_path):
     comp = Component(my_model, inputs, outputs)
     assert len(comp.active_set) + len(comp.candidate_set) == 0
     assert comp.xdim + comp.ydim == len(inputs) + len(outputs)
-    for attribute in ['model_args', 'model_kwargs', 'misc_states', 'misc_costs', 'misc_coeff', 'interpolator',
-                      'training_data']:
+    for attribute in ['model_kwargs', 'misc_states', 'misc_costs', 'misc_coeff', 'interpolator', 'training_data']:
         assert isinstance(getattr(comp, attribute), Serializable)
 
     # Test partial validation
@@ -131,7 +106,7 @@ def test_component_validation(tmp_path):
             misc_costs[alpha][beta] = 1.0 if np.random.rand() < 0.5 else -1.0
             misc_states[alpha][beta] = LagrangeState(weights=[np.random.rand(3)], x_grids=[np.random.rand(3)])
 
-    c = Component(simple_model, variables[:5], outputs=variables[5:], model_args=(1,),
+    c = Component(simple_model, variables[:5], outputs=variables[5:],
                   model_kwargs={'error': 0.2}, max_alpha=(2,), max_beta=(3, 2),
                   active_set=active_set, misc_states=misc_states, misc_costs=misc_costs)
     serialize_kwargs = {'training_data': {'save_path': tmp_path / 'training_data.pkl'}}
@@ -140,19 +115,22 @@ def test_component_validation(tmp_path):
     assert c3 == c
 
 
-class CustomArgs(StringArgs):
-    def __init__(self, number, *args):
+class CustomKwargs(StringKwargs):
+    def __init__(self, number, **kwargs):
         self.number = number
-        super().__init__(*args)
+        super().__init__(**kwargs)
 
     def __str__(self):
-        return f'CustomArgs({", ".join([str(self.number)] + [f"{value}" for value in self.data])})'
+        return f'CustomKwargs({", ".join([str(self.number)] + [f"{key}={value}" for key, value in self.data.items()])})'
 
 
 @dataclass
 class CustomInterpolator(Interpolator, Base64Serializable):
     kernel_width: float = 0.1
     kernel_type: str = 'gaussian'
+
+    def refine(self, *args):
+        pass
 
 
 @dataclass
@@ -165,11 +143,20 @@ class CustomDataStorage(TrainingData, StringSerializable):
     length: int = 40
     width: int = 2
 
+    def get(self, *args):
+        pass
+
+    def set(self, *args):
+        pass
+
+    def refine(self, *args):
+        pass
+
 
 def test_custom_data_classes():
     # Test custom args/kwargs, states, interpolator, etc.
     c = Component(simple_model, Variable(), Variable(), interpolator=CustomInterpolator(),
-                  training_data=CustomDataStorage(), model_args=CustomArgs(100),
+                  training_data=CustomDataStorage(), model_kwargs=CustomKwargs(100, hello=2),
                   misc_states={(): {(): CustomInterpolatorState()}})
     c2 = c.serialize()
     c3 = Component.deserialize(c2)
@@ -192,7 +179,7 @@ def test_save_and_load(tmp_path):
             misc_costs[alpha][beta] = 1.0 if np.random.rand() < 0.5 else -1.0
             misc_states[alpha][beta] = LagrangeState(weights=[np.random.rand(5)], x_grids=[np.random.rand(5)])
     c = Component(simple_model, [Variable() for i in range(3)], [Variable() for i in range(3)],
-                  active_set=active_set, misc_costs=misc_costs, misc_states=misc_states, model_args=(1, 'hello', 3.14),
+                  active_set=active_set, misc_costs=misc_costs, misc_states=misc_states,
                   model_kwargs={'output_path': '.', 'opts': {'max_iter': 1000}}, max_alpha=(3,), status=1)
 
     savepath = tmp_path / 'component.yml'
@@ -206,7 +193,7 @@ class Extra:
     x1: float
 
 
-def special_model(x, name, frac, alpha=(1,), output_path='.', output_vars=None):
+def special_model(x, name='hello', frac=0.2, alpha=(1,), output_path='.', output_vars=None):
     t1 = time.time()
     ret_dict = {'y1': x['x1'] + x['x2'], 'y2': x['x2'] * x['x3']}
     if np.random.rand() < frac:
@@ -273,7 +260,7 @@ def test_model_wrapper(tmp_path):
 
     # Extra features (alpha, output_path, vars, exceptions, etc.)
     with ProcessPoolExecutor(max_workers=4) as executor:
-        comp = Component(special_model, inputs, outputs, max_alpha=(2,), model_args=('hello', 0.2), executor=executor)
+        comp = Component(special_model, inputs, outputs, max_alpha=(2,), executor=executor)
         shape = (5, 2, 2)
         case = {'x1': np.random.rand(*shape), 'x2': np.random.rand(*shape), 'x3': np.random.rand(*shape)}
         ret = comp.call_model(case, alpha='best', output_path=tmp_path)
