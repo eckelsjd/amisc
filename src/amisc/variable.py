@@ -28,8 +28,8 @@ from amisc.compression import Compression
 from amisc.distribution import Distribution, Normal
 from amisc.serialize import Serializable
 from amisc.transform import Transform, Minmax, Zscore
-from amisc.utils import as_tuple, search_for_file, _get_yaml_path, _inspect_assignment
-from amisc.typing import CompressionData
+from amisc.utils import search_for_file, _get_yaml_path, _inspect_assignment
+from amisc.typing import CompressionData, MultiIndex
 
 __all__ = ['Variable', 'VariableList']
 _Transformation = Union[str, Transform, list[str | Transform]]  # something that can be converted to a Transform
@@ -94,7 +94,7 @@ class Variable(BaseModel, Serializable):
     shape: Optional[str | tuple[int, ...]] = None
     compression: Optional[str | dict | Compression] = None
     dist: Optional[str | Distribution] = None
-    domain: Optional[str | tuple[float, float]] = None
+    domain: Optional[str | tuple[float, float] | list] = None
     norm: Optional[_Transformation] = None
 
     def __init__(self, /, name=None, **kwargs):
@@ -120,7 +120,7 @@ class Variable(BaseModel, Serializable):
     def _validate_shape(cls, shape) -> tuple[int, ...]:
         if shape is None:
             return ()
-        return as_tuple(shape)
+        return tuple(MultiIndex(shape))
 
     @field_validator('compression')
     @classmethod
@@ -150,17 +150,28 @@ class Variable(BaseModel, Serializable):
 
     @field_validator('domain')
     @classmethod
-    def _validate_domain(cls, domain: tuple | str, info: ValidationInfo) -> tuple | None:
-        """Try to extract the domain from the distribution if not provided, or convert from a string."""
+    def _validate_domain(cls, domain: list | tuple | str, info: ValidationInfo) -> tuple | list | None:
+        """Try to extract the domain from the distribution if not provided, or convert from a string.
+        Returns a list of domains for each latent dimension if this is a field quantity with compression.
+        """
         if domain is None:
             if dist := info.data['dist']:
                 domain = dist.domain()
         elif isinstance(domain, str):
             domain = tuple(ast.literal_eval(domain.strip()))
+        elif isinstance(domain, list):
+            domain = [tuple(ast.literal_eval(d.strip())) if isinstance(d, str) else d for d in domain]
+
         if domain is None:
             return domain
-        assert isinstance(domain, tuple) and len(domain) == 2
-        assert domain[1] > domain[0], 'Domain must be specified as (lower_bound, upper_bound)'
+
+        if isinstance(domain, list):
+            for d in domain:
+                assert isinstance(d, tuple) and len(d) == 2
+                assert d[1] > d[0], 'Domain must be specified as (lower_bound, upper_bound)'
+        else:
+            assert isinstance(domain, tuple) and len(domain) == 2
+            assert domain[1] > domain[0], 'Domain must be specified as (lower_bound, upper_bound)'
 
         return domain
 
@@ -235,9 +246,10 @@ class Variable(BaseModel, Serializable):
         s = (self.tex if symbol else self.description) or self.name
         return r'{} [{}]'.format(s, self.units) if units else r'{}'.format(s)
 
-    def get_nominal(self, transform: bool = False) -> float | None:
+    def get_nominal(self, transform: bool = False) -> float | list | None:
         """Return the nominal value of the variable. Defaults to the mean for a normal distribution or the
-        center of the domain if `var.nominal` is not specified.
+        center of the domain if `var.nominal` is not specified. Returns a list of nominal values for each latent
+        dimension if this is a field quantity with compression.
 
         :param transform: return the nominal value in transformed space using `Variable.norm`
         """
@@ -247,45 +259,73 @@ class Variable(BaseModel, Serializable):
                 dist_args = self.normalize(dist.dist_args) if transform else dist.dist_args
                 nominal = dist.nominal(dist_args=dist_args)
             elif domain := self.get_domain(transform=transform):
-                nominal = (domain[0] + domain[1]) / 2
+                nominal = [np.mean(d) for d in domain] if isinstance(domain, list) else np.mean(domain)
 
         return nominal
 
-    def get_domain(self, transform: bool = False) -> tuple | None:
-        """Return a tuple of the defined domain of this variable.
+    def get_domain(self, transform: bool = False) -> tuple | list | None:
+        """Return a tuple of the defined domain of this variable. Returns a list of domains for each latent dimension
+        if this is a field quantity with compression.
 
-        :param transform: return the domain of the transformed space instead
+        :param transform: return the domain of the transformed space instead; note that latent coefficients are not
+                          transformed
         """
         if self.domain is None:
             return None
-        return tuple(self.normalize(self.domain)) if transform else self.domain
+        elif isinstance(self.domain, list):
+            return self.domain
+        elif self.compression is not None:
+            # Try to infer a list of domains from compression latent size
+            try:
+                return [self.domain] * self.compression.latent_size()
+            except Exception as e:
+                raise ValueError(f'Variables with `compression` data should return a list of domains, one '
+                                 f'for each latent coefficient. Could not infer domain for "{self.name}".') from e
+        else:
+            return tuple(self.normalize(self.domain)) if transform else self.domain
 
     def sample_domain(self, shape: tuple | int, transform: bool = False) -> np.ndarray:
-        """Return an array of the given `shape` for random samples over the domain of this variable.
+        """Return an array of the given `shape` for random samples over the domain of this variable. Returns
+        samples for each latent dimension if this is a field quantity with compression.
 
-        :param shape: the shape of samples to return
-        :param transform: whether to sample in the transformed space instead
+        :param shape: the shape of samples to return; note that the last dim of the returned samples will be the
+                      latent space size for field quantities
+        :param transform: whether to sample in the transformed space instead (ignored for field quantities)
         :returns: the random samples over the domain of the variable
         """
         if isinstance(shape, int):
             shape = (shape, )
         if domain := self.get_domain(transform=transform):
-            return np.random.rand(*shape) * (domain[1] - domain[0]) + domain[0]
+            if isinstance(domain, list):
+                lb = np.atleast_1d([d[0] for d in domain])
+                ub = np.atleast_1d([d[1] for d in domain])
+                return np.random.rand(*shape, 1) * (ub - lb) + lb
+            else:
+                return np.random.rand(*shape) * (domain[1] - domain[0]) + domain[0]
         else:
             raise RuntimeError(f'Variable "{self.name}" does not have a domain specified.')
 
-    def update_domain(self, domain: tuple[float, float], transform: bool = False):
-        """Update the domain of this variable.
+    def update_domain(self, domain: tuple[float, float] | list[tuple], transform: bool = False):
+        """Update the domain of this variable. Will attempt to update the domain of each latent dimension if this is
+        a field quantity with compression.
 
         :param domain: the new domain to set
         :param transform: whether to update the domain in the transformed space instead
         """
+        def _update_domain(domain, curr_domain, transform):
+            lb, ub = domain
+            lb = min(lb, curr_domain[0]) if curr_domain is not None else lb
+            ub = max(ub, curr_domain[1]) if curr_domain is not None else ub
+            return self.denormalize((lb, ub)) if transform else (lb, ub)
+
         curr_domain = self.get_domain(transform=transform)
-        curr_lb, curr_ub = curr_domain if curr_domain is not None else (None, None)
-        lb, ub = domain
-        lb = min(lb, curr_lb) if curr_lb is not None else lb
-        ub = max(ub, curr_ub) if curr_ub is not None else ub
-        self.domain = self.denormalize((lb, ub)) if transform else (lb, ub)
+        if isinstance(curr_domain, list):
+            if not isinstance(domain, list):
+                domain = [domain] * len(curr_domain)
+            for i, d in enumerate(domain):
+                self.domain[i] = _update_domain(d, curr_domain[i], False)
+        else:
+            self.domain = _update_domain(domain, curr_domain, transform)
 
     def pdf(self, x: np.ndarray, transform: bool = False) -> np.ndarray:
         """Compute the PDF of the Variable at the given `x` locations.
@@ -326,7 +366,9 @@ class Variable(BaseModel, Serializable):
         """
         if isinstance(shape, int):
             shape = (shape, )
-        nominal = (self.normalize(nominal) if transform else nominal) or self.get_nominal(transform=transform)
+        nominal = self.normalize(nominal) if transform else nominal
+        if nominal is None:
+            nominal = self.get_nominal(transform=transform)
 
         if dist := self.dist:
             dist_args = self.normalize(dist.dist_args) if transform else dist.dist_args
@@ -335,6 +377,8 @@ class Variable(BaseModel, Serializable):
             # Variable's with no distribution
             if nominal is None:
                 raise ValueError(f'Cannot sample "{self.name}" with no dist or nominal value specified.')
+            elif isinstance(nominal, list | np.ndarray):
+                return np.ones(shape + (len(nominal),)) * np.atleast_1d(nominal)  # For field quantities
             else:
                 return np.ones(shape) * nominal
 
@@ -368,7 +412,10 @@ class Variable(BaseModel, Serializable):
 
             return transform.transform(values, inverse=inverse, transform_args=transform_args)
 
-        domain, dist_args = self.get_domain() or [], self.dist.dist_args if normal_dist else []
+        domain = self.get_domain() or ()
+        dist_args = self.dist.dist_args if normal_dist else []
+        if isinstance(domain, list):
+            domain = ()  # For field quantities, domain is not used in normalization
 
         if denorm:
             # First, send domain and dist_args through the forward norm list (up until the last norm)
@@ -390,19 +437,20 @@ class Variable(BaseModel, Serializable):
                 domain, dist_args = tuple(hyperparams[:2]), tuple(hyperparams[2:])
                 values = _normalize_single(values, transform, denorm, domain, dist_args)
                 hyperparams = _normalize_single(hyperparams, transform, denorm, domain, dist_args)
+
         return values
 
     def denormalize(self, values):
         """Alias for `normalize(denorm=True)`"""
         return self.normalize(values, denorm=True)
 
-    def compress(self, values: CompressionData, coord: np.ndarray = None,
+    def compress(self, values: CompressionData, coords: np.ndarray = None,
                  reconstruct: bool = False) -> CompressionData:
         """Compress or reconstruct field quantity values using this Variable's compression info.
 
         !!! Note "Specifying compression values"
             If only one field quantity is associated with this variable, then `len(field[quantities])=1`. In this case,
-            specify `values` as `dict(coord=..., name=...)` for this Variable's `name`. If `coord` is not specified,
+            specify `values` as `dict(coords=..., name=...)` for this Variable's `name`. If `coords` is not specified,
             then this assumes the locations are the same as the reconstruction data (and skips interpolation).
 
         !!! Info "Compression workflow"
@@ -410,26 +458,27 @@ class Variable(BaseModel, Serializable):
             "latent" space. The interpolation step is required to make sure `values` align with the coordinates used
             when building the compression map in the first place (such as through SVD).
 
-        :param values: a `dict` with a key for each field qty of shape `(..., qty.shape)` and a `coord` key of shape
+        :param values: a `dict` with a key for each field qty of shape `(..., qty.shape)` and a `coords` key of shape
                       `(qty.shape, dim)` that gives the coordinates of each point. Only a single `latent` key should
                       be given instead if `reconstruct=True`.
-        :param coord: the coordinates of each point in `values` if `values` did not contain a `coord` key;
+        :param coords: the coordinates of each point in `values` if `values` did not contain a `coords` key;
                        defaults to the compression grid coordinates
         :param reconstruct: whether to reconstruct values instead of compress
         :returns: the compressed values with key `latent` and shape `(..., latent_size)`; if `reconstruct=True`,
                   then the reconstructed values with shape `(..., qty.shape)` for each `qty` key are returned.
-                  The return `dict` also has a `coord` key with shape `(qty.shape, dim)`.
+                  The return `dict` also has a `coords` key with shape `(qty.shape, dim)`.
         """
         if not self.compression:
-            raise ValueError(f'Compression is not supported for the non-field variable "{self.name}".')
+            raise ValueError(f'Compression is not supported for variable "{self.name}". Please specify a compression'
+                             f' method for this variable.')
         if not self.compression.map_exists:
             raise ValueError(f'Compression map not computed yet for "{self.name}".')
 
         # Default field coordinates to the compression coordinates if they are not provided
-        field_coords = values.pop('coord', coord)
+        field_coords = values.pop('coords', coords)
         if field_coords is None:
             field_coords = self.compression.coords
-        ret_dict = {'coord': field_coords}
+        ret_dict = {'coords': field_coords}
 
         # For reconstruction: decompress -> denormalize -> interpolate
         if reconstruct:
@@ -451,9 +500,9 @@ class Variable(BaseModel, Serializable):
 
         return ret_dict
 
-    def reconstruct(self, values, coord=None):
+    def reconstruct(self, values, coords=None):
         """Alias for `compress(reconstruct=True)`"""
-        return self.compress(values, coord=coord, reconstruct=True)
+        return self.compress(values, coords=coords, reconstruct=True)
 
     def serialize(self, save_path: str | Path = '.') -> dict:
         """Convert a `Variable` to a `dict` with only standard Python types
@@ -462,7 +511,9 @@ class Variable(BaseModel, Serializable):
         d = {}
         for key, value in self.__dict__.items():
             if value is not None and not key.startswith('_'):
-                if key in ['domain', 'shape']:
+                if key == 'domain':
+                    d[key] = [str(v) for v in value] if isinstance(value, list) else str(value)
+                elif key == 'shape':
                     if len(value) > 0:
                         d[key] = str(value)
                 elif key == 'dist':

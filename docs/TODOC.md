@@ -14,6 +14,15 @@ with the custom methods.
 - tutorial notebooks
 - extra model args only specified/saved as model_kwargs, can use Component(model_kwargs={}) or Component(**kwargs)
 - All model args are inputs. Must pass outputs=[]
+- dict args to predict -- specify pass-through values for components
+- variable field quantity should have a list of domains for each latent coeff
+- TrainingData should account for model errors, np.nan imputation, beta initialization at (0,0,...), var normalization, and field qtys
+- usage of shape, list domain, and compression for field quantities
+- transforms do not apply to latent coeff
+- refining a field qty input should give a full tensor-product upgrade of its latent coeff (or round-robin)
+- model can return y_var_coords along with full fields y_var_XX aligning with var.compression.fields
+- model can request {var.name}_coords in kwargs and get them from call_model() during activate_index
+- can also request specific coords in model_kwargs, and those will be passed through call_model() after interpolation
 
 
 Serialization

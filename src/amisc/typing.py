@@ -8,6 +8,7 @@ Includes:
 - `TrainIteration` — the results of a single training iteration
 - `CompressionData` — a dictionary spec for passing data to/from `Variable.compress()`
 """
+import ast
 from pathlib import Path as _Path
 from typing import Optional as _Optional
 
@@ -19,8 +20,16 @@ from numpy.typing import ArrayLike as _ArrayLike
 
 __all__ = ["MultiIndex", "Dataset", "builtin", "TrainIteration", "CompressionData"]
 
-MultiIndex = str | tuple[int, ...]  # A multi-index is a tuple of integers or a similar string representation
 builtin = str | dict | list | int | float | tuple | bool  # Generic type for common built-in Python objects
+
+
+class MultiIndex(tuple):
+    """A multi-index is a tuple of integers, can be converted from a string."""
+    def __new__(cls, __tuple=()):
+        if isinstance(__tuple, str):
+            return super().__new__(cls, map(int, ast.literal_eval(__tuple)))
+        else:
+            return super().__new__(cls, map(int, __tuple))
 
 
 class Dataset(_TypedDict, total=False):
@@ -76,6 +85,6 @@ class CompressionData(_TypedDict, total=False):
                the `fields` list. Each qty in this list will be its own `key:value` pair in the
                `CompressionData` structure
     """
-    coord: _np.ndarray
+    coords: _np.ndarray
     latent: _np.ndarray
     qty: _np.ndarray

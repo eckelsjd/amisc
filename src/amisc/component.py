@@ -24,7 +24,7 @@ import tempfile
 import typing
 import warnings
 from abc import ABC
-from collections import UserDict, UserList, deque
+from collections import UserDict, deque
 from concurrent.futures import ALL_COMPLETED, Executor, wait
 from enum import IntFlag
 from pathlib import Path
@@ -43,7 +43,7 @@ from amisc.interpolator import InterpolatorState, Interpolator, Lagrange
 from amisc.serialize import YamlSerializable, PickleSerializable, Serializable, StringSerializable
 from amisc.training import TrainingData, SparseGrid
 from amisc.typing import MultiIndex, Dataset
-from amisc.utils import as_tuple, get_logger, format_inputs, format_outputs, search_for_file
+from amisc.utils import get_logger, format_inputs, format_outputs, search_for_file
 from amisc.utils import _get_yaml_path, _inspect_assignment, _inspect_function
 from amisc.variable import Variable, VariableList
 
@@ -91,107 +91,81 @@ class StringKwargs(StringSerializable, ModelKwargs):
         return f"ModelKwargs({kw_str})"
 
 
-class IndexSet(BaseModel, UserList, Serializable):
-    """Dataclass that maintains a list of multi-indices. Overrides basic `list` functionality to ensure
+class IndexSet(set, Serializable):
+    """Dataclass that maintains a list of multi-indices. Overrides basic `set` functionality to ensure
     elements are formatted correctly as `(alpha, beta)`.
 
     !!! Example "An example index set"
         $\\mathcal{I} = [(\\alpha, \\beta)_1 , (\\alpha, \\beta)_2, (\\alpha, \\beta)_3 , ...]$ would be specified
         as `I = [((0, 0), (0, 0, 0)) , ((0, 1), (0, 1, 0)), ...]`.
     """
-    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True)
-    data: list[str | tuple[MultiIndex, MultiIndex]]  # the underlying `list` data structure
-
-    def __init__(self, *args, data: list = None):
-        data_list = data or []
-        data_list.extend(args)
-        super().__init__(data=data_list)
+    def __init__(self, s=()):
+        s = [self._validate_element(ele) for ele in s]
+        super().__init__(s)
 
     def __str__(self):
-        return str(self.data)
+        return str(list(self))
 
     def __repr__(self):
-        return str(self)
+        return self.__str__()
 
-    def __eq__(self, other):
-        if isinstance(other, IndexSet):
-            for index1, index2 in zip(self.data, other.data):
-                if index1 != index2:
-                    return False
-            return True
-        else:
-            return False
+    def add(self, __element):
+        super().add(self._validate_element(__element))
+
+    def update(self, __elements):
+        super().update([self._validate_element(ele) for ele in __elements])
+
+    @classmethod
+    def _validate_element(cls, element):
+        """Validate that the element is a tuple of two multi-indices."""
+        alpha, beta = ast.literal_eval(element) if isinstance(element, str) else tuple(element)
+        return MultiIndex(alpha), MultiIndex(beta)
+
+    @classmethod
+    def _wrap_methods(cls, names):
+        """Make sure set operations return an `IndexSet` object."""
+        def wrap_method_closure(name):
+            def inner(self, *args):
+                result = getattr(super(cls, self), name)(*args)
+                if isinstance(result, set):
+                    result = cls(result)
+                return result
+            inner.fn_name = name
+            setattr(cls, name, inner)
+
+        for name in names:
+            wrap_method_closure(name)
 
     def serialize(self) -> list[str]:
         """Return a list of each multi-index in the set serialized to a string."""
-        return [str(ele) for ele in self.data]
+        return [str(ele) for ele in self]
 
     @classmethod
     def deserialize(cls, serialized_data: list[str]) -> IndexSet:
         """Deserialize using pydantic model validation on `IndexSet.data`."""
-        return IndexSet(data=serialized_data)
-
-    @field_validator('data', mode='before')
-    @classmethod
-    def _validate_data(cls, data: list[str]) -> list[tuple[MultiIndex, MultiIndex]]:
-        ret_list = []
-        for ele in data:
-            alpha, beta = ast.literal_eval(ele) if isinstance(ele, str) else tuple(ele)
-            alpha, beta = as_tuple(alpha), as_tuple(beta)
-            ret_list.append((alpha, beta))
-        return ret_list
-
-    def append(self, item):
-        alpha, beta = item
-        super().append((as_tuple(alpha), as_tuple(beta)))
-
-    def __add__(self, other):
-        other_list = other.data if isinstance(other, IndexSet) else other
-        return IndexSet(data=self.data + other_list)
-
-    def extend(self, items):
-        new_items = []
-        for alpha, beta in items:
-            alpha_tup, beta_tup = as_tuple(alpha), as_tuple(beta)
-            new_items.append((alpha_tup, beta_tup))
-        super().extend(new_items)
-
-    def insert(self, index, item):
-        alpha, beta = item
-        super().insert(index, (as_tuple(alpha), as_tuple(beta)))
-
-    def __setitem__(self, key, value):
-        alpha, beta = value
-        super().__setitem__(key, (as_tuple(alpha), as_tuple(beta)))
-
-    def __iter__(self):
-        yield from self.data
+        return cls(serialized_data)
 
 
-class MiscTree(BaseModel, UserDict, Serializable):
+IndexSet._wrap_methods(['__ror__', 'difference_update', '__isub__', 'symmetric_difference', '__rsub__', '__and__',
+                        '__rand__', 'intersection', 'difference', '__iand__', 'union', '__ixor__',
+                        'symmetric_difference_update', '__or__', 'copy', '__rxor__', 'intersection_update', '__xor__',
+                        '__ior__', '__sub__'
+                        ])
+
+
+class MiscTree(UserDict, Serializable):
     """Dataclass that maintains MISC data in a `dict` tree, indexed by `alpha` and `beta`. Overrides
     basic `dict` functionality to ensure elements are formatted correctly as `(alpha, beta) -> data`.
     Used to store MISC coefficients, model costs, and interpolator states.
-    """
-    model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True)
-    data: dict[MultiIndex, dict[MultiIndex, float | InterpolatorState]] = dict()  # Underlying data structure
 
+    The underlying data structure is: `dict[MultiIndex, dict[MultiIndex, float | InterpolatorState]]`
+    """
     def __init__(self, data: dict = None, **kwargs):
         data_dict = data or {}
+        if isinstance(data_dict, MiscTree):
+            data_dict = data_dict.data
         data_dict.update(kwargs)
-        super().__init__(data=data_dict)
-
-    def __eq__(self, other):
-        if isinstance(other, MiscTree):
-            try:
-                for alpha, beta, data in self:
-                    if other[alpha, beta] != data:
-                        return False
-                return True
-            except KeyError:
-                return False
-        else:
-            return False
+        super().__init__(self._validate_data(data_dict))
 
     def serialize(self, *args, keep_yaml_objects=False, **kwargs) -> dict:
         """Serialize `alpha, beta` indices to string and return a `dict` of internal data.
@@ -215,7 +189,7 @@ class MiscTree(BaseModel, UserDict, Serializable):
 
         :param serialized_data: the data to deserialize to a `MiscTree` object
         """
-        return MiscTree(data=serialized_data)
+        return cls(serialized_data)
 
     @classmethod
     def state_serializer(cls, data: dict) -> YamlSerializable | None:
@@ -245,7 +219,6 @@ class MiscTree(BaseModel, UserDict, Serializable):
         else:
             return YamlSerializable(obj=state_serializer)
 
-    @field_validator('data', mode='before')
     @classmethod
     def _validate_data(cls, serialized_data: dict) -> dict:
         state_serializer = cls.state_serializer(serialized_data)
@@ -253,10 +226,10 @@ class MiscTree(BaseModel, UserDict, Serializable):
         for alpha, beta_dict in serialized_data.items():
             if alpha == 'state_serializer':
                 continue
-            alpha_tup = as_tuple(alpha)
+            alpha_tup = MultiIndex(alpha)
             ret_dict.setdefault(alpha_tup, dict())
             for beta, data in beta_dict.items():
-                beta_tup = as_tuple(beta)
+                beta_tup = MultiIndex(beta)
                 if isinstance(data, InterpolatorState):
                     pass
                 elif state_serializer is not None:
@@ -273,12 +246,7 @@ class MiscTree(BaseModel, UserDict, Serializable):
         return (isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], str | tuple)
                 and isinstance(key[1], str | tuple))
 
-    def set(self, alpha: MultiIndex, beta: MultiIndex, data: float | InterpolatorState):
-        """Preferred way of updating a `MiscTree` object."""
-        self[alpha, beta] = data
-
     def get(self, key, default=None) -> float | InterpolatorState:
-        """Preferred way of getting data from a `MiscTree` object."""
         try:
             return self.__getitem__(key)
         except Exception:
@@ -288,25 +256,36 @@ class MiscTree(BaseModel, UserDict, Serializable):
         """Force `dict.update()` through the validator."""
         data_dict = data_dict or dict()
         data_dict.update(kwargs)
-        data_dict = self._validate_data(data_dict)
-        super().update(data_dict)
+        super().update(self._validate_data(data_dict))
 
     def __setitem__(self, key: tuple | MultiIndex, value: float | InterpolatorState):
         """Allows `misc_tree[alpha, beta] = value` usage."""
         if self._is_alpha_beta_access(key):
-            alpha, beta = as_tuple(key[0]), as_tuple(key[1])
+            alpha, beta = MultiIndex(key[0]), MultiIndex(key[1])
             self.data.setdefault(alpha, dict())
             self.data[alpha][beta] = value
         else:
-            super().__setitem__(as_tuple(key), value)
+            super().__setitem__(MultiIndex(key), value)
 
     def __getitem__(self, key: tuple | MultiIndex) -> float | InterpolatorState:
         """Allows `value = misc_tree[alpha, beta]` usage."""
         if self._is_alpha_beta_access(key):
-            alpha, beta = as_tuple(key[0]), as_tuple(key[1])
+            alpha, beta = MultiIndex(key[0]), MultiIndex(key[1])
             return self.data[alpha][beta]
         else:
-            return super().__getitem__(as_tuple(key))
+            return super().__getitem__(MultiIndex(key))
+
+    def __eq__(self, other):
+        if isinstance(other, MiscTree):
+            try:
+                for alpha, beta, data in self:
+                    if other[alpha, beta] != data:
+                        return False
+                return True
+            except KeyError:
+                return False
+        else:
+            return False
 
     def __iter__(self) -> Iterable[tuple[tuple, tuple, float | InterpolatorState]]:
         for alpha, beta_dict in self.data.items():
@@ -346,20 +325,21 @@ class Component(BaseModel, Serializable):
     model_kwargs: str | dict | ModelKwargs = {}
     inputs: _VariableLike
     outputs: _VariableLike
-    max_alpha: MultiIndex = ()
-    max_beta_train: MultiIndex = ()
-    max_beta_interpolator: MultiIndex = ()
+    max_alpha: str | tuple = MultiIndex()
+    max_beta_train: str | tuple = MultiIndex()
+    max_beta_interpolator: str | tuple = MultiIndex()
     interpolator: Any | Interpolator = Lagrange()
     vectorized: bool = False
     call_unpacked: Optional[bool] = None  # If the model expects inputs/outputs like `func(x1, x2, ...)->(y1, y2, ...)
     ret_unpacked: Optional[bool] = None
 
     # Data storage/states for a MISC component
-    active_set: list | IndexSet = IndexSet()
-    candidate_set: list | IndexSet = IndexSet()
-    misc_states: MiscTree = MiscTree()  # (alpha, beta) -> Interpolator state
-    misc_costs: MiscTree = MiscTree()   # (alpha, beta) -> Added computational cost for this mult-index
-    misc_coeff: MiscTree = MiscTree()   # (alpha, beta) -> c_[alpha, beta]
+    active_set: list | set | IndexSet = IndexSet()
+    candidate_set: list | set | IndexSet = IndexSet()
+    misc_states: dict | MiscTree = MiscTree()          # (alpha, beta) -> Interpolator state
+    misc_costs: dict | MiscTree = MiscTree()           # (alpha, beta) -> Added computational cost for this mult-index
+    misc_coeff_train: dict | MiscTree = MiscTree()     # (alpha, beta) -> c_[alpha, beta] (active set only)
+    misc_coeff_test: dict | MiscTree = MiscTree()      # (alpha, beta) -> c_[alpha, beta] (including candidate set)
     model_costs: dict = dict()  # Average single fidelity model costs (for each alpha)
     training_data: Any | TrainingData = SparseGrid()
     status: int | SurrogateStatus = SurrogateStatus.RESET
@@ -399,23 +379,11 @@ class Component(BaseModel, Serializable):
                     type(self.model_fields[key].default))
         kwargs['serializers'] = serializers
 
-        # Make sure nested pydantic objects are specified as obj "dicts"
-        for kw in ['active_set', 'candidate_set', 'misc_states', 'misc_costs', 'misc_coeff']:
-            if (value := kwargs.get(kw, None)) is not None:
-                kwargs[kw] = {'data': value} if (not isinstance(value, dict) or
-                                                 value.get('data', None) is None) else value
-
         super().__init__(model=model, inputs=inputs, outputs=outputs, name=name, **kwargs)  # Runs pydantic validation
 
         # Set internal properties
-        assert self.is_downward_closed(self.active_set + self.candidate_set)
+        assert self.is_downward_closed(self.active_set.union(self.candidate_set))
         self.executor = executor
-
-        # Construct vectors of [0,1]^dim(alpha+beta)
-        Nij = len(self.max_alpha) + len(self.max_beta)
-        self._ij = np.empty((2 ** Nij, Nij), dtype=np.uint8)
-        for i, ele in enumerate(itertools.product([0, 1], repeat=Nij)):
-            self._ij[i, :] = ele
 
     @classmethod
     def _validate_model_signature(cls, model, args=(), inputs=None, outputs=None,
@@ -554,13 +522,23 @@ class Component(BaseModel, Serializable):
 
     @field_validator('max_alpha', 'max_beta_train', 'max_beta_interpolator')
     @classmethod
-    def _validate_indices(cls, multi_index: MultiIndex) -> tuple[int, ...]:
-        return as_tuple(multi_index)
+    def _validate_indices(cls, multi_index) -> MultiIndex:
+        return MultiIndex(multi_index)
+
+    @field_validator('active_set', 'candidate_set')
+    @classmethod
+    def _validate_index_set(cls, index_set) -> IndexSet:
+        return IndexSet.deserialize(index_set)
+
+    @field_validator('misc_states', 'misc_costs', 'misc_coeff_train', 'misc_coeff_test')
+    @classmethod
+    def _validate_misc_tree(cls, misc_tree) -> MiscTree:
+        return MiscTree.deserialize(misc_tree)
 
     @field_validator('model_costs')
     @classmethod
     def _validate_model_costs(cls, model_costs: dict) -> dict:
-        return {as_tuple(key): float(value) for key, value in model_costs.items()}
+        return {MultiIndex(key): float(value) for key, value in model_costs.items()}
 
     @field_validator('model_kwargs', 'interpolator', 'training_data')
     @classmethod
@@ -587,6 +565,11 @@ class Component(BaseModel, Serializable):
     @property
     def max_beta(self) -> MultiIndex:
         return self.max_beta_train + self.max_beta_interpolator
+
+    @property
+    def has_surrogate(self) -> bool:
+        """The component has no surrogate model if there are no active or candidate indices."""
+        return (len(self.max_alpha) + len(self.max_beta)) > 0
 
     @property
     def executor(self) -> Executor:
@@ -619,7 +602,7 @@ class Component(BaseModel, Serializable):
             return False
 
     def call_model(self, inputs: dict | Dataset, alpha: Literal['best', 'worst'] | tuple | list = None,
-                   output_path: str | Path = None, executor: Executor = None) -> Dataset:
+                   output_path: str | Path = None, executor: Executor = None, **kwds) -> Dataset:
         """Wrapper function for calling the underlying component model.
 
         This function formats the input data, calls the model, and processes the output data.
@@ -649,6 +632,7 @@ class Component(BaseModel, Serializable):
         :param alpha: Fidelity indices to adjust the model fidelity (model must request this in its keyword arguments).
         :param output_path: Directory to save model output files (model must request this in its keyword arguments).
         :param executor: Executor for parallel execution if the model is not vectorized.
+        :param kwds: Additional keyword arguments to pass to the model (model must request these in its keyword args)
         :returns: The output data from the model, formatted as a `dict` with a key for each output variable and a
                   corresponding value that is an array of the output data.
         """
@@ -676,9 +660,12 @@ class Component(BaseModel, Serializable):
             alpha = np.array(alpha).reshape((N,)) if list_alpha else [alpha] * N
             for i in range(N):
                 if alpha[i] == 'best':
-                    alpha[i] = self.max_alpha
+                    alpha[i] = tuple(self.max_alpha)
                 elif alpha[i] == 'worst':
                     alpha[i] = (0,) * len(self.max_alpha)
+        for k, v in kwds.items():
+            if self.model_kwarg_requested(k):
+                kwargs[k] = v
 
         # Compute model (vectorized, executor parallel, or serial)
         errors = {}
@@ -778,66 +765,147 @@ class Component(BaseModel, Serializable):
         return output_dict
 
     def predict(self, x: dict | Dataset, use_model: Literal['best', 'worst'] | tuple = None,
-                model_dir: str | Path = None, training: bool = False, index_set: IndexSet = None) -> Dataset:
-        """Evaluate the MISC approximation at new inputs `x`.
+                model_dir: str | Path = None, index_set: Literal['train', 'test'] | IndexSet = 'test',
+                misc_coeff: MiscTree = None, incremental: bool = False) -> Dataset:
+        """Evaluate the MISC surrogate approximation at new inputs `x`.
 
         !!! Note
             By default this will predict the MISC surrogate approximation. However, for convenience you can also specify
-            `use_model` to call the underlying model function instead.
+            `use_model` to call the underlying model function instead. If the component has no surrogate model, then
+            the underlying model will be called instead.
 
         :param x: `dict` of input arrays for each variable input
         :param use_model: 'best'=high-fidelity, 'worst'=low-fidelity, tuple=a specific `alpha`, None=surrogate (default)
         :param model_dir: directory to save output files if `use_model` is specified, ignored otherwise
-        :param training: if `True`, then only compute with the active index set, otherwise use all candidates as well
-        :param index_set: a list of concatenated $(\\alpha, \\beta)$ to override `self.active_set` if given, else ignore
-        :returns: the surrogate approximation of the function (or the function itself if `use_model`)
+        :param index_set: the active index set, defaults to `self.active_set` if `'train'` or both
+                          `self.active_set + self.candidate_set` if `'test'`
+        :param misc_coeff: the data structure holding the MISC coefficients to use, which defaults to the
+                           training or testing coefficients depending on the `index_set` parameter.
+        :param incremental: a special flag to use if the provided `index_set` is an incremental update to the active
+                            index set. A temporary copy of the internal `misc_coeff` data structure will be updated
+                            and used to incorporate the new indices.
+        :returns: the surrogate approximation of the model (or the model return itself if `use_model`)
         """
-        if use_model is not None:
+        if use_model is not None or not self.has_surrogate:
             return self.call_model(x, alpha=use_model, output_path=model_dir)
 
-        index_set, misc_coeff = self._combination(index_set, training)  # Choose the correct index set and misc_coeff
+        # Choose the correct index set and misc_coeff data structures
+        if incremental:
+            misc_coeff = copy.deepcopy(self.misc_coeff_train)
+            self.update_misc_coeff(index_set, self.active_set, misc_coeff)
+            index_set = self.active_set.union(index_set)
+        else:
+            if isinstance(index_set, str):
+                index_set = self.active_set if index_set == 'train' else self.active_set.union(self.candidate_set)
+            if misc_coeff is None:
+                misc_coeff = self.misc_coeff_train if index_set == 'train' else self.misc_coeff_test
+
         x, loop_shape = format_inputs(x, var_shape={var: var.shape for var in self.inputs})  # {'x': (N, ...)}
         y = {}
 
-        # TODO: handle prediction with empty active set (return nan)
-        # TODO: Compress input fields and call surrogates
+        # Handle prediction with empty active set (return nan)
+        if len(index_set) == 0:
+            for var in self.outputs:
+                y[var] = np.full(loop_shape + var.shape, np.nan)
+            return y
+
+        # TODO: Compress input fields and call surrogates, then reconstruct
         for alpha, beta in index_set:
-            comb_coeff = misc_coeff[str(alpha)][str(beta)]
+            comb_coeff = misc_coeff[alpha, beta]
             if np.abs(comb_coeff) > 0:
-                func = self.surrogates[str(alpha)][str(beta)]
-                y += int(comb_coeff) * func(x)
-        # TODO: Reconstruct output fields
+                outputs = self.interpolator.predict(x, self.misc_states.get((alpha, beta)),
+                                                    self.training_data.get(alpha, beta[:len(self.max_beta_train)]),
+                                                    self.inputs)
+                for var, arr in outputs:
+                    if y.get(var) is None:
+                        y[var] = comb_coeff * arr
+                    else:
+                        y[var] += comb_coeff * arr
 
         return format_outputs(y, loop_shape)
 
-    def _forward_neighbors(self, alpha, beta, active_set=None):
-        """Get all possible forward multi-index neighbors (distance of one unit vector away)"""
+    def update_misc_coeff(self, new_indices: IndexSet, index_set: Literal['test', 'train'] | IndexSet = 'train',
+                          misc_coeff: MiscTree = None):
+        """Update MISC coefficients incrementally resulting from the addition of new indices to an index set.
+
+        !!! Warning "Incremental updates"
+            This function is used to update the MISC coefficients stored in `misc_coeff` after adding new indices
+            to the given `index_set`. If a custom `index_set` or `misc_coeff` are provided, the user is responsible
+            for ensuring the data structures are consistent. Since this is an incremental update, this means all
+            existing coefficients for every index in `index_set` should be precomputed and stored in `misc_coeff`.
+
+        :param new_indices: a set of $(\\alpha, \\beta)$ tuples that are being added to the `index_set`
+        :param index_set: the active index set, defaults to `self.active_set` if `'train'` or both
+                          `self.active_set + self.candidate_set` if `'test'`
+        :param misc_coeff: the data structure holding the MISC coefficients to update, which defaults to the
+                           training or testing coefficients depending on the `index_set` parameter. This data structure
+                           is modified in place.
+        """
+        if misc_coeff is None:
+            match index_set:
+                case 'train':
+                    misc_coeff = self.misc_coeff_train
+                case 'test':
+                    misc_coeff = self.misc_coeff_test
+                case other:
+                    raise ValueError(f"Index set must be 'train' or 'test' if you do not provide `misc_coeff`.")
+        if isinstance(index_set, str):
+            match index_set:
+                case 'train':
+                    index_set = self.active_set
+                case 'test':
+                    index_set = self.active_set.union(self.candidate_set)
+                case other:
+                    raise ValueError(f"Index set must be 'train' or 'test'.")
+
+        for new_alpha, new_beta in new_indices:
+            new_ind = np.array(new_alpha + new_beta)
+
+            # Update all existing/new coefficients if they are a distance of [0, 1] "below" the new index
+            # Note that new indices can only be [0, 1] away from themselves -- not any other new indices
+            for old_alpha, old_beta in itertools.chain(index_set, [(new_alpha, new_beta)]):
+                old_ind = np.array(old_alpha + old_beta)
+                diff = new_ind - old_ind
+                if np.all(np.isin(diff, [0, 1])):
+                    if misc_coeff.get((old_alpha, old_beta)) is None:
+                        misc_coeff[old_alpha, old_beta] = 0
+                    misc_coeff[old_alpha, old_beta] += (-1) ** int(np.sum(np.abs(diff)))
+
+    def _neighbors(self, alpha: MultiIndex, beta: MultiIndex, active_set: IndexSet = None, forward: bool = True):
+        """Get all possible forward or backward multi-index neighbors (distance of one unit vector away)"""
         active_set = active_set or self.active_set
-        ind = list(alpha + beta)
-        new_candidates = []
+        ind = np.array(alpha + beta)
+        max_ind = np.array(self.max_alpha + self.max_beta)
+        new_candidates = IndexSet()
         for i in range(len(ind)):
             ind_new = ind.copy()
-            ind_new[i] += 1
+            ind_new[i] += 1 if forward else -1
 
-            # Don't add if we surpass a refinement limit
-            if np.any(np.array(ind_new) > np.array(self.max_alpha + self.max_beta)):
+            # Don't add if we surpass a refinement limit or lower bound
+            if np.any(ind_new > max_ind) or np.any(ind_new < 0):
                 continue
 
             # Add the new index if it maintains downward-closedness
-            new_cand = (tuple(ind_new[:len(alpha)]), tuple(ind_new[len(alpha):]))
             down_closed = True
             for j in range(len(ind)):
                 ind_check = ind_new.copy()
                 ind_check[j] -= 1
                 if ind_check[j] >= 0:
-                    tup_check = (tuple(ind_check[:len(alpha)]), tuple(ind_check[len(alpha):]))
+                    tup_check = (MultiIndex(ind_check[:len(alpha)]), MultiIndex(ind_check[len(alpha):]))
                     if tup_check not in active_set and tup_check != (alpha, beta):
                         down_closed = False
                         break
             if down_closed:
-                new_candidates.append(new_cand)
+                new_candidates.add((ind_new[:len(alpha)], ind_new[len(alpha):]))
 
         return new_candidates
+
+    def refine(self):
+        # TODO: wrapper around training data and interpolator refine to manage normalization,
+        #  field qty compression, etc.
+        # Leave it as a new feature for latent coefficients to have their own normalization
+        # Call training_data.initialize if sum(beta) == 0
+        pass
 
     def activate_index(self, alpha: MultiIndex, beta: MultiIndex, model_dir: str | Path = None,
                        executor: Executor = None):
@@ -855,63 +923,107 @@ class Component(BaseModel, Serializable):
         if (alpha, beta) in self.active_set:
             self.logger.warning(f'Multi-index {(alpha, beta)} is already in the active index set. Ignoring...')
             return
+        if (alpha, beta) not in self.candidate_set and (sum(alpha) + sum(beta)) > 0:
+            # Can only activate the initial index (0, 0, ... 0) without it being in the candidate set
+            self.logger.warning(f'Multi-index {(alpha, beta)} is not a neighbor of the active index set, so it '
+                                f'cannot be activated. Please only add multi-indices from the candidate set. '
+                                f'Ignoring...')
+            return
 
         # Collect all neighbor candidate indices
         executor = executor or self.executor
-        neighbors = self._forward_neighbors(alpha, beta)
-        new_candidates = [(alpha, beta)] + neighbors if (alpha, beta) not in self.candidate_set else neighbors
+        neighbors = self._neighbors(alpha, beta, forward=True)
+        indices = list(itertools.chain([(alpha, beta)] if (alpha, beta) not in self.candidate_set else [], neighbors))
 
         # Collect all model inputs (i.e. training points) requested by the new candidates
-        alpha_list = []   # keep track of model fidelities
-        design_list = []  # keep track of training data coordinates/locations/indices
-        model_inputs = {}
-        for a, b in new_candidates:
+        alpha_list = []    # keep track of model fidelities
+        design_list = []   # keep track of training data coordinates/locations/indices
+        model_inputs = {}  # concatenate all model inputs
+        field_coords = {}  # keep track of coordinates for field quantities
+        for a, b in indices:
             design_idx, design_pts = self.training_data.refine(a, b[:len(self.max_beta_train)], self.inputs)
-            alpha_list.extend([a] * len(design_idx))
+            alpha_list.extend([tuple(a)] * len(design_idx))
             design_list.append(design_idx)
             for var in self.inputs:
-                model_inputs[var] = design_pts[var] if model_inputs.get(var) is None else (
-                    np.concatenate((model_inputs[var], design_pts[var]), axis=0))
+                # Reconstruct latent coefficients and pass full fields (and coords) to the model
+                if var.compression is not None:
+                    coords = self.model_kwargs.get(f'{var.name}_coords', None)
+                    field = var.reconstruct({'latent': design_pts[var]}, coords=coords)
+                    coords = field.pop('coords')
+                    if field_coords.get(f'{var.name}_coords') is None:
+                        field_coords[f'{var.name}_coords'] = copy.deepcopy(coords)
+
+                    for k, v in field.items():
+                        model_inputs[k] = v if model_inputs.get(k) is None else (
+                            np.concatenate((model_inputs[k], v), axis=0))
+                # Normal scalar inputs
+                else:
+                    model_inputs[var] = design_pts[var] if model_inputs.get(var) is None else (
+                        np.concatenate((model_inputs[var], design_pts[var]), axis=0))
 
         # Evaluate model at designed training points
         self.logger.info(f"Running {len(alpha_list)} total model evaluations for component "
-                         f"'{self.name}' new candidate indices: {new_candidates}...")
-        model_outputs = self.call_model(model_inputs, alpha=alpha_list, output_path=model_dir, executor=executor)
+                         f"'{self.name}' new candidate indices: {indices}...")
+        model_outputs = self.call_model(model_inputs, alpha=alpha_list, output_path=model_dir, executor=executor,
+                                        **field_coords)
 
         # Unpack model inputs/outputs and update states
         start_idx = 0
         errors = model_outputs.pop('errors', {})
-        for i, (a, b) in enumerate(new_candidates):
+        for i, (a, b) in enumerate(indices):
             num_train_pts = len(design_list[i])
             end_idx = start_idx + num_train_pts
             yi_dict = {var: model_outputs[var][start_idx:end_idx, ...] for var in model_outputs}
 
-            # Check for errors
+            # Check for errors and store
+            err_coords = []
+            err_list = []
             for idx in list(errors.keys()):
                 if idx < end_idx:
                     err_info = errors.pop(idx)
                     err_info['index'] = idx - start_idx
-                    self.logger.warning(f"Model error occurred while adding candidate ({a}, {b}) for component "
-                                        f"{self.name}: {err_info['error']}.\nLeaving NaN values in training data...")
-                    yi_dict.setdefault('errors', dict())
-                    yi_dict['errors'][idx - start_idx] = err_info
+                    err_coords.append(design_list[i][idx - start_idx])
+                    err_list.append(err_info)
+            if len(err_list) > 0:
+                self.logger.warning(f"Model errors occurred while adding candidate ({a}, {b}) for component "
+                                    f"{self.name}. Leaving NaN values in training data...")
+                self.training_data.set_errors(a, b[:len(self.max_beta_train)], err_coords, err_list)
+
+            # Compress field quantities
+            y_vars = []
+            for var in self.outputs:
+                if var.compression is not None:
+                    coords = yi_dict.get(f'{var.name}_coords', None)
+                    yi_dict[f'{var.name}_compressed'] = var.compress({field: yi_dict[field] for field in
+                                                                      var.compression.fields}, coords=coords)['latent']
+                    y_vars.append(f'{var.name}_compressed')
+                else:
+                    y_vars.append(var.name)
 
             # Store training data, computational cost, and new interpolator state
             self.training_data.set(a, b[:len(self.max_beta_train)], design_list[i], yi_dict)
+            self.training_data.impute_missing_data(a, b[:len(self.max_beta_train)])
             self.misc_costs[a, b] = self.model_costs[a] * num_train_pts
             self.misc_states[a, b] = self.interpolator.refine(b[len(self.max_beta_train):],
-                                                              self.training_data.get(a, b[:len(self.max_beta_train)]),
+                                                              self.training_data.get(a, b[:len(self.max_beta_train)],
+                                                                                     y_vars=y_vars),
                                                               self.misc_states.get((alpha, beta)),
                                                               self.inputs)
             start_idx = end_idx
 
         # Move to the active index set
+        s = set()
+        s.add((alpha, beta))
+        self.update_misc_coeff(IndexSet(s), index_set='train')
         if (alpha, beta) in self.candidate_set:
             self.candidate_set.remove((alpha, beta))
-        self.active_set.append((alpha, beta))
-        new_candidates = [cand for cand in new_candidates if cand not in self.candidate_set]
-        self.candidate_set.extend(new_candidates)
-        self.status = SurrogateStatus.RESET  # Makes sure misc coeffs get recomputed next time
+        else:
+            # Only for initial index which didn't come from the candidate set
+            self.update_misc_coeff(IndexSet(s), index_set='test')
+        self.active_set.update(s)
+
+        self.update_misc_coeff(neighbors, index_set='test')  # neighbors will only ever pass through here once
+        self.candidate_set.update(neighbors)
 
     def model_kwarg_requested(self, kwarg_name):
         """Return whether the underlying component model requested this `kwarg_name`. Special kwargs include:
@@ -986,7 +1098,7 @@ class Component(BaseModel, Serializable):
             # Every smaller multi-index must also be included in the indices list
             sub_sets = [np.arange(tuple(alpha + beta)[i] + 1) for i in range(len(alpha) + len(beta))]
             for ele in itertools.product(*sub_sets):
-                tup = (tuple(ele[:len(alpha)]), tuple(ele[len(alpha):]))
+                tup = (MultiIndex(ele[:len(alpha)]), MultiIndex(ele[len(alpha):]))
                 if tup not in indices:
                     return False
         return True
@@ -1014,7 +1126,7 @@ class Component(BaseModel, Serializable):
                 elif key in ['active_set', 'candidate_set']:
                     if len(value) > 0:
                         d[key] = value.serialize()
-                elif key in ['misc_costs', 'misc_coeff', 'misc_states']:
+                elif key in ['misc_costs', 'misc_coeff_train', 'misc_coeff_test', 'misc_states']:
                     if len(value) > 0:
                         d[key] = value.serialize(keep_yaml_objects=keep_yaml_objects)
                 elif key in ['model_costs']:
@@ -1051,7 +1163,7 @@ class Component(BaseModel, Serializable):
 
         for key in search_keys:
             if (filename := comp.get(key, None)) is not None:
-                comp[key] = search_for_file(filename, search_paths=search_paths)
+                comp[key] = search_for_file(filename, search_paths=search_paths)  # will ret original str if not found
 
         for key in ['inputs', 'outputs']:
             for var in comp.get(key, []):
@@ -1217,66 +1329,6 @@ class ComponentSurrogate(ABC):
     def __call__(self, *args, **kwargs):
         """Here for convenience so you can also do `ret = surrogate(x)`, just like the `BaseInterpolator`."""
         return self.predict(*args, **kwargs)
-
-    def update_misc_coeffs(self, index_set: IndexSet = None) -> 'MiscTree':
-        """Update the combination technique coeffs for MISC using the given index set.
-
-        :param index_set: the index set to consider when computing the MISC coefficients, defaults to the active set
-        :returns: the MISC coefficients for the given index set ($\\alpha$ -> $\\beta$ -> coeff)
-        """
-        if index_set is None:
-            index_set = self.index_set
-
-        # Construct a (N_indices, dim(alpha+beta)) refactor of the index_set for arrayed computations
-        index_mat = np.zeros((len(index_set), len(self.max_refine)), dtype=np.uint8)
-        for i, (alpha, beta) in enumerate(index_set):
-            index_mat[i, :] = alpha + beta
-        index_mat = np.expand_dims(index_mat, axis=0)  # (1, Ns, Nij)
-
-        misc_coeff = dict()
-        for alpha, beta in index_set:
-            # Add permutations of [0, 1] to (alpha, beta)
-            alpha_beta = np.array(alpha + beta, dtype=np.uint8)[np.newaxis, :]  # (1, Nij)
-            new_indices = np.expand_dims(alpha_beta + self.ij, axis=1)  # (2**Nij, 1, Nij)
-
-            # Find which indices are in the index_set (using np broadcasting comparison)
-            diff = new_indices - index_mat  # (2**Nij, Ns, Nij)
-            idx = np.count_nonzero(diff, axis=-1) == 0  # (2**Nij, Ns)
-            idx = np.any(idx, axis=-1)  # (2**Nij,)
-            ij_use = self.ij[idx, :]  # (*, Nij)
-            l1_norm = np.sum(np.abs(ij_use), axis=-1)  # (*,)
-            coeff = np.sum((-1.) ** l1_norm)  # float
-
-            # Save misc coeff to a dict() tree structure
-            if misc_coeff.get(str(alpha)) is None:
-                misc_coeff[str(alpha)] = dict()
-            misc_coeff[str(alpha)][str(beta)] = coeff
-            self.misc_coeff[str(alpha)][str(beta)] = coeff
-
-        return misc_coeff
-
-    def _combination(self, index_set, training):
-        """Decide which index set and corresponding misc coefficients to use."""
-        misc_coeff = copy.deepcopy(self.misc_coeff)
-        if index_set is None:
-            # Use active indices + candidate indices depending on training mode
-            index_set = self.index_set if training else self.index_set + self.candidate_set
-
-            # Decide when to update misc coefficients
-            if self.training_flag is None:
-                misc_coeff = self.update_misc_coeffs(index_set)  # On initialization or reset
-            else:
-                if (not self.training_flag and training) or (self.training_flag and not training):
-                    misc_coeff = self.update_misc_coeffs(index_set)  # Logical XOR cases for training mode
-
-            # Save an indication of what state the MISC coefficients are in (i.e. training or eval mode)
-            self.training_flag = training
-        else:
-            # If we passed in an index set, always recompute misc coeff and toggle for reset on next call
-            misc_coeff = self.update_misc_coeffs(index_set)
-            self.training_flag = None
-
-        return index_set, misc_coeff
 
 
 class SparseGridSurrogate(ComponentSurrogate):

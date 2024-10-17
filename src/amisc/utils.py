@@ -6,7 +6,6 @@ Includes:
 - `search_for_file` — search for a file in the current working directory and additional search paths
 - `format_inputs` — broadcast and reshape all inputs to the same shape
 - `format_outputs` — reshape all outputs to a common loop shape
-- `as_tuple` — convert a tuple-like object to a tuple of `ints`
 - `parse_function_string` — convert function-like strings to arguments and keyword-arguments
 - `relative_error` — compute the relative L2 error between two vectors
 - `get_logger` — logging utility with nice formatting
@@ -21,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-__all__ = ['as_tuple', 'parse_function_string', 'relative_error', 'get_logger', 'format_inputs', 'format_outputs',
+__all__ = ['parse_function_string', 'relative_error', 'get_logger', 'format_inputs', 'format_outputs',
            'search_for_file', 'constrained_lls']
 
 from amisc.typing import Dataset
@@ -178,14 +177,15 @@ def search_for_file(filename: str | Path, search_paths=None):
     # Search for the save file if it was a valid path and does not exist
     if need_to_search:
         found_file = False
-        filename = save_file.name
+        name = save_file.name
         for path in search_paths:
-            if (pth := Path(path) / filename).exists():
+            if (pth := Path(path) / name).exists():
                 filename = pth.resolve().as_posix()
                 found_file = True
                 break
         if not found_file:
-            raise FileNotFoundError(f"Could not find save file '{filename}' in paths: {search_paths}.")
+            pass  # Let the caller handle the error (just return the original filename back to caller)
+            # raise FileNotFoundError(f"Could not find save file '{filename}' in paths: {search_paths}.")
 
     return filename
 
@@ -288,17 +288,6 @@ def format_outputs(outputs: Dataset, loop_shape: tuple[int, ...]) -> Dataset:
             val = np.atleast_1d(np.squeeze(val, axis=0))  # Squeeze singleton loop dimensions
         output_dict[key] = val
     return output_dict
-
-
-def as_tuple(value: str | tuple | int) -> tuple[int, ...]:
-    """Convert a tuple-like object to a tuple of `ints`."""
-    if isinstance(value, str):
-        return tuple([int(i) for i in ast.literal_eval(value)])
-    else:
-        if isinstance(value, int):
-            return (value,)
-        else:
-            return tuple([int(i) for i in value])
 
 
 def _tokenize(args_str: str) -> list[str]:

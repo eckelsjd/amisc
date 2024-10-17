@@ -4,8 +4,10 @@ refined with new training data.
 
 Includes:
 
-- `BaseInterpolator`: Abstract class providing basic structure of an interpolator
-- `LagrangeInterpolator`: Concrete implementation for tensor-product barycentric Lagrange interpolation
+- `Interpolator`: Abstract class providing basic structure of an interpolator
+- `Lagrange`: Concrete implementation for tensor-product barycentric Lagrange interpolation
+- `InterpolatorState`: Interface for a dataclass that stores the internal state of an interpolator
+- `LagrangeState`: The internal state for a barycentric Lagrange polynomial interpolator
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from sklearn.preprocessing import MaxAbsScaler
 from numpy.typing import ArrayLike
 
 from amisc.serialize import Serializable, Base64Serializable, StringSerializable
-from amisc.utils import get_logger
+from amisc.typing import MultiIndex, Dataset
 from amisc.variable import Variable, VariableList
 
 __all__ = ["InterpolatorState", "LagrangeState", "Interpolator", "Lagrange"]
@@ -35,15 +37,14 @@ class InterpolatorState(Serializable, ABC):
 @dataclass
 class LagrangeState(InterpolatorState, Base64Serializable):
     """The internal state for a barycentric Lagrange polynomial interpolator."""
-    betas: set[tuple] = field(default_factory=set)
-    weights: dict[str, ArrayLike] = field(default_factory=dict)
-    x_grids: dict[str, ArrayLike] = field(default_factory=dict)
+    weights: dict[str, np.ndarray] = field(default_factory=dict)
+    x_grids: dict[str, np.ndarray] = field(default_factory=dict)
 
     def __eq__(self, other):
         if isinstance(other, LagrangeState):
             try:
-                return all([np.allclose(self.weights[i], other.weights[i]) for i in range(len(self.weights))]) and \
-                    all([np.allclose(self.x_grids[i], other.x_grids[i]) for i in range(len(self.x_grids))])
+                return all([np.allclose(self.weights[var], other.weights[var]) for var in self.weights]) and \
+                    all([np.allclose(self.x_grids[var], other.x_grids[var]) for var in self.x_grids])
             except IndexError:
                 return False
         else:
@@ -54,10 +55,19 @@ class Interpolator(Serializable, ABC):
     """Interface for an interpolator object that approximates a model."""
 
     @abstractmethod
-    def refine(self, beta: tuple, training_data: tuple[dict, dict],
+    def refine(self, beta: MultiIndex, training_data: tuple[Dataset, Dataset],
                old_state: InterpolatorState, x_vars: VariableList) -> InterpolatorState:
         """Refine the interpolator state with new training data."""
         raise NotImplementedError
+
+    @abstractmethod
+    def predict(self, x: dict | Dataset, state: InterpolatorState,
+                training_data: tuple[Dataset, Dataset], x_vars: VariableList) -> Dataset:
+        """Interpolate the output of the model at points `x` using the given state and training data."""
+        raise NotImplementedError
+
+    def __call__(self, *args, **kwargs):
+        return self.predict(*args, **kwargs)
 
     @classmethod
     def from_dict(cls, config: dict) -> Interpolator:
@@ -73,12 +83,174 @@ class Interpolator(Serializable, ABC):
 @dataclass
 class Lagrange(Interpolator, StringSerializable):
     """Implementation of a tensor-product barycentric Lagrange polynomial interpolator."""
-    interval_capacity: int = 4
+    interval_capacity: float = 4.0
 
-    def refine(self, beta: tuple, training_data: tuple[dict, dict],
-               old_state: InterpolatorState, x_vars: VariableList) -> LagrangeState:
-        """Refine the interpolator state with new training data."""
-        pass
+    @staticmethod
+    def _extend_grids(x_grids: dict[str, np.ndarray], x_points: dict[str, np.ndarray]):
+        """Extend the 1d `x` grids with any new points from `x_points`, skipping duplicates."""
+        extended_grids = copy.deepcopy(x_grids)
+        for var, new_pts in x_points.items():
+            if var not in x_grids:
+                extended_grids[var] = new_pts
+            else:
+                # Handle latent variables (dim=2)
+                if len(new_pts.shape) > 1:
+                    num_latent, old_len = x_grids[var].shape
+                    new_grids = [np.concatenate((x_grids[var][i], np.setdiff1d(new_pts[i], x_grids[var][i])), axis=0)
+                                 for i in range(num_latent)]
+                    new_len = max([len(grid) for grid in new_grids])
+                    if new_len > old_len:  # Pad the old grids with NaNs
+                        extended_grids[var] = np.pad(x_grids[var], [(0, 0), (0, new_len - old_len)], mode='constant',
+                                                     constant_values=np.nan)
+                    for i, grid in enumerate(new_grids):
+                        extended_grids[var][i, :len(grid)] = grid
+
+                # Handle regular scalar variables (dim=1)
+                else:
+                    extended_grids[var] = np.concatenate((x_grids[var], np.setdiff1d(new_pts, x_grids[var])), axis=0)
+        return extended_grids
+
+    def refine(self, beta: MultiIndex, training_data: tuple[Dataset, Dataset],
+               old_state: LagrangeState, x_vars: VariableList) -> LagrangeState:
+        """Refine the interpolator state with new training data.
+
+        :param beta: the refinement level indices for the interpolator (not used for Lagrange)
+        :param training_data: a tuple of dictionaries containing the new training data (`xtrain`, `ytrain`)
+        :param old_state: the old interpolator state to refine
+        :param x_vars: the list of variables that define the input domain
+        :returns: the new interpolator state
+        """
+        xtrain, ytrain = training_data  # Lagrange only really needs the xtrain data to update barycentric weights/grids
+
+        # Initialize the interpolator state
+        if old_state is None:
+            x_grids = self._extend_grids({}, xtrain)
+            weights = {}
+            for var, grid in x_grids.items():
+                bds = x_vars[var].get_domain(transform=True)
+                if isinstance(bds, list):   # latent coefficients
+                    weights[var] = np.full(grid.shape, np.nan)
+                    for i, bd in enumerate(bds):
+                        C = (bd[1] - bd[0]) / self.interval_capacity
+                        xj = grid[i, ~np.isnan(grid[i]), np.newaxis]
+                        Nx = xj.shape[0]
+                        xi = xj.reshape((1, Nx))
+                        dist = (xj - xi) / C
+                        np.fill_diagonal(dist, 1)
+                        weights[var][i, :Nx] = (1.0 / np.prod(dist, axis=1))
+                else:                       # scalars
+                    Nx = grid.shape[0]
+                    C = (bds[1] - bds[0]) / self.interval_capacity  # Interval capacity (see Berrut and Trefethen 2004)
+                    xj = var.normalize(grid.reshape((Nx, 1)))
+                    xi = xj.reshape((1, Nx))
+                    dist = (xj - xi) / C
+                    np.fill_diagonal(dist, 1)  # Ignore product when i==j
+                    weights[var] = (1.0 / np.prod(dist, axis=1))  # (Nx,)
+
+        # Otherwise, refine the interpolator state
+        else:
+            x_grids = self._extend_grids(old_state.x_grids, xtrain)
+            weights = copy.deepcopy(old_state.weights)
+            for var, grid in x_grids.items():
+                bds = x_vars[var].get_domain(transform=True)
+
+                # Update latent coefficient weights
+                if isinstance(bds, list):
+                    old_len = old_state.x_grids[var].shape[1]
+                    new_len = grid.shape[1]
+                    weights[var] = np.pad(weights[var], [(0, 0), (0, new_len - old_len)], mode='constant',
+                                          constant_values=np.nan)
+                    for i, bd in enumerate(bds):
+                        old_grid = old_state.x_grids[var][i, ~np.isnan(old_state.x_grids[var][i])]
+                        Nx_old = old_grid.shape[0]
+                        Nx_new = grid[i, ~np.isnan(grid[i])].shape[0]
+                        if Nx_new > Nx_old:
+                            C = (bd[1] - bd[0]) / self.interval_capacity
+                            xi = grid[i, :Nx_new]
+                            for j in range(Nx_old, Nx_new):
+                                weights[var][i, :j] *= (C / (xi[:j] - xi[j]))
+                                weights[var][i, j] = np.prod(C / (xi[j] - xi[:j]))
+                # Update scalar weights
+                else:
+                    Nx_old = old_state.x_grids[var].shape[0]
+                    Nx_new = grid.shape[0]
+                    if Nx_new > Nx_old:
+                        new_wts = weights[var]
+                        C = (bds[1] - bds[0]) / self.interval_capacity
+                        xi = var.normalize(grid)
+                        for j in range(Nx_old, Nx_new):
+                            new_wts[:j] *= (C / (xi[:j] - xi[j]))
+                            new_wts[j] = np.prod(C / (xi[j] - xi[:j]))
+
+        return LagrangeState(weights=weights, x_grids=x_grids)
+
+    def predict(self, x: Dataset, state: LagrangeState, training_data, x_vars: VariableList):
+        """Predict the output of the model at points `x` with barycentric Lagrange interpolation."""
+        # Convert `x` and `yi` to 2d arrays: (N, xdim) and (N, ydim)
+        _, yi = training_data
+        x_arr = np.empty((next(iter(x.values())).shape[:-1], 0))
+        yi_arr = np.empty((next(iter(yi.values())).shape[:-1], 0))
+        for var in x_vars:
+            x_arr = np.concatenate((x_arr, x[var]), axis=-1) if len(var.shape) > 0 else (
+                np.concatenate((x_arr, var.normalize(x[var][..., np.newaxis])), axis=-1))
+        for var in yi:
+            yi_arr = np.concatenate((yi_arr, yi[var]), axis=-1) if len(yi[var].shape) > 1 else (
+                np.concatenate((yi_arr, yi[var][..., np.newaxis]), axis=-1))
+
+        xdim = x_arr.shape[-1]
+        ydim = yi_arr.shape[-1]
+        grid_sizes = {var: grid.shape[-1] for var, grid in state.x_grids.items()}
+        max_size = max(grid_sizes.values())
+        dims = list(range(xdim))
+
+        # Create ragged edge matrix of interpolation pts and weights
+        x_j = np.full((xdim, max_size), np.nan)                             # For example:
+        w_j = np.full((xdim, max_size), np.nan)                             # A= [#####--
+        n = 0                                                               #     #######
+        for var in x_vars:                                                  #     ###----]
+            if len(state.x_grids[var].shape) > 1:  # latent
+                for grid, weights in zip(state.x_grids[var], state.weights[var]):
+                    x_j[n, :grid_sizes[var]] = grid
+                    w_j[n, :grid_sizes[var]] = weights
+                    n += 1
+            else:                                   # scalars
+                x_j[n, :grid_sizes[var]] = var.normalize(state.x_grids[var])
+                w_j[n, :grid_sizes[var]] = state.weights[var]
+                n += 1
+
+        diff = x_arr[..., np.newaxis] - x_j
+        div_zero_idx = np.isclose(diff, 0, rtol=1e-4, atol=1e-8)
+        diff[div_zero_idx] = 1
+        quotient = w_j / diff                           # (..., xdim, Nx)
+        qsum = np.nansum(quotient, axis=-1)             # (..., xdim)
+        y = np.zeros(x_arr.shape[:-1] + (ydim,))        # (..., ydim)
+
+        # Loop over multi-indices and compute tensor-product lagrange polynomials
+        indices = [range(np.count_nonzero(~np.isnan(grid))) for grid in x_j]
+        for i, j in enumerate(itertools.product(*indices)):
+            L_j = quotient[..., dims, j] / qsum         # (..., xdim)
+            other_pts = np.copy(div_zero_idx)
+            other_pts[div_zero_idx[..., dims, j]] = False
+
+            # Set L_j(x==x_j)=1 for the current j and set L_j(x==x_j)=0 for x_j = x_i, i != j
+            L_j[div_zero_idx[..., dims, j]] = 1
+            L_j[np.any(other_pts, axis=-1)] = 0
+
+            # Add multivariate basis polynomial contribution to interpolation output
+            L_j = np.prod(L_j, axis=-1, keepdims=True)  # (..., 1)
+            y += L_j * yi_arr[i, :]
+
+        # Unpack the outputs back into a Dataset
+        y_ret = {}
+        start_idx = 0
+        for var, arr in yi.items():
+            num_vals = arr.shape[-1] if len(arr.shape) > 1 else 1
+            end_idx = start_idx + num_vals
+            y_ret[var] = y[..., start_idx:end_idx]
+            if len(arr.shape) == 1:
+                y_ret[var] = np.squeeze(y_ret[var], axis=-1)  # for scalars
+            start_idx = end_idx
+        return y_ret
 
 
 class BaseInterpolator(ABC):
@@ -127,150 +299,6 @@ class BaseInterpolator(ABC):
         :param model: callable as {'y': y} = model(x), with `x = (..., x_dim)`, `y = (..., y_dim)`
         :param model_args: optional args for the model
         :param model_kwargs: optional kwargs for the model
-        """
-        x_vars = [x_vars] if not isinstance(x_vars, list) else x_vars
-        self.logger = get_logger(self.__class__.__name__)
-        self._model = model
-        self._model_args = model_args
-        self._model_kwargs = model_kwargs if model_kwargs is not None else {}
-        self.output_files = []                              # Save output files with same indexing as xi, yi
-        self.xi = xi                                        # Interpolation points
-        self.yi = yi                                        # Function values at interpolation points
-        self.beta = beta                                    # Refinement level indices
-        self.x_vars = x_vars                                # Variable objects for each input
-        self.model_cost = None                              # Total cpu time to evaluate model once (s)
-
-    def update_input_bds(self, idx: int, bds: tuple):
-        """Update the input bounds at the given index.
-
-        :param idx: the index of the input variable to update
-        :param bds: the new bounds for the variable
-        """
-        self.x_vars[idx].update(domain=bds)
-
-    def xdim(self):
-        """Get the dimension of the input domain."""
-        return len(self.x_vars)
-
-    def ydim(self):
-        """Get the dimension of the outputs."""
-        return self.yi.shape[-1] if self.yi is not None else None
-
-    def save_enabled(self):
-        """Return whether the underlying model wants to save outputs to file.
-
-        !!! Note
-            You can specify that a model wants to save outputs to file by providing an `'output_dir'` kwarg.
-        """
-        return self._model_kwargs.get('output_dir') is not None
-
-    def _fmt_input(self, x: float | list | np.ndarray) -> tuple[bool, np.ndarray]:
-        """Helper function to make sure input `x` is an ndarray of shape `(..., xdim)`.
-
-        :param x: if 1d-like as (n,), then converted to 2d as (1, n) if n==xdim or (n, 1) if xdim==1
-        :returns: `x` as at least a 2d array `(..., xdim)`, and whether `x` was originally 1d-like
-        """
-        x = np.atleast_1d(x)
-        shape_1d = len(x.shape) == 1
-        if shape_1d:
-            if x.shape[0] != self.xdim() and self.xdim() > 1:
-                raise ValueError(f'Input x shape {x.shape} is incompatible with xdim of {self.xdim()}')
-            x = np.expand_dims(x, axis=0 if x.shape[0] == self.xdim() else 1)
-
-        return shape_1d, x
-
-    def set_yi(self, yi: np.ndarray = None, model: callable = None,
-               x_new: tuple[list[int | tuple], np.ndarray] = ()) -> dict[str: np.ndarray] | None:
-        """Set the training data; if `yi=None`, then compute from the model.
-
-        !!! Warning
-            You would use `x_new` if you wanted to compute the model at these specific locations and store the result.
-            This will ignore anything passed in for `yi`, and it assumes a model is already specified (or passed in).
-
-        !!! Info
-            You can pass in integer indices for `x_new` or tuple indices. Integers will index into `self.xi`. Tuples
-            provide extra flexibility for more complicated indexing, e.g. they might specify indices along different
-            coordinate directions in an N-dimensional grid. If you pass in a list of tuple indices for `x_new`, the
-            resulting model outputs will be returned back to you in the form `dict[str: np.ndarray]`. The keys are
-            string casts of the tuple indices, and the values are the corresponding model outputs.
-
-        :param yi: `(Nx, y_dim)`, training data to set, must match dimension of `self.xi`
-        :param model: callable function, optionally overrides `self._model`
-        :param x_new: tuple of `(idx, x)`, where `x` is an `(N_new, x_dim)` array of new interpolation points to
-                      include and `idx` specifies the indices of these points into `self.xi`
-        :returns: dict[str: np.ndarray] if `idx` contains tuple elements, otherwise `None`
-        """
-        if model is not None:
-            self._model = model
-        if self._model is None:
-            error_msg = 'Model not specified for computing QoIs at interpolation grid points.'
-            self.logger.error(error_msg)
-            raise Exception(error_msg)
-
-        # Overrides anything passed in for yi (you would only be using this if yi was set previously)
-        if x_new:
-            new_idx = x_new[0]
-            new_x = x_new[1]
-            return_y = isinstance(new_idx[0], tuple)  # Return y rather than storing it if tuple indices are passed in
-            ret = dict(y=dict(), files=dict())
-            model_ret = self._model(new_x, *self._model_args, **self._model_kwargs)
-            if not isinstance(model_ret, dict):
-                self.logger.warning(
-                    f"Function {self._model} did not return a dict of the form {{'y': y}}. Please make sure"
-                    f" you do so to avoid conflicts. Returning the value directly instead...")
-                model_ret = dict(y=model_ret)
-            y_new, files_new, cpu_time = model_ret['y'], model_ret.get('files', None), model_ret.get('cost', 1)
-
-            if self.save_enabled():
-                for j in range(y_new.shape[0]):
-                    if return_y:
-                        ret['y'][str(new_idx[j])] = y_new[j, :].astype(np.float32)
-                        ret['files'][str(new_idx[j])] = files_new[j]
-                    else:
-                        self.yi[new_idx[j], :] = y_new[j, :].astype(np.float32)
-                        self.output_files[new_idx[j]] = files_new[j]
-            else:
-                for j in range(y_new.shape[0]):
-                    if return_y:
-                        ret['y'][str(new_idx[j])] = y_new[j, :].astype(np.float32)
-                    else:
-                        self.yi[new_idx[j], :] = y_new[j, :].astype(np.float32)
-
-            if self.model_cost is None:
-                self.model_cost = max(1, cpu_time)
-
-            return ret
-
-        # Set yi directly
-        if yi is not None:
-            self.yi = yi.astype(np.float32)
-            return
-
-        # Compute yi
-        model_ret = self._model(self.xi, *self._model_args, **self._model_kwargs)
-        if not isinstance(model_ret, dict):
-            self.logger.warning(f"Function {self._model} did not return a dict of the form {{'y': y}}. Please make sure"
-                                f" you do so to avoid conflicts. Returning the value directly instead...")
-            model_ret = dict(y=model_ret)
-
-        self.yi, self.output_files, cpu_time = model_ret['y'], model_ret.get('files', list()), model_ret.get('cost', 1)
-
-        if self.model_cost is None:
-            self.model_cost = max(1, cpu_time)
-
-    @abstractmethod
-    def refine(self, beta: tuple, auto=True):
-        """Return a new interpolator with one dimension refined by one level, as specified by `beta`.
-
-        !!! Info "When you want to compute the model manually"
-            You can set `auto=False`, in which case the newly refined interpolation points `x` will be returned to you
-            along with their indices, in the form `idx, x, interp = refine(beta, auto=False)`. You might also want to
-            do this if you did not provide a model when constructing the Interpolator (so `auto=True` won't work).
-
-        :param beta: the new refinement level indices, should only refine one dimension by one level
-        :param auto: whether to automatically compute and store model at refinement points (default is True)
-        :returns: `idx` - indices into `xi`, `x` - the new interpolation points, and `interp` - a refined
-                   BaseInterpolator object, just returns `interp` if `auto=True`
         """
         pass
 

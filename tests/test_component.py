@@ -4,8 +4,46 @@ import matplotlib.pyplot as plt
 import numpy as np
 from uqtils import approx_hess, approx_jac, ax_default
 
-from amisc.component import SparseGridSurrogate
+from amisc.component import SparseGridSurrogate, Component, IndexSet
 from amisc.variable import Variable
+
+
+def test_misc_coeff():
+    """Test the iterative calculation of MISC coefficients"""
+    def model(x, alpha=(0, 0)):
+        y = x
+        return y
+    comp = Component(model, max_alpha=(2, 3), max_beta_train=(2, 1), max_beta_interpolator=(1,))
+    max_ind = comp.max_alpha + comp.max_beta
+
+    for idx in itertools.product(*[range(m) for m in max_ind]):
+        # Activate the next index
+        alpha, beta = idx[:len(comp.max_alpha)], idx[len(comp.max_alpha):]
+        neighbors = comp._neighbors(alpha, beta, forward=True)
+        s = {(alpha, beta)}
+        comp.update_misc_coeff(IndexSet(s), index_set='train')
+        if (alpha, beta) in comp.candidate_set:
+            comp.candidate_set.remove((alpha, beta))
+        else:
+            # Only for initial index which didn't come from the candidate set
+            comp.update_misc_coeff(IndexSet(s), index_set='test')
+        comp.active_set.update(s)
+
+        comp.update_misc_coeff(neighbors, index_set='test')
+        comp.candidate_set.update(neighbors)
+
+        # Check all data structures are consistent
+        coeff_sum = 0
+        for a, b, coeff in comp.misc_coeff_train:
+            assert (a, b) in comp.active_set and (a, b) not in comp.candidate_set
+            coeff_sum += coeff
+        assert coeff_sum == 1
+
+        coeff_sum = 0
+        for a, b, coeff in comp.misc_coeff_test:
+            assert (a, b) in comp.active_set.union(comp.candidate_set)
+            coeff_sum += coeff
+        assert coeff_sum == 1
 
 
 def test_sparse_grid(plots=False):
