@@ -38,27 +38,29 @@ def test_indexset():
     # Test IndexSet data structure
     Ik = [(np.random.randint(0, 10, 2), np.random.randint(0, 5, 4)) for i in range(10)]
     new_indices = [((), np.random.rand(3)*10) for i in range(5)]
-    Ik = IndexSet(*Ik)
-    Ik.extend(new_indices)
-    del Ik[0]
-    Ik[0] = ((), (1.1, 2.34))
-    Ik.insert(1, ((1,), (-1.1, 2.3)))
-    Ik.append(((1,), (1, 2, 3)))
+    Ik = IndexSet(Ik)
+    Ik.update(new_indices)
+    Ik.add(((), (1.1, 2.34)))
+    Ik.remove(((), (1, 2)))
+    Ik.add(((1,), (-1.1, 2.3)))
+    Ik = Ik.union({((1,), (1, 2, 3))})
     for alpha, beta in Ik:
         assert np.all([isinstance(ele, int) for ele in itertools.chain(alpha, beta)])
-    Ik.data = [str(([int(j) for j in np.random.randint(-100, 100, 7)],
-                    [int(j) for j in -np.random.rand(2)*3])) for i in range(3)]
+    Ik = IndexSet([str(([int(j) for j in np.random.randint(-100, 100, 7)],
+                        [int(j) for j in -np.random.rand(2)*3])) for i in range(3)])
     for alpha, beta in Ik:
         assert np.all([isinstance(ele, int) for ele in itertools.chain(alpha, beta)])
+
+    assert IndexSet.deserialize(Ik.serialize()) == Ik
 
 
 def test_misctree():
     # Test MiscTree data structure
-    data = {tuple([int(k) for k in np.random.randint(0, 3, 2)]) :
+    data = {tuple([int(k) for k in np.random.randint(0, 3, 2)]):
                 {tuple([int(k) for k in -np.random.rand(3)*10 + 5]): np.random.rand() for i in range(5)}
             for j in range(2)}
     new_data = {'()': {f'({i},)': np.random.rand() for i in range(4)}}
-    tree = MiscTree(data=data)
+    tree = MiscTree(data)
     tree[(), (0,)] = 100
     assert tree.get(('()', '(0,)')) == 100
     tree.update(new_data)
@@ -66,12 +68,10 @@ def test_misctree():
         assert np.all([isinstance(ele, int) for ele in itertools.chain(alpha, beta)])
 
     # Test serialization of InterpolatorState
-    data = {(j, 3): {(i,): LagrangeState(weights=[np.random.rand(3)], x_grids=[np.random.rand(3)]) for i in range(4)}
-            for j in range(2)}
+    data = {(j, 3): {(i,): LagrangeState(weights={'x': np.random.rand(3)}, x_grids={'x': np.random.rand(3)})
+                     for i in range(4)} for j in range(2)}
     tree = MiscTree(data)
-    serialized_tree = tree.serialize()
-    deserialized_tree = MiscTree.deserialize(serialized_tree)
-    assert deserialized_tree == tree
+    assert MiscTree.deserialize(tree.serialize()) == tree
 
 
 def simple_model(x, alpha=(1,), error=0.1, output_path='.'):
@@ -87,7 +87,8 @@ def test_component_validation(tmp_path):
     comp = Component(my_model, inputs, outputs)
     assert len(comp.active_set) + len(comp.candidate_set) == 0
     assert comp.xdim + comp.ydim == len(inputs) + len(outputs)
-    for attribute in ['model_kwargs', 'misc_states', 'misc_costs', 'misc_coeff', 'interpolator', 'training_data']:
+    for attribute in ['model_kwargs', 'misc_states', 'misc_costs', 'misc_coeff_train', 'misc_coeff_test',
+                      'interpolator', 'training_data']:
         assert isinstance(getattr(comp, attribute), Serializable)
 
     # Test partial validation
@@ -104,10 +105,10 @@ def test_component_validation(tmp_path):
             misc_costs.setdefault(alpha, dict())
             misc_states.setdefault(alpha, dict())
             misc_costs[alpha][beta] = 1.0 if np.random.rand() < 0.5 else -1.0
-            misc_states[alpha][beta] = LagrangeState(weights=[np.random.rand(3)], x_grids=[np.random.rand(3)])
+            misc_states[alpha][beta] = LagrangeState(weights={'x': np.random.rand(3)}, x_grids={'x': np.random.rand(3)})
 
     c = Component(simple_model, variables[:5], outputs=variables[5:],
-                  model_kwargs={'error': 0.2}, max_alpha=(2,), max_beta=(3, 2),
+                  model_kwargs={'error': 0.2}, max_alpha=(2,), max_beta_train=(3, 2), max_beta_interpolator=(3, 3),
                   active_set=active_set, misc_states=misc_states, misc_costs=misc_costs)
     serialize_kwargs = {'training_data': {'save_path': tmp_path / 'training_data.pkl'}}
     c2 = c.serialize(serialize_kwargs=serialize_kwargs)
@@ -130,6 +131,9 @@ class CustomInterpolator(Interpolator, Base64Serializable):
     kernel_type: str = 'gaussian'
 
     def refine(self, *args):
+        pass
+
+    def predict(self, *args):
         pass
 
 
@@ -177,7 +181,7 @@ def test_save_and_load(tmp_path):
             misc_costs.setdefault(alpha, dict())
             misc_states.setdefault(alpha, dict())
             misc_costs[alpha][beta] = 1.0 if np.random.rand() < 0.5 else -1.0
-            misc_states[alpha][beta] = LagrangeState(weights=[np.random.rand(5)], x_grids=[np.random.rand(5)])
+            misc_states[alpha][beta] = LagrangeState(weights={'x': np.random.rand(5)}, x_grids={'x': np.random.rand(5)})
     c = Component(simple_model, [Variable() for i in range(3)], [Variable() for i in range(3)],
                   active_set=active_set, misc_costs=misc_costs, misc_states=misc_states,
                   model_kwargs={'output_path': '.', 'opts': {'max_iter': 1000}}, max_alpha=(3,), status=1)

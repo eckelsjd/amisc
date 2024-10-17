@@ -33,7 +33,7 @@ from collections import ChainMap, deque, UserList
 from concurrent.futures import Executor, wait, ALL_COMPLETED
 from datetime import timezone
 from pathlib import Path
-from typing import ClassVar, Annotated, Optional, Callable
+from typing import ClassVar, Annotated, Optional, Callable, Literal
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -42,42 +42,21 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from uqtils import ax_default
 
-from amisc.component import Component, IndexSet
+from amisc.component import Component, IndexSet, MiscTree
 from amisc.serialize import Serializable
-from amisc.utils import get_logger, format_inputs, format_outputs, constrained_lls, as_tuple, relative_error
+from amisc.utils import get_logger, format_inputs, format_outputs, constrained_lls, relative_error
 from amisc.variable import VariableList
-from amisc.typing import Dataset, TrainIteration
+from amisc.typing import Dataset, TrainIteration, MultiIndex
 
 __all__ = ['TrainHistory', 'System']
 
 
-class TrainHistory(BaseModel, UserList, Serializable):
-    """Stores the training history of a system surrogate."""
-    model_config = ConfigDict(validate_assignment=True, validate_default=True)
-    data: list[TrainIteration]  # underlying `list` data structure
+class TrainHistory(UserList, Serializable):
+    """Stores the training history of a system surrogate. as a list of `TrainIteration` objects."""
 
-    def __init__(self, *args, data: list = None):
-        data_list = data or []
-        data_list.extend(args)
-        super().__init__(data=data_list)
-
-    def __str__(self):
-        return str(self.data)
-
-    def __repr__(self):
-        return str(self)
-
-    def __iter__(self):
-        yield from self.data
-
-    def __eq__(self, other):
-        if isinstance(other, TrainHistory):
-            for res1, res2 in zip(self.data, other.data):
-                if res1 != res2:
-                    return False
-            return True
-        else:
-            return False
+    def __init__(self, data: list = None):
+        data = data or []
+        super().__init__(self._validate_data(data))
 
     def serialize(self) -> list[dict]:
         """Return a list of each result in the history serialized to a dictionary."""
@@ -92,23 +71,18 @@ class TrainHistory(BaseModel, UserList, Serializable):
     @classmethod
     def deserialize(cls, serialized_data: list[dict]) -> TrainHistory:
         """Deserialize using pydantic model validation on `TrainHistory.data`."""
-        return TrainHistory(data=serialized_data)
+        return TrainHistory(serialized_data)
 
-    @field_validator('data', mode='before')
     @classmethod
     def _validate_data(cls, data: list[dict]) -> list[TrainIteration]:
-        ret_list = []
-        for item in data:
-            item = cls._validate_item(item)
-            ret_list.append(item)
-        return ret_list
+        return [cls._validate_item(item) for item in data]
 
     @classmethod
     def _validate_item(cls, item: dict):
         """Format a `TrainIteration` `dict` item before appending to the history."""
         item.setdefault('test_error', None)
-        item['alpha'] = as_tuple(item['alpha'])
-        item['beta'] = as_tuple(item['beta'])
+        item['alpha'] = MultiIndex(item['alpha'])
+        item['beta'] = MultiIndex(item['beta'])
         item['num_evals'] = int(item['num_evals'])
         return item
 
@@ -155,11 +129,6 @@ class System(BaseModel, Serializable):
                     except TypeError as e:
                         raise ValueError(f"Invalid component: {a}") from e
 
-        # Make sure nested pydantic validation works for train_history
-        if (value := kwargs.get('train_history', None)) is not None:
-            kwargs['train_history'] = {'data': value} if (not isinstance(value, dict) or
-                                                          value.get('data', None) is None) else value
-
         super().__init__(components=components, **kwargs)
         self.root_dir = root_dir
         self.executor = executor
@@ -190,6 +159,14 @@ class System(BaseModel, Serializable):
             comp.outputs.update({var.name: var for var in merged_vars.values() if var in comp.outputs})
 
         return comps
+
+    @field_validator('train_history')
+    @classmethod
+    def _validate_train_history(cls, history) -> TrainHistory:
+        if isinstance(history, TrainHistory):
+            return history
+        else:
+            return TrainHistory.deserialize(history)
 
     def build_graph(self):
         """Build a directed graph of the system components based on their input-output relationships."""
@@ -513,19 +490,19 @@ class System(BaseModel, Serializable):
         self.save_to_file(f'system_iter{self.refine_level}.yml')
         self.logger.info(f'Final system surrogate: \n {self}')
 
-    def test_set_performance(self, xtest, ytest, training: bool = True):
+    def test_set_performance(self, xtest, ytest, index_set='train'):
         """Compute the relative L2 error on a test set for the given target output variables.
 
         :param xtest: `dict` of test set input samples
         :param ytest: `dict` of test set output samples
-        :param training: whether to call the system surrogate in training or evaluation mode
+        :param index_set: index set to use for prediction (defaults to 'train')
         :returns: `dict` of relative L2 errors for each target output variable
         """
-        ysurr = self.predict(xtest, training=training)
+        ysurr = self.predict(xtest, index_set=index_set)
         return {var: relative_error(ysurr[var], ytest[var]) for var in ytest}
 
     def refine(self, targets: list = None, num_refine: int = 100, update_bounds: bool = True,
-               executor: Executor = None):
+               executor: Executor = None) -> TrainIteration:
         """Perform a single adaptive refinement step on the system surrogate.
 
         :param targets: list of system output variables to focus refinement on, use all outputs if not specified
@@ -541,7 +518,7 @@ class System(BaseModel, Serializable):
 
         # Check for uninitialized components and refine those first
         for comp in self.components:
-            if len(comp.active_set) == 0:
+            if len(comp.active_set) == 0 and comp.has_surrogate:
                 alpha_star = (0,) * len(comp.max_alpha)
                 beta_star = (0,) * len(comp.max_beta)
                 self.logger.info(f"Initializing component {comp.name}: adding {(alpha_star, beta_star)} to active set")
@@ -554,7 +531,7 @@ class System(BaseModel, Serializable):
 
         # Compute entire integrated-surrogate on a random test set for global system QoI error estimation
         x_samples = self.sample_inputs(num_refine)
-        y_curr = self.predict(x_samples, training=True, targets=targets)
+        y_curr = self.predict(x_samples, index_set='train', targets=targets)
         coupling_vars = {k: v for k, v in self.coupling_variables().items() if k in y_curr}
 
         y_min, y_max = None, None
@@ -566,17 +543,20 @@ class System(BaseModel, Serializable):
         error_max, error_indicator = -np.inf, -np.inf
         comp_star, alpha_star, beta_star, err_star, cost_star = None, None, None, -np.inf, 0
         for comp in self.components:
+            if not comp.has_surrogate:  # Skip analytic models that don't need a surrogate
+                continue
+
             self.logger.info(f"Estimating error for component '{comp.name}'...")
 
             if len(comp.candidate_set) > 0:
                 if executor is None:
-                    ret = [self.predict(x_samples, training=True, targets=targets,
-                                        index_set={comp.name: comp.active_set.data + [(alpha, beta)]})
+                    ret = [self.predict(x_samples, targets=targets, index_set={comp.name: {(alpha, beta)}},
+                                        incremental={comp.name: True})
                            for alpha, beta in comp.candidate_set]
                 else:
                     temp_buffer = self._remove_unpickleable()
-                    futures = [executor.submit(self.predict, x_samples, training=True, targets=targets,
-                                               index_set={comp.name: comp.active_set.data + [(alpha, beta)]})
+                    futures = [executor.submit(self.predict, x_samples, targets=targets,
+                                               index_set={comp.name: {(alpha, beta)}}, incremental={comp.name: True})
                                for alpha, beta in comp.candidate_set]
                     wait(futures, timeout=None, return_when=ALL_COMPLETED)
                     ret = [f.result() for f in futures]
@@ -625,9 +605,20 @@ class System(BaseModel, Serializable):
         return {'component': comp_star, 'alpha': alpha_star, 'beta': beta_star, 'num_evals': num_evals,
                 'added_cost': cost_star, 'added_error': err_star}
 
+    def _set_default(self, struct: dict, default=None):
+        """Helper to set a default value for each component key in a `dict`. Ensures all components have a value."""
+        if struct is not None:
+            if not isinstance(struct, dict):
+                struct = {node: struct for node in self.graph.nodes}  # use same for each component
+        else:
+            struct = {node: default for node in self.graph.nodes}
+        return {node: struct.get(node, default) for node in self.graph.nodes}
+
     def predict(self, x: dict | Dataset, max_fpi_iter: int = 100, anderson_mem: int = 10, fpi_tol: float = 1e-10,
                 use_model: str | tuple | dict = None, model_dir: str | Path = None, verbose: bool = False,
-                training: bool = False, index_set: dict[str: IndexSet] = None, targets=None) -> Dataset:
+                index_set: dict[str: IndexSet | Literal['train', 'test']] = 'test',
+                misc_coeff: dict[str: MiscTree] = None,
+                incremental: dict[str, bool] = False, targets=None) -> Dataset:
         """Evaluate the system surrogate at inputs `x`. Return `y = system(x)`.
 
         !!! Warning "Computing the true model with feedback loops"
@@ -645,8 +636,12 @@ class System(BaseModel, Serializable):
                            specify a `dict` of the above to assign different model fidelities for diff components
         :param model_dir: directory to save model outputs if `use_model` is specified
         :param verbose: whether to print out iteration progress during execution
-        :param training: whether to call the system surrogate in training or evaluation mode, ignored if `use_model`
-        :param index_set: `dict(comp=[indices])` to override default index set for a component
+        :param index_set: `dict(comp=[indices])` to override the index set for a component, defaults to using the
+                          `test` set for every component. Can also specify `train` for any component or a valid
+                          `IndexSet` object.
+        :param misc_coeff: `dict(comp=MiscTree)` to override the default coefficients for a component, passes through
+                           along with `index_set` and `incremental` to `comp.predict()`.
+        :param incremental: whether to add `index_set` to the current active set for each component (temporarily)
         :param targets: list of output variables to return, defaults to returning all system outputs
         :returns: `dict` of output variables - the surrogate approximation of the system outputs (or the true model)
         """
@@ -675,13 +670,11 @@ class System(BaseModel, Serializable):
                 return np.logical_and(self.valid_idx, ~self.converged_idx)
         samples = _Converged(N)
 
-        # Interpret which model fidelities to use for each component (if specified)
-        if use_model is not None:
-            if not isinstance(use_model, dict):
-                use_model = {node: use_model for node in self.graph.nodes}  # use same for each component
-        else:
-            use_model = {node: None for node in self.graph.nodes}
-        use_model = {node: use_model.get(node, None) for node in self.graph.nodes}
+        # Ensure use_model, index_set, and incremental are specified for each component model
+        use_model = self._set_default(use_model, None)
+        index_set = self._set_default(index_set, 'test')
+        misc_coeff = self._set_default(misc_coeff, None)
+        incremental = self._set_default(incremental, False)
 
         # Convert system into DAG by grouping strongly-connected-components
         dag = nx.condensation(self.graph)
@@ -704,13 +697,13 @@ class System(BaseModel, Serializable):
                 comp_input = {var: arr[samples.valid_idx, ...] for var, arr in all_inputs.items() if var in comp.inputs}
 
                 # Compute outputs
-                indices = index_set.get(scc[0], None) if index_set is not None else None
                 if model_dir is not None:
                     output_dir = Path(model_dir) / scc[0]
                     if not output_dir.exists():
                         os.mkdir(output_dir)
                 comp_output = comp.predict(comp_input, use_model=use_model.get(scc[0]), model_dir=output_dir,
-                                           training=training, index_set=indices)
+                                           index_set=index_set.get(scc[0]), incremental=incremental.get(scc[0]),
+                                           misc_coeff=misc_coeff.get(scc[0]))
                 for var, arr in comp_output.items():
                     output_shape = arr.shape[1:]
                     y.setdefault(var, np.full((N, *output_shape), np.nan))
@@ -808,9 +801,9 @@ class System(BaseModel, Serializable):
                                 comp_input[var] = all_inputs[var][samples.curr_idx, ...]
 
                         # Compute component outputs (just don't do this FPI with the real models, please..)
-                        indices = index_set.get(node, None) if index_set is not None else None
-                        comp_output = comp.predict(comp_input, use_model=use_model.get(node),
-                                                   model_dir=None, training=training, index_set=indices)
+                        comp_output = comp.predict(comp_input, use_model=use_model.get(node), model_dir=None,
+                                                   index_set=index_set.get(node), incremental=incremental.get(node),
+                                                   misc_coeff=misc_coeff.get(node))
                         for var, arr in comp_output.items():
                             output_shape = arr.shape[1:]
                             if y.get(var) is not None:

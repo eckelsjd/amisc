@@ -99,11 +99,12 @@ def test_compression_1d():
         return {'p': amp[..., np.newaxis] * np.tanh(np.squeeze(coords))}
 
     # Generate SVD data matrix
+    rank = 4
     samples = A.sample(50)
     svd_coords = np.linspace(-2, 2, 200)
     outputs = model({str(A): samples}, svd_coords)
     data_matrix = outputs[p].T  # (dof, num_samples)
-    p.compression = SVD(energy_tol=0.99, coords=svd_coords, data_matrix=data_matrix)
+    p.compression = SVD(rank=rank, coords=svd_coords, data_matrix=data_matrix)
 
     # Test compression
     coarse_shape = 25
@@ -111,13 +112,29 @@ def test_compression_1d():
     num_test = (5, 20)
     samples = A.sample(num_test)
     outputs = model({str(A): samples}, coarse_coords)
-    outputs_reduced = p.compress(outputs, coord=coarse_coords)
+    outputs_reduced = p.compress(outputs, coords=coarse_coords)
     outputs_reconstruct = p.reconstruct(outputs_reduced)
 
     y = outputs[p]
     yhat = outputs_reconstruct[p]
-
     assert relative_error(yhat, y) < 0.01
+
+    # Test sampling latent coefficients
+    latent_min = np.min(outputs_reduced['latent'], axis=(0, 1))
+    latent_max = np.max(outputs_reduced['latent'], axis=(0, 1))
+    p.update(domain=(-1, 1))
+    assert len(p.get_domain()) == rank  # inferred from compression rank
+    p.update(domain=[(lmin, lmax) for lmin, lmax in zip(latent_min, latent_max)], norm='linear(0.5)')
+    domain = p.get_domain()
+    samples = p.sample_domain(num_test)
+    nominal = p.sample(num_test)
+    lb = np.atleast_1d([d[0] for d in domain])
+    ub = np.atleast_1d([d[1] for d in domain])
+    assert len(domain) == rank
+    assert samples.shape == num_test + (rank,)
+    assert nominal.shape == num_test + (rank,)
+    assert np.all(np.logical_and(lb < samples, samples < ub))
+    assert np.allclose(nominal - (lb+ub)/2, 0)
 
 
 def test_compression_nd():

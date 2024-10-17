@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.interpolate import RBFInterpolator
-from typing_extensions import TypedDict
 
 from amisc.serialize import PickleSerializable
 
@@ -139,7 +138,9 @@ class Compression(PickleSerializable, ABC):
 
     @abstractmethod
     def compute_map(self, **kwargs):
-        """Compute and store the compression map. Must set the value of `coords` and `_is_computed`."""
+        """Compute and store the compression map. Must set the value of `coords` and `_is_computed`. Should
+        use the same normalization as the parent `Variable` object.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -158,6 +159,11 @@ class Compression(PickleSerializable, ABC):
         :param compressed: `(..., rank)` - the compressed data to reconstruct
         :return: `(..., dof)` - the reconstructed data with full `dof`
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def latent_size(self) -> int:
+        """Return the size of the latent space."""
         raise NotImplementedError
 
     @classmethod
@@ -212,3 +218,6 @@ class SVD(Compression):
 
     def reconstruct(self, compressed):
         return np.squeeze(self.projection_matrix @ compressed[..., np.newaxis], axis=-1)
+
+    def latent_size(self):
+        return self.rank
