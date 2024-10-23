@@ -1,4 +1,7 @@
-"""Provides serialization protocols for objects in the package.
+"""Provides serialization protocols for objects in the package. Serialization in the context of `amisc`
+means converting an object to a built-in Python object (e.g. string, dictionary, float, etc.). The serialized objects
+are then easy to convert to binary or text forms for storage or transmission using various protocols (i.e. pickle,
+json, yaml, etc.).
 
 Includes:
 
@@ -21,22 +24,23 @@ from typing import Any
 import yaml
 
 from amisc.utils import parse_function_string
-from amisc.typing import builtin
 
 __all__ = ['Serializable', 'Base64Serializable', 'StringSerializable', 'PickleSerializable', 'YamlSerializable']
+
+_builtin = str | dict | list | int | float | tuple | bool  # Generic type for common built-in Python objects
 
 
 class Serializable(ABC):
     """Mixin interface for serializing and deserializing objects."""
 
     @abstractmethod
-    def serialize(self) -> builtin:
+    def serialize(self) -> _builtin:
         """Serialize to a builtin Python object."""
         raise NotImplementedError
 
     @classmethod
     @abstractmethod
-    def deserialize(cls, serialized_data: builtin) -> Serializable:
+    def deserialize(cls, serialized_data: _builtin) -> Serializable:
         """Construct a `Serializable` object from serialized data.
 
         !!! Note "Passing arguments to deserialize"
@@ -102,10 +106,10 @@ class PickleSerializable(Serializable):
 
 @dataclass
 class YamlSerializable(Serializable):
-    """Metaclass for serializing an object using Yaml load/dump from string."""
+    """Mixin for serializing an object using Yaml load/dump from string."""
     obj: Any
 
-    def serialize(self):
+    def serialize(self) -> str:
         with tempfile.NamedTemporaryFile(mode='w+', encoding='utf-8', suffix='.yml') as f:
             yaml.dump(self.obj, f, allow_unicode=True)
             f.seek(0)
@@ -113,6 +117,6 @@ class YamlSerializable(Serializable):
         return s
 
     @classmethod
-    def deserialize(cls, yaml_str) -> YamlSerializable:
+    def deserialize(cls, yaml_str: str) -> YamlSerializable:
         obj = yaml.load(yaml_str, yaml.Loader)
         return YamlSerializable(obj=obj)

@@ -12,93 +12,91 @@ bottom up, you have:
 - **components** that wrap a model for a single discipline, and a
 - **system** that defines the connections between components in a multidisciplinary system.
 
-The variables, interpolators, and components all have abstract base classes, so that the **system** is ultimately
-independent of the specific models, interpolation methods, or underlying variables. As such, the primary top-level
-object that users of the `amisc` package will interact with is the `SystemSurrogate`.
+The **system** is ultimately independent of the specific models, interpolation methods, or underlying variables.
+As such, the primary top-level object that users of the `amisc` package will interact with is the `System`.
 
-Variables additionally use `Transform` and `Distribution` objects to manage normalization and PDFs, respectively.
+Variables additionally use `Transform`, `Distribution`, and `Compression` interfaces to manage normalization, PDFs,
+and field quantity compression, respectively.
+
+Currently, only Lagrange polynomial interpolation is implemented as the underlying surrogate method with a
+sparse grid data structure. SVD is also the only currently implemented method for compression. However, interfaces
+are provided for `Interpolator`, `TrainingData`, and `Compression` to allow for easy extension to other methods.
 
 Here is a class diagram summary of this workflow:
 
 ``` mermaid
 classDiagram
     namespace Core {
-        class SystemSurrogate {
-          +list[Variable] exo_vars
-          +list[Variable] coupling_vars
-          +int refine_level
+        class System {
+          +list[Component] components
+          +TrainHistory train_history
           +fit()
           +predict(x)
-          +sample_inputs(size)
-          +insert_component(comp)
         }
-        class ComponentSurrogate {
-          <<abstract>>
-          +IndexSet index_set
-          +IndexSet candidate_set
-          +list[Variable] x_vars
-          +dict[str: BaseInterpolator] surrogates
-          +dict[str: float] misc_coeff
-          +predict(x)
+        class Component {
+          +callable model
+          +list[Variable] inputs
+          +list[Variable] outputs
+          +Interpolator interpolator
+          +TrainingData training_data
           +activate_index(alpha, beta)
-          +add_surrogate(alpha, beta)
-          +update_misc_coeff()
+          +predict(x)
         }
-        class BaseInterpolator {
-          <<abstract>>
-          +tuple beta
-          +list[Variable] x_vars
-          +np.ndarray xi
-          +np.ndarray yi
-          +set_yi()
-          +refine()
-          +__call__(x)
+        class Variable {
+          +str name
+          +tuple domain
+          +Distribution dist
+          +Transform norm
+          +Compression comp
+          +sample()
+          +normalize()
+          +compress()
         }
     }
-    class SparseGridSurrogate {
-      +np.ndarray x_grids
-      +dict xi_map
-      +dict yi_map
-      +get_tensor_grid(alpha, beta)
+    class Interpolator {
+      <<abstract>>
+      + refine()
+      + predict(x)
     }
-    class LagrangeInterpolator {
-      +np.ndarray x_grids
-      +np.ndarray weights
-      +get_grid_sizes()
-      +leja_1d()
-    }
-    class Variable {
-      +str name
-      +tuple domain
-      +str units
-      +Distribution dist
-      +Transform norm
-      +float nominal
-      +normalize()
-      +compress()
+    class TrainingData {
+      <<abstract>>
+      +get()
+      +set()
+      +refine()
     }
     class Transform {
+      <<abstract>>
       +transform(values)
     }
     class Distribution {
+      <<abstract>>
       +sample(size)
       +pdf(x)
     }
-    SystemSurrogate o-- "1..n" ComponentSurrogate
-    ComponentSurrogate o-- "1..n" BaseInterpolator
+    class Compression {
+      <<abstract>>
+      +compress(values)
+      +reconstruct(values)
+    }
+    System --o "1..n" Component
+    Component --o "1..n" Variable
     direction LR
-    ComponentSurrogate <|-- SparseGridSurrogate
-    BaseInterpolator <|-- LagrangeInterpolator
-    SparseGridSurrogate ..> LagrangeInterpolator
-    Variable o-- Transform
-    Variable o-- Distribution
+    Component --* Interpolator
+    Component --* TrainingData
+    Variable --o Transform
+    Variable --o Distribution
+    Variable --o Compression
 ```
-Note how the `SystemSurrogate` aggregates the `ComponentSurrogate`, which aggregates the `BaseInterpolator`. In other
-words, interpolators can act independently of components, and components can act independently of systems. All three
-make use of the `Variable` objects (these connections are not shown for visual clarity). Currently, the only
-underlying surrogate method that is implemented here is Lagrange polynomial interpolation (i.e. the
-`LagrangeInterpolator`). If one wanted to use neural networks instead, the only change required is a new
-implementation of `BaseInterpolator`.
+
+Note how the `System` aggregates the `Component`, which aggregates the `Variable`. In other
+words, variables can act independently of components, and components can act independently of systems. Components
+make use of `Interpolator` and `TrainingData` interfaces to manage the underlying surrogate method
+and training data, respectively. Similarly, `Variables` use `Transform`, `Distribution`, and `Compression`
+interfaces to manage normalization, PDFs, and field quantity compression, respectively.
+
+The `amisc` package also includes a `FileLoader` interface for loading and dumping `amisc` objects to/from file.
+We recommend using the built-in `YamlLoader` for this purpose, as it includes custom YAML tags for reading/writing
+`amisc` objects from file.
 """
 from abc import ABC as _ABC, abstractmethod as _abstractmethod
 from pathlib import Path as _Path

@@ -23,6 +23,8 @@ with the custom methods.
 - model can return y_var_coords along with full fields y_var_XX aligning with var.compression.fields
 - model can request {var.name}_coords in kwargs and get them from call_model() during activate_index
 - can also request specific coords in model_kwargs, and those will be passed through call_model() after interpolation
+- LATENT_STR_ID -- training_Data/interpolator can import this to handle latent coeff variables in a special way _if they want to_
+- vectorized alpha will be np.array (*shape, len(alpha))
 
 
 Serialization

@@ -4,7 +4,7 @@ Especially useful for field quantities with high dimensions.
 
 Includes:
 
-- `Compression` — an object for specifying a compression method for field quantities.
+- `Compression` — an interface for specifying a compression method for field quantities.
 - `SVD` — a Singular Value Decomposition (SVD) compression method.
 """
 from __future__ import annotations
@@ -22,7 +22,37 @@ __all__ = ["Compression", "SVD"]
 
 @dataclass
 class Compression(PickleSerializable, ABC):
-    """Base class for compression methods."""
+    """Base class for compression methods. Compression methods should:
+
+    - `compute_map` - compute the compression map from provided data
+    - `compress` - compress data into a latent space
+    - `reconstruct` - reconstruct the compressed data back into the full space
+    - `latent_size` - return the size of the latent space
+    - `estimate_latent_ranges` - estimate the range of the latent space coefficients
+
+    !!! Note "Specifying fields"
+        The `fields` attribute is a list of strings that specify the field quantities to compress. For example, for
+        3D velocity data, the fields might be `['ux', 'uy', 'uz']`. The length of the
+        `fields` attribute is used to determine the number of quantities of interest at each grid point in `coords`.
+        Note that interpolation to/from the compression grid will assume a shape of `(num_pts, num_qoi)` for the
+        states on the grid, where `num_qoi` is the length of `fields` and `num_pts` is the length of `coords`. When
+        constructing the compression map, this important fact should be considered when passing data to
+        `compute_map`.
+
+    In order to use a `Compression` object, you must first call `compute_map` to compute the compression map, which
+    should set the private value `self._map_computed=True`. The `coords` of the compression grid must also be
+    specified. The `coords` should have the shape `(num_pts, dim)` where `num_pts` is the number of points in the
+    compression grid and `dim` is the number of spatial dimensions. If `coords` is a 1d array, then the `dim` is
+    assumed to be 1.
+
+    :ivar fields: list of field quantities to compress
+    :ivar method: the compression method to use (only svd is supported for now)
+    :ivar coords: the coordinates of the compression grid
+    :ivar interpolate_method: the interpolation method to use to interpolate to/from the compression grid
+                              (only `rbf` (i.e. radial basis function) is supported for now)
+    :ivar interpolate_opts: additional options to pass to the interpolation method
+    :ivar _map_computed: whether the compression map has been computed
+    """
     fields: list[str] = field(default_factory=list)
     method: str = 'svd'
     coords: np.ndarray = None  # (num_pts, dim)
@@ -42,17 +72,17 @@ class Compression(PickleSerializable, ABC):
 
     @property
     def num_pts(self):
-        """Number of physical points in the compression grid"""
+        """Number of physical points in the compression grid."""
         return self.coords.shape[0] if self.coords is not None else None
 
     @property
     def num_qoi(self):
-        """Number of quantities of interest at each grid point, (i.e. ux, uy, uz for 3d velocity data)"""
+        """Number of quantities of interest at each grid point, (i.e. `ux, uy, uz` for 3d velocity data)."""
         return len(self.fields) if self.fields is not None else 1
 
     @property
     def dof(self):
-        """Total degrees of freedom in the compression grid."""
+        """Total degrees of freedom in the compression grid (i.e. `num_pts * num_qoi`)."""
         return self.num_pts * self.num_qoi if self.num_pts is not None else None
 
     def _correct_coords(self, coords):
@@ -140,6 +170,11 @@ class Compression(PickleSerializable, ABC):
     def compute_map(self, **kwargs):
         """Compute and store the compression map. Must set the value of `coords` and `_is_computed`. Should
         use the same normalization as the parent `Variable` object.
+
+        !!! Note
+            You should pass any required data to `compute_map` with the assumption that the data will be used in the
+            shape `(num_pts, num_qoi)` where `num_qoi` is the length of `fields` and `num_pts` is the length of
+            `coords`. This is the shape that the compression map should be constructed in.
         """
         raise NotImplementedError
 
@@ -148,7 +183,7 @@ class Compression(PickleSerializable, ABC):
         """Compress the data into a latent space.
 
         :param data: `(..., dof)` - the data to compress from full size of `dof`
-        :return: `(..., rank)` - the compressed latent space data
+        :return: `(..., rank)` - the compressed latent space data with size `rank`
         """
         raise NotImplementedError
 
@@ -166,6 +201,11 @@ class Compression(PickleSerializable, ABC):
         """Return the size of the latent space."""
         raise NotImplementedError
 
+    @abstractmethod
+    def estimate_latent_ranges(self) -> list[tuple[float, float]]:
+        """Estimate the range of the latent space coefficients."""
+        raise NotImplementedError
+
     @classmethod
     def from_dict(cls, spec: dict) -> Compression:
         """Construct a `Compression` object from a spec dictionary."""
@@ -179,23 +219,41 @@ class Compression(PickleSerializable, ABC):
 
 @dataclass
 class SVD(Compression):
-    """A Singular Value Decomposition (SVD) compression method."""
+    """A Singular Value Decomposition (SVD) compression method. The SVD will be computed on initialization if the
+    `data_matrix` is provided.
+
+    :ivar data_matrix: `(dof, num_samples)` - the data matrix
+    :ivar projection_matrix: `(dof, rank)` - the projection matrix
+    :ivar rank: the rank of the SVD decomposition
+    :ivar energy_tol: the energy tolerance of the SVD decomposition
+    """
     data_matrix: np.ndarray = None          # (dof, num_samples)
     projection_matrix: np.ndarray = None    # (dof, rank)
     rank: int = None
     energy_tol: float = None
 
     def __post_init__(self):
+        """Compute the SVD if the data matrix is provided."""
         if (data_matrix := self.data_matrix) is not None:
             self.compute_map(data_matrix, rank=self.rank, energy_tol=self.energy_tol)
 
-    def compute_map(self, data_matrix: np.ndarray, rank: int = None, energy_tol: float = None):
-        """Compute the SVD compression map from the data matrix.
+    def compute_map(self, data_matrix: np.ndarray | dict, rank: int = None, energy_tol: float = None):
+        """Compute the SVD compression map from the data matrix. Recall that `dof` is the total number of degrees of
+        freedom, equal to the number of grid points `num_pts` times the number of quantities of interest `num_qoi`
+        at each grid point.
 
-        :param data_matrix: `(dof, num_samples)` - the data matrix
+        :param data_matrix: `(dof, num_samples)` - the data matrix. If passed in as a `dict`, then the data matrix
+                            will be formed by concatenating the values of the `dict` along the last axis in the order
+                            of the `fields` attribute and flattening the last two axes. This is useful for passing
+                            in a dictionary of field values like `{field1: (num_samples, num_pts), field2: ...}`
+                            which ensures consistency of shape with the compression `coords`.
         :param rank: the rank of the SVD decomposition
         :param energy_tol: the energy tolerance of the SVD decomposition
         """
+        if isinstance(data_matrix, dict):
+            data_matrix = np.concatenate([data_matrix[field][..., np.newaxis] for field in self.fields], axis=-1)
+            data_matrix = data_matrix.reshape(*data_matrix.shape[:-2], -1).T  # (dof, num_samples)
+
         nan_idx = np.any(np.isnan(data_matrix), axis=0)
         data_matrix = data_matrix[:, ~nan_idx]
         u, s, vt = np.linalg.svd(data_matrix)
@@ -221,3 +279,12 @@ class SVD(Compression):
 
     def latent_size(self):
         return self.rank
+
+    def estimate_latent_ranges(self):
+        if self.map_exists:
+            latent_data = self.compress(self.data_matrix.T)  # (rank, num_samples)
+            latent_min = np.min(latent_data, axis=0)
+            latent_max = np.max(latent_data, axis=0)
+            return [(lmin, lmax) for lmin, lmax in zip(latent_min, latent_max)]
+        else:
+            return None

@@ -3,7 +3,6 @@ import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.linalg import lapack
 from scipy.optimize import fsolve
 from scipy.stats import gaussian_kde
 from uqtils import ax_default

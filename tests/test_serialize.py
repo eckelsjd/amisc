@@ -1,3 +1,4 @@
+"""Test serialization mixin classes."""
 from amisc.serialize import Base64Serializable, YamlSerializable, PickleSerializable, Serializable, StringSerializable
 
 

@@ -1,4 +1,5 @@
-"""Classes for storing and managing training data for surrogate models.
+"""Classes for storing and managing training data for surrogate models. The `TrainingData` interface also
+specifies how new training data should be sampled over the input space (i.e. experimental design).
 
 Includes:
 
@@ -20,23 +21,32 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MaxAbsScaler
 from numpy.typing import ArrayLike
 
-from amisc import VariableList
 from amisc.serialize import PickleSerializable, Serializable
-from amisc.typing import MultiIndex, Dataset
+from amisc.typing import MultiIndex, Dataset, LATENT_STR_ID
 
 __all__ = ['TrainingData', 'SparseGrid']
 
 
 class TrainingData(Serializable, ABC):
-    """Interface for storing surrogate training data."""
+    """Interface for storing and collecting surrogate training data. `TrainingData` objects should:
+
+    - `get` - retrieve the training data
+    - `set` - store the training data
+    - `refine` - generate new design points for the parent `Component` model
+    - `clear` - clear all training data
+    - `set_errors` - store error information (if desired)
+    - `impute_missing_data` - fill in missing values in the training data (if desired)
+    """
 
     @abstractmethod
-    def get(self, alpha: MultiIndex, beta: MultiIndex, y_vars: list[str] = None) -> tuple[Dataset, Dataset]:
+    def get(self, alpha: MultiIndex, beta: MultiIndex, y_vars: list[str] = None,
+            skip_nan: bool = False) -> tuple[Dataset, Dataset]:
         """Return the training data for a given multi-index pair.
 
         :param alpha: the model fidelity indices
         :param beta: the surrogate fidelity indices
         :param y_vars: the keys of the outputs to return (if `None`, return all outputs)
+        :param skip_nan: skip any data points with remaining `nan` values if `skip_nan=True`
         :returns: `dicts` of model inputs `x_train` and outputs `y_train`
         """
         raise NotImplementedError
@@ -73,28 +83,42 @@ class TrainingData(Serializable, ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def refine(self, alpha: MultiIndex, beta: MultiIndex, x_vars: VariableList) -> tuple[list[Any], Dataset]:
-        """Return new design/training points for a given multi-index pair.
+    def refine(self, alpha: MultiIndex, beta: MultiIndex, input_domains: dict[str, tuple],
+               weight_fcns: dict[str, callable] = None) -> tuple[list[Any], Dataset]:
+        """Return new design/training points for a given multi-index pair and their coordinates/locations in the
+        `TrainingData` storage structure.
 
         !!! Example
             ```python
-            x_vars = VariableList(['x1', 'x2', 'x3'])
-            alpha, beta = (0, 1), (1, 1, 2)
-            coords, x_train = training_data.refine(alpha, beta, x_vars)
+            domains = {'x1': (0, 1), 'x2': (0, 1)}
+            alpha, beta = (0, 1), (1, 1)
+            coords, x_train = training_data.refine(alpha, beta, domains)
             y_train = my_model(x_train)
             training_data.set(alpha, beta, coords, y_train)
             ```
 
+        The returned data coordinates `coords` should be any object that can be used to locate the corresponding
+        `x_train` training points in the `TrainingData` storage structure. These `coords` will be passed back to the
+        `set` function to store the training data at a later time (i.e. after model evaluation).
+
         :param alpha: the model fidelity indices
         :param beta: the surrogate fidelity indices
-        :param x_vars: the list of input variables
-        :returns: a list of new grid coordinates `coords` and the corresponding training points `x_train`
+        :param input_domains: a `dict` specifying domain bounds for each input variable
+        :param weight_fcns: a `dict` of weighting functions for each input variable
+        :returns: a list of new data coordinates `coords` and the corresponding training points `x_train`
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def clear(self):
+        """Clear all training data."""
         raise NotImplementedError
 
     @classmethod
     def from_dict(cls, config: dict) -> TrainingData:
-        """Create a `TrainingData` object from a `dict` configuration."""
+        """Create a `TrainingData` object from a `dict` configuration. Currently, only `method='sparse-grid'` is
+        supported for the `SparseGrid` class.
+        """
         method = config.pop('method', 'sparse-grid').lower()
         match method:
             case 'sparse-grid':
@@ -105,11 +129,40 @@ class TrainingData(Serializable, ABC):
 
 @dataclass
 class SparseGrid(TrainingData, PickleSerializable):
+    """A class for storing training data in a sparse grid format. The `SparseGrid` class stores training points
+    by their coordinate location in a larger tensor-product grid, and obtains new training data by refining
+    a single 1d grid at a time.
+
+    !!! Note "MISC and sparse grids
+        MISC itself can be thought of as an extension to the well-known sparse grid technique, so this class
+        readily integrates with the MISC implementation in `Component`. Sparse grids limit the curse
+        of dimensionality up to about `dim = 10-15` for the input space (which would otherwise be infeasible with a
+        normal full tensor-product grid of the same size).
+
+    !!! Info "About points in a sparse grid"
+        A sparse grid approximates a full tensor-product grid $(N_1, N_2, ..., N_d)$, where $N_i$ is the number of grid
+        points along dimension $i$, for a $d$-dimensional space. Each point is uniquely identified in the sparse grid
+        by a list of indices $(j_1, j_2, ..., j_d)$, where $j_i = 0 ... N_i$. We refer to this unique identifier as a
+        "grid coordinate". In the `SparseGrid` data structure, these coordinates are used along with the `alpha`
+        fidelity index to uniquely locate the training data for a given multi-index pair.
+
+    :ivar collocation_rule: the collocation rule to use for generating new grid points (only 'leja' is supported)
+    :ivar knots_per_level: the number of grid knots/points per level in the `beta` fidelity multi-index
+    :ivar expand_latent_method: method for expanding latent grids, either 'round-robin' or 'tensor-product'
+    :ivar opt_args: extra arguments for the global 1d `direct` optimizer
+    :ivar betas: a set of all `beta` multi-indices that have been seen so far
+    :ivar x_grids: a `dict` of grid points for each 1d input dimension
+    :ivar yi_map: a `dict` of model outputs for each grid coordinate
+    :ivar yi_nan_map: a `dict` of imputed model outputs for each grid coordinate where the model failed (or gave nan)
+    :ivar error_map: a `dict` of error information for each grid coordinate where the model failed
+    :ivar latent_size: the number of latent coefficients for each variable (0 if scalar)
+    """
     MAX_IMPUTE_SIZE: ClassVar[int] = 10        # don't try to impute large arrays
 
     collocation_rule: str = 'leja'
     knots_per_level: int = 2
     expand_latent_method: str = 'round-robin'  # or 'tensor-product', for converting beta to latent grid sizes
+    opt_args: dict = field(default_factory=lambda: {'locally_biased': False, 'maxfun': 300})  # for leja optimizer
 
     betas: set[MultiIndex] = field(default_factory=set)
     x_grids: dict[str, ArrayLike] = field(default_factory=dict)
@@ -118,9 +171,24 @@ class SparseGrid(TrainingData, PickleSerializable):
     error_map: dict[MultiIndex, dict[tuple[int, ...], dict[str, Any]]] = field(default_factory=dict)
     latent_size: dict[str, int] = field(default_factory=dict)  # keep track of latent grid sizes for each variable
 
-    def get_by_coord(self, alpha: MultiIndex, coords, y_vars=None, skip_nan: bool = False):
+    def clear(self):
+        """Clear all training data."""
+        self.betas.clear()
+        self.x_grids.clear()
+        self.yi_map.clear()
+        self.yi_nan_map.clear()
+        self.error_map.clear()
+        self.latent_size.clear()
+
+    def get_by_coord(self, alpha: MultiIndex, coords: list, y_vars: list = None, skip_nan: bool = False):
         """Get training data from the sparse grid for a given `alpha` and list of grid coordinates. Try to replace
         `nan` values with imputed values. Skip any data points with remaining `nan` values if `skip_nan=True`.
+
+        :param alpha: the model fidelity indices
+        :param coords: a list of grid coordinates to locate the `yi` values in the sparse grid data structure
+        :param y_vars: the keys of the outputs to return (if `None`, return all outputs)
+        :param skip_nan: skip any data points with remaining `nan` values if `skip_nan=True`
+        :returns: `dicts` of model inputs `xi_dict` and outputs `yi_dict`
         """
         xi_dict = {}
         yi_dict = {}
@@ -146,8 +214,8 @@ class SparseGrid(TrainingData, PickleSerializable):
                         yi = np.expand_dims(yi, axis=0)
                         yi_dict[var] = yi if yi_dict.get(var) is None else np.concatenate((yi_dict[var], yi), axis=0)
             except KeyError as e:
-                raise ValueError(f"Can't access sparse grid data for alpha={alpha}, coord={coord}. "
-                                 f"Make sure the data has been set first.") from e
+                raise KeyError(f"Can't access sparse grid data for alpha={alpha}, coord={coord}. "
+                               f"Make sure the data has been set first.") from e
 
         # Squeeze out extra dimension for scalar quantities
         for var in yi_dict.keys():
@@ -166,14 +234,13 @@ class SparseGrid(TrainingData, PickleSerializable):
             self.error_map[alpha][coord] = copy.deepcopy(error)
 
     def set(self, alpha: MultiIndex, beta: MultiIndex, coords: list, yi_dict: dict[str, ArrayLike]):
-        """Store model output `yi` values.
+        """Store model output `yi_dict` values.
 
         :param alpha: the model fidelity indices
         :param beta: the surrogate fidelity indices
         :param coords: a list of grid coordinates to locate the `yi` values in the sparse grid data structure
         :param yi_dict: a `dict` of model output `yi` values
         """
-        yi_dict = copy.deepcopy(yi_dict)
         for i, coord in enumerate(coords):  # First dim of yi is loop dim aligning with coords
             new_yi = {}
             for var, yi in yi_dict.items():
@@ -225,7 +292,7 @@ class SparseGrid(TrainingData, PickleSerializable):
 
                 self.yi_nan_map[alpha][coord] = copy.deepcopy(y_impute)
 
-    def refine(self, alpha: MultiIndex, beta: MultiIndex, x_vars: VariableList):
+    def refine(self, alpha: MultiIndex, beta: MultiIndex, input_domains: dict, weight_fcns: dict = None):
         """Refine the sparse grid for a given `alpha` and `beta` pair and given collocation rules. Return any new
         grid points that do not have model evaluations saved yet.
 
@@ -233,70 +300,66 @@ class SparseGrid(TrainingData, PickleSerializable):
             The `beta` multi-index is used to determine the number of collocation points in each input dimension. The
             length of `beta` should therefore match the number of variables in `x_vars`.
         """
+        weight_fcns = weight_fcns or {}
+
         # Initialize a sparse grid for beta=(0, 0, ..., 0)
         if np.sum(beta) == 0:
             if len(self.x_grids) == 0:
                 num_latent = {}
-                for n, var in enumerate(x_vars):
-                    domain = var.get_domain(transform=True)
-                    num_latent[var] = len(domain) if isinstance(domain, list) else 0
+                for var in input_domains:
+                    if LATENT_STR_ID in var:
+                        base_id = var.split(LATENT_STR_ID)[0]
+                        num_latent[base_id] = 1 if base_id not in num_latent else num_latent[base_id] + 1
+                    else:
+                        num_latent[var] = 0
                 self.latent_size = num_latent
 
                 new_pt = {}
-                new_grid_size = self.beta_to_knots(beta)
-                for n, var in enumerate(x_vars):
-                    num_new_pts = new_grid_size[n]
-                    domain = var.get_domain(transform=True)
-                    if isinstance(domain, list):  # store a grid for each latent coefficient (Nlatent, Ngrid)
-                        new_pt[var] = np.atleast_1d([self.collocation_1d(num_new_pts[i], d, method=self.collocation_rule)
-                                                     for i, d in enumerate(domain)]).tolist()
-                    else:
-                        wt_fcn = lambda z: var.pdf(var.denormalize(z), transform=True)
-                        new_pt[var] = var.denormalize(self.collocation_1d(num_new_pts, domain, wt_fcn=wt_fcn,
-                                                                          method=self.collocation_rule)).tolist()
+                domains = iter(input_domains.items())
+                for grid_size in self.beta_to_knots(beta):
+                    if isinstance(grid_size, int):  # scalars
+                        var, domain = next(domains)
+                        new_pt[var] = self.collocation_1d(grid_size, domain, method=self.collocation_rule,
+                                                          wt_fcn=weight_fcns.get(var, None),
+                                                          opt_args=self.opt_args).tolist()
+                    else:                           # latent coeffs
+                        for s in grid_size:
+                            var, domain = next(domains)
+                            new_pt[var] = self.collocation_1d(s, domain, method=self.collocation_rule,
+                                                              wt_fcn=weight_fcns.get(var, None),
+                                                              opt_args=self.opt_args).tolist()
                 self.x_grids = new_pt
             self.betas.add(beta)
             self.yi_map.setdefault(alpha, dict())
             self.yi_nan_map.setdefault(alpha, dict())
             self.error_map.setdefault(alpha, dict())
-            return list(self._expand_grid_coords(beta)), self._append_grid_points(beta)
+            new_coords = list(self._expand_grid_coords(beta))
+            return new_coords, self._append_grid_points(new_coords[0])
 
         # Otherwise, refine the sparse grid
         for beta_old in self.betas:
-            # Get the first lower neighbor in the sparse grid and refine the 1d grid
+            # Get the first lower neighbor in the sparse grid and refine the 1d grid if necessary
             if self.is_one_level_refinement(beta_old, beta):
-                dim_refine = int(np.nonzero(np.array(beta, dtype=int) - np.array(beta_old, dtype=int))[0][0])
-                var_refine = x_vars[dim_refine]
-                domain = var_refine.get_domain(transform=True)
                 new_grid_size = self.beta_to_knots(beta)
-                old_grid_size = self.beta_to_knots(beta_old)
-                grid_refine = np.atleast_1d(self.x_grids[var_refine])
-                num_latent = self.latent_size[var_refine]
+                inputs = zip(self.x_grids.keys(), self.x_grids.values(), input_domains.values())
 
-                # Handle refining latent grids
-                if num_latent > 0:
-                    old_latent_size = old_grid_size[dim_refine]  # tuples of latent grid sizes
-                    new_latent_size = new_grid_size[dim_refine]
-                    if max(new_latent_size) > grid_refine.shape[-1]:
-                        grid_refine = np.pad(grid_refine, [(0, 0), (0, max(new_latent_size) - grid_refine.shape[-1])],
-                                             mode='constant', constant_values=np.nan)
-                    for i in range(num_latent):
-                        if old_latent_size[i] < new_latent_size[i]:
-                            num_new_pts = new_latent_size[i] - old_latent_size[i]
-                            grid_refine[i] = self.collocation_1d(num_new_pts, domain[i],
-                                                                 grid_refine[i, :old_latent_size[i]],
-                                                                 method=self.collocation_rule)
-                    self.x_grids[var_refine] = grid_refine.tolist()
-
-                # Handle scalar refinement per usual
-                else:
-                    if grid_refine.shape[-1] < new_grid_size[dim_refine]:
-                        num_new_pts = new_grid_size[dim_refine] - old_grid_size[dim_refine]
-                        grid_refine = var_refine.normalize(grid_refine)
-                        wt_fcn = lambda z: var_refine.pdf(var_refine.denormalize(z), transform=True)
-                        self.x_grids[var_refine] = np.atleast_1d(
-                            var_refine.denormalize(self.collocation_1d(num_new_pts, domain, grid_refine, wt_fcn=wt_fcn,
-                                                                       method=self.collocation_rule))).tolist()
+                for new_size in new_grid_size:
+                    if isinstance(new_size, int):       # scalar grid
+                        var, grid, domain = next(inputs)
+                        if len(grid) < new_size:
+                            num_new_pts = new_size - len(grid)
+                            self.x_grids[var] = self.collocation_1d(num_new_pts, domain, grid, opt_args=self.opt_args,
+                                                                    wt_fcn=weight_fcns.get(var, None),
+                                                                    method=self.collocation_rule).tolist()
+                    else:                               # latent grid
+                        for s_new in new_size:
+                            var, grid, domain = next(inputs)
+                            if len(grid) < s_new:
+                                num_new_pts = s_new - len(grid)
+                                self.x_grids[var] = self.collocation_1d(num_new_pts, domain, grid,
+                                                                        opt_args=self.opt_args,
+                                                                        wt_fcn=weight_fcns.get(var, None),
+                                                                        method=self.collocation_rule).tolist()
                 break
 
         new_coords = []
@@ -314,13 +377,17 @@ class SparseGrid(TrainingData, PickleSerializable):
         """Extract the `x` grid point located at `coord` from `x_grids` and append to the `pts` dictionary."""
         if pts is None:
             pts = {}
-        for i, var in enumerate(self.x_grids):
-            grid = np.atleast_1d(self.x_grids[var])
-            if len(grid.shape) == 1:
-                new_pt = np.atleast_1d(grid[coord[i]])                          # select scalar grid point
-            else:
-                new_pt = grid[range(grid.shape[0]), coord[i]].reshape((1, -1))  # select latent coefficients
-            pts[var] = new_pt if pts.get(var) is None else np.concatenate((pts[var], new_pt), axis=0)
+        grids = iter(self.x_grids.items())
+        for idx in coord:
+            if isinstance(idx, int):        # scalar grid point
+                var, grid = next(grids)
+                new_pt = np.atleast_1d(grid[idx])
+                pts[var] = new_pt if pts.get(var) is None else np.concatenate((pts[var], new_pt), axis=0)
+            else:                           # latent coefficients
+                for i in idx:
+                    var, grid = next(grids)
+                    new_pt = np.atleast_1d(grid[i])
+                    pts[var] = new_pt if pts.get(var) is None else np.concatenate((pts[var], new_pt), axis=0)
 
         return pts
 
@@ -412,7 +479,7 @@ class SparseGrid(TrainingData, PickleSerializable):
 
     @staticmethod
     def collocation_1d(N: int, z_bds: tuple, z_pts: np.ndarray = None,
-                       wt_fcn: callable = None, method='leja') -> np.ndarray:
+                       wt_fcn: callable = None, method='leja', opt_args=None) -> np.ndarray:
         """Find the next `N` points in the 1d sequence of `z_pts` using the provided collocation method.
 
         :param N: number of new points to add to the sequence
@@ -420,8 +487,10 @@ class SparseGrid(TrainingData, PickleSerializable):
         :param z_pts: current univariate sequence `(Nz,)`, start at middle of `z_bds` if `None`
         :param wt_fcn: weighting function, uses a constant weight if `None`, callable as `wt_fcn(z)`
         :param method: collocation method to use, currently only 'leja' is supported
+        :param opt_args: extra arguments for the global 1d `direct` optimizer
         :returns: the univariate sequence `z_pts` augmented by `N` new points
         """
+        opt_args = opt_args or {}
         if wt_fcn is None:
             wt_fcn = lambda z: 1
         if z_pts is None:
@@ -434,7 +503,7 @@ class SparseGrid(TrainingData, PickleSerializable):
                 # Construct Leja sequence by maximizing the Leja objective sequentially
                 for i in range(N):
                     obj_fun = lambda z: -wt_fcn(np.array(z)) * np.prod(np.abs(z - z_pts))
-                    res = direct(obj_fun, [z_bds])  # Use global DIRECT optimization over 1d domain
+                    res = direct(obj_fun, [z_bds], **opt_args)  # Use global DIRECT optimization over 1d domain
                     z_star = res.x
                     z_pts = np.concatenate((z_pts, z_star))
             case other:
