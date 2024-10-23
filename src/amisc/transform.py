@@ -118,7 +118,8 @@ class Transform(ABC):
         return transforms
 
     def transform(self, x: ArrayLike, inverse: bool = False, transform_args: tuple = None) -> ArrayLike:
-        """Transform the given values `x`.
+        """Transform the given values `x`. This wrapper function handles the input type and tries to
+         return the transformed values in the same type.
 
         :param x: the values to transform
         :param inverse: whether to do the inverse transform instead
@@ -138,7 +139,13 @@ class Transform(ABC):
 
     @abstractmethod
     def _transform(self, x, inverse=False, transform_args=None):
-        """Abstract method that subclass `Transform` objects should implement."""
+        """Abstract method that subclass `Transform` objects should implement.
+
+        :param x: the values to transform
+        :param inverse: whether to do the inverse transform instead
+        :param transform_args: overrides `Transform.transform_args`
+        :return: the transformed values
+        """
         raise NotImplementedError
 
 

@@ -1,11 +1,12 @@
-"""Provides an object-oriented interface for model inputs/outputs and random variables.
+"""Provides an object-oriented interface for model inputs/outputs, random variables, scalars, and field quantities.
 
 Includes:
 
 - `Variable` — an object that stores information about a variable and includes methods for sampling, pdf evaluation,
-               normalization, compression, loading from file, etc.
-- `VariableList` — a container for Variables that provides dict-like access of Variables by `name` along with normal
-                   indexing and slicing
+               normalization, compression, loading from file, etc. Variables can mostly be treated as strings
+               that have some additional information and utilities attached to them.
+- `VariableList` — a container for `Variables` that provides dict-like access of `Variables` by `name` along with normal
+                   indexing and slicing.
 
 The preferred serialization of `Variable` and `VariableList` is to/from yaml. This is done by default with the
 `!Variable` and `!VariableList` yaml tags.
@@ -29,19 +30,21 @@ from amisc.distribution import Distribution, Normal
 from amisc.serialize import Serializable
 from amisc.transform import Transform, Minmax, Zscore
 from amisc.utils import search_for_file, _get_yaml_path, _inspect_assignment
-from amisc.typing import CompressionData, MultiIndex
+from amisc.typing import CompressionData, LATENT_STR_ID
 
 __all__ = ['Variable', 'VariableList']
-_Transformation = Union[str, Transform, list[str | Transform]]  # something that can be converted to a Transform
+_TransformLike = Union[str, Transform, list[str | Transform]]  # something that can be converted to a Transform
 
 
 class Variable(BaseModel, Serializable):
     """Object for storing information about variables and providing methods for pdf evaluation, sampling, etc.
+    All fields will undergo pydantic validation and conversion to the correct types.
 
     A simple variable object can be created with `var = Variable()`. All initialization options are optional and will
-    be given good defaults. You should probably at the very least give a memorable `name` and a `domain`.
+    be given good defaults. You should probably at the very least give a memorable `name` and a `domain`. Variables
+    can mostly be treated as strings with some extra information/utilities attached.
 
-    With the `pyyaml` library installed, all Variable objects can be saved or loaded directly from a `.yml` file by
+    With the `pyyaml` library installed, all `Variable` objects can be saved or loaded directly from a `.yml` file by
     using the `!Variable` yaml tag (which is loaded by default with `amisc`).
 
     - Use `Variable.dist` to specify sampling PDFs, such as for random variables. See the `Distribution` classes.
@@ -60,7 +63,7 @@ class Variable(BaseModel, Serializable):
         pdf = temp.pdf(samples)
 
         # Field quantity
-        vel = Variable(name='u', description='Velocity', units='m/s', compression={'quantities': ['ux', 'uy', 'uz']})
+        vel = Variable(name='u', description='Velocity', units='m/s', compression={'fields': ['ux', 'uy', 'uz']})
         vel_data = ...  # from a simulation
         reduced_vel = vel.compress(vel_data)
         ```
@@ -76,10 +79,10 @@ class Variable(BaseModel, Serializable):
     :ivar units: assumed units for the variable (if applicable)
     :ivar category: an additional descriptor for how this variable is used, e.g. calibration, operating, design, etc.
     :ivar tex: latex format for the variable, i.e. r"$x_i$"
-    :ivar shape: the shape of the variable (e.g. for field quantities) -- empty for scalar variables (default)
     :ivar compression: specifies field quantities and links to relevant compression data
     :ivar dist: a string specifier of a probability distribution function (see the `Distribution` types)
-    :ivar domain: the explicit domain bounds of the variable (limits of where you expect to use it)
+    :ivar domain: the explicit domain bounds of the variable (limits of where you expect to use it);
+                  for field quantities, this is a list of domains for each latent dimension
     :ivar norm: specifier of a map to a transformed-space for surrogate construction (see the `Transform` types)
     """
     yaml_tag: ClassVar[str] = u'!Variable'
@@ -91,11 +94,10 @@ class Variable(BaseModel, Serializable):
     units: Optional[str] = None
     category: Optional[str] = None
     tex: Optional[str] = None
-    shape: Optional[str | tuple[int, ...]] = None
     compression: Optional[str | dict | Compression] = None
     dist: Optional[str | Distribution] = None
     domain: Optional[str | tuple[float, float] | list] = None
-    norm: Optional[_Transformation] = None
+    norm: Optional[_TransformLike] = None
 
     def __init__(self, /, name=None, **kwargs):
         # Try to set the variable name if instantiated as "x = Variable()"
@@ -114,13 +116,6 @@ class Variable(BaseModel, Serializable):
         if not tex[-1] == '$':
             tex = rf'{tex}$'
         return tex
-
-    @field_validator('shape')
-    @classmethod
-    def _validate_shape(cls, shape) -> tuple[int, ...]:
-        if shape is None:
-            return ()
-        return tuple(MultiIndex(shape))
 
     @field_validator('compression')
     @classmethod
@@ -157,6 +152,8 @@ class Variable(BaseModel, Serializable):
         if domain is None:
             if dist := info.data['dist']:
                 domain = dist.domain()
+            elif compression := info.data['compression']:
+                domain = compression.estimate_latent_ranges()
         elif isinstance(domain, str):
             domain = tuple(ast.literal_eval(domain.strip()))
         elif isinstance(domain, list):
@@ -177,7 +174,7 @@ class Variable(BaseModel, Serializable):
 
     @field_validator('norm')
     @classmethod
-    def _validate_norm(cls, norm: _Transformation, info: ValidationInfo) -> list[Transform] | None:
+    def _validate_norm(cls, norm: _TransformLike, info: ValidationInfo) -> list[Transform] | None:
         if norm is None:
             return norm
         norm = Transform.from_string(norm)
@@ -211,12 +208,15 @@ class Variable(BaseModel, Serializable):
         return self.__str__()
 
     def __hash__(self):
+        """Allows variables to be used as keys in dictionaries and to be considered equal to their string
+        representations.
+        """
         return hash(self.name)
 
     def __eq__(self, other):
-        """Consider two Variables equal if they share the same string id.
+        """Consider two `Variables` equal if they share the same string name
 
-        Also returns true when checking if this Variable is equal to a string id by itself.
+        Also returns true when checking if this `Variable` is equal to a string by itself.
         """
         if isinstance(other, Variable):
             return self.name == other.name
@@ -242,33 +242,32 @@ class Variable(BaseModel, Serializable):
 
         :param units: whether to include the units in the string
         :param symbol: just latex symbol if true, otherwise the full description
+        :returns: the latex formatted string
         """
         s = (self.tex if symbol else self.description) or self.name
         return r'{} [{}]'.format(s, self.units) if units else r'{}'.format(s)
 
-    def get_nominal(self, transform: bool = False) -> float | list | None:
+    def get_nominal(self) -> float | list | None:
         """Return the nominal value of the variable. Defaults to the mean for a normal distribution or the
         center of the domain if `var.nominal` is not specified. Returns a list of nominal values for each latent
         dimension if this is a field quantity with compression.
 
-        :param transform: return the nominal value in transformed space using `Variable.norm`
+        :returns: the nominal value(s)
         """
-        nominal = self.normalize(self.nominal) if transform else self.nominal
+        nominal = self.nominal
         if nominal is None:
             if dist := self.dist:
-                dist_args = self.normalize(dist.dist_args) if transform else dist.dist_args
-                nominal = dist.nominal(dist_args=dist_args)
-            elif domain := self.get_domain(transform=transform):
-                nominal = [np.mean(d) for d in domain] if isinstance(domain, list) else np.mean(domain)
+                nominal = float(dist.nominal())
+            elif domain := self.get_domain():
+                nominal = [np.mean(d) for d in domain] if isinstance(domain, list) else float(np.mean(domain))
 
         return nominal
 
-    def get_domain(self, transform: bool = False) -> tuple | list | None:
+    def get_domain(self) -> tuple | list | None:
         """Return a tuple of the defined domain of this variable. Returns a list of domains for each latent dimension
         if this is a field quantity with compression.
 
-        :param transform: return the domain of the transformed space instead; note that latent coefficients are not
-                          transformed
+        :returns: the domain(s) of this variable
         """
         if self.domain is None:
             return None
@@ -282,20 +281,21 @@ class Variable(BaseModel, Serializable):
                 raise ValueError(f'Variables with `compression` data should return a list of domains, one '
                                  f'for each latent coefficient. Could not infer domain for "{self.name}".') from e
         else:
-            return tuple(self.normalize(self.domain)) if transform else self.domain
+            return self.domain
 
-    def sample_domain(self, shape: tuple | int, transform: bool = False) -> np.ndarray:
-        """Return an array of the given `shape` for random samples over the domain of this variable. Returns
+    def sample_domain(self, shape: tuple | int) -> np.ndarray:
+        """Return an array of the given `shape` for uniform samples over the domain of this variable. Returns
         samples for each latent dimension if this is a field quantity with compression.
 
-        :param shape: the shape of samples to return; note that the last dim of the returned samples will be the
-                      latent space size for field quantities
-        :param transform: whether to sample in the transformed space instead (ignored for field quantities)
+        !!! Note
+            The last dim of the returned samples will be the latent space size for field quantities.
+
+        :param shape: the shape of samples to return
         :returns: the random samples over the domain of the variable
         """
         if isinstance(shape, int):
             shape = (shape, )
-        if domain := self.get_domain(transform=transform):
+        if domain := self.get_domain():
             if isinstance(domain, list):
                 lb = np.atleast_1d([d[0] for d in domain])
                 ub = np.atleast_1d([d[1] for d in domain])
@@ -305,74 +305,53 @@ class Variable(BaseModel, Serializable):
         else:
             raise RuntimeError(f'Variable "{self.name}" does not have a domain specified.')
 
-    def update_domain(self, domain: tuple[float, float] | list[tuple], transform: bool = False):
+    def update_domain(self, domain: tuple[float, float] | list[tuple]):
         """Update the domain of this variable. Will attempt to update the domain of each latent dimension if this is
         a field quantity with compression.
 
-        :param domain: the new domain to set
-        :param transform: whether to update the domain in the transformed space instead
+        :param domain: the new domain(s) to set
         """
-        def _update_domain(domain, curr_domain, transform):
+        def _update_domain(domain, curr_domain):
             lb, ub = domain
             lb = min(lb, curr_domain[0]) if curr_domain is not None else lb
             ub = max(ub, curr_domain[1]) if curr_domain is not None else ub
-            return self.denormalize((lb, ub)) if transform else (lb, ub)
+            return lb, ub
 
-        curr_domain = self.get_domain(transform=transform)
+        curr_domain = self.get_domain()
         if isinstance(curr_domain, list):
             if not isinstance(domain, list):
                 domain = [domain] * len(curr_domain)
-            for i, d in enumerate(domain):
-                self.domain[i] = _update_domain(d, curr_domain[i], False)
+            self.domain = [_update_domain(d, curr_domain[i]) for i, d in enumerate(domain)]
         else:
-            self.domain = _update_domain(domain, curr_domain, transform)
+            self.domain = _update_domain(domain, curr_domain)
 
-    def pdf(self, x: np.ndarray, transform: bool = False) -> np.ndarray:
-        """Compute the PDF of the Variable at the given `x` locations.
-
-        !!! Note
-            If `transform=True`, then `x` and the arguments of `self.dist` will both be transformed via `self.norm`
-            _before_ computing the PDF. Note that this
-            means if `x=Variable(dist=N(0, 1), norm=linear(m=2, b=2))`, then samples of $x$ are _not_ normally
-            distributed as `N(0,1)`; rather, a new variable $y$ is distributed as $y\\sim\\mathcal{N}(2, 4)$ -- i.e.
-            the `dist` parameters get transformed, not the distribution itself. `x.pdf(transform=True)` will then
-            actually return the pdf of the transformed variable $y$. This way, for example,
-            a log-uniform variable can be obtained via `Variable(dist=U(1, 10), norm=log10)`.
+    def pdf(self, x: np.ndarray) -> np.ndarray:
+        """Compute the PDF of the Variable at the given `x` locations. Will just return one's if the variable
+        does not have a distribution.
 
         :param x: locations to compute the PDF at
-        :param transform: whether to compute the PDF in transformed space instead
         :returns: the PDF evaluations at `x`
         """
-        y = self.normalize(x) if transform else x
         if dist := self.dist:
-            dist_args = self.normalize(dist.dist_args) if transform else dist.dist_args
-            return dist.pdf(y, dist_args=dist_args)
+            return dist.pdf(x)
         else:
             return np.ones(x.shape)  # No pdf if no dist is specified
 
-    def sample(self, shape: tuple | int, nominal: float | np.ndarray = None, transform: bool = False) -> np.ndarray:
-        """Draw samples from this Variable's distribution. Just returns the nominal value of the given shape if
-        this Variable has no distribution.
-
-        !!! Note
-            If `transform=True`, then samples will be drawn in this Variable's transformed space. This would be
-            used for example if sampling a log-uniform distributed variable via
-            `x=Variable(dist=U(1, 10), norm=log); x.sample(transform=True)`.
+    def sample(self, shape: tuple | int, nominal: float | np.ndarray = None) -> np.ndarray:
+        """Draw samples from this `Variable's` distribution. Just returns the nominal value of the given shape if
+        this `Variable` has no distribution.
 
         :param shape: the shape of the returned samples
         :param nominal: a nominal value to use if applicable (i.e. a center for relative, tolerance, or normal)
-        :param transform: whether to sample in the Variable's transformed space instead
-        :returns: samples from the PDF of this Variable's distribution
+        :returns: samples from the PDF of this `Variable's` distribution
         """
         if isinstance(shape, int):
             shape = (shape, )
-        nominal = self.normalize(nominal) if transform else nominal
         if nominal is None:
-            nominal = self.get_nominal(transform=transform)
+            nominal = self.get_nominal()
 
         if dist := self.dist:
-            dist_args = self.normalize(dist.dist_args) if transform else dist.dist_args
-            return dist.sample(shape, nominal, dist_args)
+            return dist.sample(shape, nominal)
         else:
             # Variable's with no distribution
             if nominal is None:
@@ -383,13 +362,13 @@ class Variable(BaseModel, Serializable):
                 return np.ones(shape) * nominal
 
     def normalize(self, values: ArrayLike, denorm: bool = False) -> ArrayLike | None:
-        """Normalize `values` based on this Variable's `norm` method(s). See `Transform` for available norm methods.
+        """Normalize `values` based on this `Variable's` `norm` method(s). See `Transform` for available norm methods.
 
         !!! Note
             If this Variable's `self.norm` was specified as a list of norm methods, then each will be applied in
             sequence in the original order (and in reverse for `denorm=True`). When `self.dist` is involved in the
-            transforms (only for minmax and zscore), the `dist_args` will get normalized too at each transform before
-            applying the next transform.
+            transforms (only for `minmax` and `zscore`), the `dist_args` will get normalized too at each
+            transform before applying the next transform.
 
         :param values: the values to normalize (array-like)
         :param denorm: whether to denormalize instead using the inverse of the original normalization method
@@ -441,15 +420,15 @@ class Variable(BaseModel, Serializable):
         return values
 
     def denormalize(self, values):
-        """Alias for `normalize(denorm=True)`"""
+        """Alias for `normalize(denorm=True)`. See `normalize` for more details."""
         return self.normalize(values, denorm=True)
 
     def compress(self, values: CompressionData, coords: np.ndarray = None,
                  reconstruct: bool = False) -> CompressionData:
-        """Compress or reconstruct field quantity values using this Variable's compression info.
+        """Compress or reconstruct field quantity values using this `Variable's` compression info.
 
         !!! Note "Specifying compression values"
-            If only one field quantity is associated with this variable, then `len(field[quantities])=1`. In this case,
+            If only one field quantity is associated with this variable, then
             specify `values` as `dict(coords=..., name=...)` for this Variable's `name`. If `coords` is not specified,
             then this assumes the locations are the same as the reconstruction data (and skips interpolation).
 
@@ -501,21 +480,21 @@ class Variable(BaseModel, Serializable):
         return ret_dict
 
     def reconstruct(self, values, coords=None):
-        """Alias for `compress(reconstruct=True)`"""
+        """Alias for `compress(reconstruct=True)`. See `compress` for more details."""
         return self.compress(values, coords=coords, reconstruct=True)
 
     def serialize(self, save_path: str | Path = '.') -> dict:
         """Convert a `Variable` to a `dict` with only standard Python types
-        (i.e. convert custom objects like `dist` and `norm` to strings).
+        (i.e. convert custom objects like `dist` and `norm` to strings and save `compression` to a `.pkl`).
+
+        :param save_path: the path to save the compression data to (defaults to current directory)
+        :returns: the serialized `dict` of the `Variable` object
         """
         d = {}
         for key, value in self.__dict__.items():
             if value is not None and not key.startswith('_'):
                 if key == 'domain':
                     d[key] = [str(v) for v in value] if isinstance(value, list) else str(value)
-                elif key == 'shape':
-                    if len(value) > 0:
-                        d[key] = str(value)
                 elif key == 'dist':
                     d[key] = str(value)
                 elif key == 'norm':
@@ -528,8 +507,13 @@ class Variable(BaseModel, Serializable):
         return d
 
     @classmethod
-    def deserialize(cls, data: dict, search_paths=None) -> Variable:
-        """Convert a `dict` to a `Variable` object. Let `pydantic` handle validation and conversion of fields."""
+    def deserialize(cls, data: dict, search_paths: list[str | Path] = None) -> Variable:
+        """Convert a `dict` to a `Variable` object. Let `pydantic` handle validation and conversion of fields.
+
+        :param data: the `dict` to convert to a `Variable`
+        :param search_paths: the paths to search for compression files (if necessary)
+        :returns: the `Variable` object
+        """
         if isinstance(data, Variable):
             return data
         elif isinstance(data, str):
@@ -561,14 +545,14 @@ class Variable(BaseModel, Serializable):
 
 
 class VariableList(OrderedDict, Serializable):
-    """Store Variables as `str(var) : Variable` in the order they were passed in. You can:
+    """Store `Variables` as `str(var) : Variable` in the order they were passed in. You can:
 
-    - Initialize/update from a single Variable or a list of Variables
-    - Get/set a Variable directly or by name via `my_vars[var]` or `my_vars[str(var)]` etc.
+    - Initialize/update from a single `Variable` or a list of `Variables`
+    - Get/set a `Variable` directly or by name via `my_vars[var]` or `my_vars[str(var)]` etc.
     - Retrieve the original order of insertion by `list(my_vars.items())`
     - Access/delete elements by order of insertion using integer/slice indexing (i.e. `my_vars[1:3]`)
     - Save/load from yaml file using the `!VariableList` tag
-     """
+    """
     yaml_tag = '!VariableList'
 
     def __init__(self, data: list[Variable] | Variable | OrderedDict | dict = None, **kwargs):
@@ -599,6 +583,46 @@ class VariableList(OrderedDict, Serializable):
             if k == key:
                 return i
         raise ValueError(f"'{key}' is not in list")
+
+    def get_domains(self, norm: bool = True):
+        """Get normalized variable domains (expand latent coefficient domains for field quantities)
+
+        :param norm: whether to normalize the domains using `Variable.norm` (useful for getting bds for surrogate);
+                     latent coefficient domains do not get normalized
+        :returns: a `dict` of variables to their normalized domains; field quantities return a domain for each
+                  of their latent coefficients
+        """
+        domains = {}
+        for var in self:
+            var_domain = var.get_domain()
+            if isinstance(var_domain, list):  # only field qtys return a list of domains, one for each latent coeff
+                for i, domain in enumerate(var_domain):
+                    domains[f'{var.name}{LATENT_STR_ID}{i}'] = domain
+            else:
+                domains[var.name] = var.normalize(var_domain) if norm else var_domain
+        return domains
+
+    def get_pdfs(self, norm: bool = True):
+        """Get callable pdfs for all variables (skipping field quantities for now)
+
+        :param norm: whether values passed to the pdf functions are normalized and should be denormed first
+                     before pdf evaluation (useful for surrogate construction where samples are gathered in the
+                     normalized space)
+        :returns: a `dict` of variables to callable pdf functions; field quantities are skipped.
+        """
+        def _get_pdf(var, norm):
+            return lambda z: var.pdf(var.denormalize(z) if norm else z)
+
+        pdf_fcns = {}
+        for var in self:
+            var_domain = var.get_domain()
+            if isinstance(var_domain, list):  # only field qtys return a list of domains, one for each latent coeff
+                # for i, domain in enumerate(var_domain):
+                    # pdf_fcns[f'{var.name}{LATENT_STR_ID}{i}'] = var.latent_pdfs[i]  TODO: Implement latent pdfs
+                pass
+            else:
+                pdf_fcns[var.name] = _get_pdf(var, norm)
+        return pdf_fcns
 
     def update(self, data: list[Variable | str] | str | Variable | OrderedDict | dict = None, **kwargs):
         """Update from a list or dict of `Variable` objects, or from `key=value` pairs."""
@@ -670,6 +694,10 @@ class VariableList(OrderedDict, Serializable):
         return self.__str__()
 
     def serialize(self, save_path='.') -> list[dict]:
+        """Convert to a list of `dict` objects for each `Variable` in the list.
+
+        :param save_path: the path to save the compression data to (defaults to current directory)
+        """
         return [var.serialize(save_path=save_path) for var in self.values()]
 
     @classmethod
@@ -678,6 +706,9 @@ class VariableList(OrderedDict, Serializable):
 
         !!! Note
             Variables with the same name will be merged by keeping the one with the most information provided.
+
+        :param variable_lists: the variables/lists to merge
+        :returns: the merged `VariableList` object
         """
         merged_vars = cls()
 
@@ -697,6 +728,7 @@ class VariableList(OrderedDict, Serializable):
 
     @classmethod
     def deserialize(cls, data: dict | list[dict], search_paths=None) -> VariableList:
+        """Convert a `dict` or list of `dict` objects to a `VariableList` object. Let `pydantic` handle validation."""
         if not isinstance(data, list):
             data = [data]
         return cls([Variable.deserialize(d, search_paths=search_paths) for d in data])

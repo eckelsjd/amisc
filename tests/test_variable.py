@@ -1,4 +1,6 @@
+"""Test variables and variable lists. Including tests for compression, normalization, and distributions."""
 import numpy as np
+import pytest
 
 from amisc import YamlLoader
 from amisc.utils import relative_error
@@ -7,6 +9,7 @@ from amisc.compression import SVD
 
 
 def test_load_and_dump_variables(tmp_path):
+    """Make sure yaml serialization works for variables."""
     variables = [Variable('a', description='Altitude', units='m', dist='U(0, 1)'),
                  Variable(u'Φ', description='Base width', units='m', dist='N(0, 1)'),
                  Variable('p', description='Pressure', units='Pa', domain=(1e6, 2e6),
@@ -78,16 +81,16 @@ def test_many_norms():
 
 def test_nominal_and_domain():
     variable = Variable(dist='U(1, 10)', norm='log10')
-    nominal, norm_nominal = variable.get_nominal(), variable.get_nominal(transform=True)
-    bds, norm_bds = variable.get_domain(), variable.get_domain(transform=True)
-    assert nominal == (10 + 1)/2 and norm_nominal == (0 + 1)/2
-    assert bds == (1, 10) and norm_bds == (0, 1)
+    nominal = variable.get_nominal()
+    bds = variable.get_domain()
+    assert nominal == (10 + 1)/2
+    assert bds == (1, 10)
 
     variable = Variable(dist='N(5, 1)', norm='minmax')
-    nominal, norm_nominal = variable.get_nominal(), variable.get_nominal(transform=True)
-    bds, norm_bds = variable.get_domain(), variable.get_domain(transform=True)
-    assert nominal == 5 and norm_nominal == 0.5
-    assert bds == (2, 8) and norm_bds == (0, 1)
+    nominal= variable.get_nominal()
+    bds = variable.get_domain()
+    assert nominal == 5
+    assert bds == (2, 8)
 
 
 def test_compression_1d():
@@ -137,6 +140,43 @@ def test_compression_1d():
     assert np.allclose(nominal - (lb+ub)/2, 0)
 
 
+def test_compression_fields():
+    """Test compression for a multi-field quantity."""
+    num_grid = 200
+    num_samples = 50
+    delta = Variable(dist='U(0, 1)')
+    gamma = Variable(dist='U(1, 2)')
+    grid = np.linspace(-1, 1, num_grid)
+    delta_samples = delta.sample(num_samples)
+    gamma_samples = gamma.sample(num_samples)
+    pressure_x = delta_samples[..., np.newaxis] * np.sin(grid)
+    pressure_y = gamma_samples[..., np.newaxis] * np.cos(grid)
+    pressure_matrix = np.concatenate((pressure_x[..., np.newaxis], pressure_y[..., np.newaxis]),
+                                     axis=-1).reshape((num_samples, -1))
+    pressure = Variable(compression=SVD(rank=2, data_matrix=pressure_matrix.T, coords=grid,
+                                        fields=['pressure_x', 'pressure_y']), name='pressure')
+
+    latent = pressure.compress({'pressure_x': pressure_x, 'pressure_y': pressure_y})
+    pressure_reconstruct = pressure.reconstruct(latent)
+    assert relative_error(pressure_reconstruct['pressure_x'], pressure_x) < 0.01
+    assert relative_error(pressure_reconstruct['pressure_y'], pressure_y) < 0.01
+
+    coarse_grid = 20
+    coarse_coords = np.linspace(-1, 1, coarse_grid)
+    num_test = (5, 10)
+    delta_samples = delta.sample(num_test)
+    gamma_samples = gamma.sample(num_test)
+    pressure_x = delta_samples[..., np.newaxis] * np.sin(coarse_coords)
+    pressure_y = gamma_samples[..., np.newaxis] * np.cos(coarse_coords)
+
+    latent = pressure.compress({'pressure_x': pressure_x, 'pressure_y': pressure_y}, coords=coarse_coords)
+    pressure_reconstruct = pressure.reconstruct(latent)
+
+    assert relative_error(pressure_reconstruct['pressure_x'], pressure_x) < 0.01
+    assert relative_error(pressure_reconstruct['pressure_y'], pressure_y) < 0.01
+
+
+@pytest.mark.skip(reason='Not implemented')
 def test_compression_nd():
     """Test SVD compression for high-dimensional data."""
     # TODO
@@ -155,14 +195,16 @@ def test_uniform_dist():
         assert np.allclose(pdf, 1 / (true_ub[i] - true_lb[i]))
         assert np.allclose(v.pdf(samples + true_ub[i]), 0)
 
-    # Make sure a transformed Uniform variable works
-    v = Variable(dist='Uniform(1e-8, 1e-2)', norm='log10')
-    norm_bds = v.get_domain(transform=True)
+    # Loguniform distribution
+    v = Variable(dist='LogUniform(1e-8, 1e-2)', norm='log10')
+    norm_bds = v.normalize(v.get_domain())
     unnorm_bds = v.denormalize(norm_bds)
-    samples_norm = v.sample(shape, transform=True)
-    samples_unnorm = v.denormalize(samples_norm)
+    samples = v.sample(shape)
+    pdf = v.pdf(samples)
+    samples_norm = v.normalize(samples)
     assert np.all(np.logical_and(norm_bds[0] < samples_norm, samples_norm < norm_bds[1]))
-    assert np.all(np.logical_and(unnorm_bds[0] < samples_unnorm, samples_unnorm < unnorm_bds[1]))
+    assert np.all(np.logical_and(unnorm_bds[0] < samples, samples < unnorm_bds[1]))
+    assert np.allclose(pdf, 1 / (samples * (np.log(unnorm_bds[1]) - np.log(unnorm_bds[0]))))
 
 
 def test_normal_dist():
@@ -178,13 +220,14 @@ def test_normal_dist():
         assert relative_error(np.mean(samples), true_means[i]) < 0.05
         assert relative_error(x[np.argmax(pdf)], true_means[i]) < 0.05
 
-        # Normal distribution with transform
-        v.update(norm='linear(2, 2)')
-        samples = v.sample(shape, transform=True)
-        x = v.denormalize(np.linspace(*v.get_domain(transform=True), 1000))
-        pdf = v.pdf(x, transform=True)
-        assert relative_error(np.mean(samples), v.normalize(true_means[i])) < 0.05
-        assert relative_error(v.normalize(x[np.argmax(pdf)]), v.normalize(true_means[i])) < 0.05
+    # Log normal distribution
+    v = Variable(dist='LogNormal(-2, 1, 2.718)', norm='log')
+    samples = v.sample(shape)
+    x = np.logspace(*v.normalize(v.get_domain()), 1000)
+    pdf = v.pdf(x)
+    mode = np.exp(-2 - 1**2)
+    assert relative_error(np.mean(v.normalize(samples)), -2) < 0.05
+    assert relative_error(x[np.argmax(pdf)], mode) < 0.05
 
 
 def test_relative_and_tolerance_dist():

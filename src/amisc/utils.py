@@ -2,6 +2,8 @@
 
 Includes:
 
+- `to_model_dataset` — convert surrogate input/output dataset to a form usable by the true model
+- `to_surrogate_dataset` — convert true model input/output dataset to a form usable by the surrogate
 - `constrained_lls` — solve a constrained linear least squares problem
 - `search_for_file` — search for a file in the current working directory and additional search paths
 - `format_inputs` — broadcast and reshape all inputs to the same shape
@@ -10,7 +12,10 @@ Includes:
 - `relative_error` — compute the relative L2 error between two vectors
 - `get_logger` — logging utility with nice formatting
 """
+from __future__ import annotations
+
 import ast
+import copy
 import inspect
 import logging
 import re
@@ -21,11 +26,91 @@ import numpy as np
 import yaml
 
 __all__ = ['parse_function_string', 'relative_error', 'get_logger', 'format_inputs', 'format_outputs',
-           'search_for_file', 'constrained_lls']
+           'search_for_file', 'constrained_lls', 'to_surrogate_dataset', 'to_model_dataset']
 
-from amisc.typing import Dataset
+import amisc.variable
+from amisc.typing import Dataset, LATENT_STR_ID
 
 LOG_FORMATTER = logging.Formatter(u"%(asctime)s — [%(levelname)s] — %(name)-20s — %(message)s")
+
+
+def _combine_latent_arrays(arr):
+    """Helper function to concatenate latent arrays into a single variable in the `arr` Dataset."""
+    for var in list(arr.keys()):
+        if LATENT_STR_ID in var:  # extract latent variables from surrogate data
+            base_id = var.split(LATENT_STR_ID)[0]
+            arr[base_id] = arr[var][..., np.newaxis] if arr.get(base_id) is None else (
+                np.concatenate((arr[base_id], arr[var][..., np.newaxis]), axis=-1))
+            del arr[var]
+
+
+def to_surrogate_dataset(dataset: Dataset, variables: amisc.variable.VariableList, del_fields: bool = True,
+                         **field_coords) -> tuple[Dataset, list[str]]:
+    """Convert true model input/output dataset to a form usable by the surrogate. Primarily, compress field
+    quantities and normalize.
+
+    :param dataset: the dataset to convert
+    :param variables: the `VariableList` containing the variable objects used in `dataset` -- these objects define
+                      the normalization and compression methods to use for each variable
+    :param del_fields: whether to delete the original field quantities from the dataset after compression
+    :param field_coords: pass in extra field qty coords as f'{var}_coords' for compression (optional)
+    :returns: the compressed/normalized dataset and a list of variable names to pass to surrogate
+    """
+    surr_vars = []
+    dataset = copy.deepcopy(dataset)
+    for var in variables:
+        # Only grab scalars in the dataset or field qtys if all fields are present
+        if var in dataset or (var.compression is not None and all([f in dataset for f in var.compression.fields])):
+            if var.compression is not None:
+                coords = dataset.get(f'{var}_coords', field_coords.get(f'{var}_coords', None))
+                latent = var.compress({field: dataset[field] for field in
+                                       var.compression.fields}, coords=coords)['latent']  # all fields must be present
+                for i in range(latent.shape[-1]):
+                    dataset[f'{var.name}{LATENT_STR_ID}{i}'] = latent[..., i]
+                    surr_vars.append(f'{var.name}{LATENT_STR_ID}{i}')
+                if del_fields:
+                    for field in var.compression.fields:
+                        del dataset[field]
+                    if dataset.get(f'{var}_coords', None) is not None:
+                        del dataset[f'{var}_coords']
+            else:
+                dataset[var.name] = var.normalize(dataset[var.name])
+                surr_vars.append(f'{var.name}')
+
+    return dataset, surr_vars
+
+
+def to_model_dataset(dataset: Dataset, variables: amisc.variable.VariableList, del_latent: bool = True,
+                     **field_coords) -> tuple[Dataset, Dataset]:
+    """Convert surrogate input/output dataset to a form usable by the true model. Primarily, reconstruct
+    field quantities and denormalize.
+
+    :param dataset: the dataset to convert
+    :param variables: the `VariableList` containing the variable objects used in `dataset` -- these objects define
+                      the normalization and compression methods to use for each variable
+    :param del_latent: whether to delete the latent variables from the dataset after reconstruction
+    :param field_coords: pass in extra field qty coords as f'{var}_coords' for reconstruction (optional)
+    :returns: the reconstructed/denormalized dataset and any field coordinates used during reconstruction
+    """
+    dataset = copy.deepcopy(dataset)
+    _combine_latent_arrays(dataset)
+
+    ret_coords = {}
+    for var in variables:
+        if var in dataset:
+            if var.compression is not None:
+                # coords = self.model_kwargs.get(f'{var.name}_coords', None)
+                coords = field_coords.get(f'{var}_coords', None)
+                field = var.reconstruct({'latent': dataset[var]}, coords=coords)
+                if del_latent:
+                    del dataset[var]
+                coords = field.pop('coords')
+                ret_coords[f'{var.name}_coords'] = copy.deepcopy(coords)
+                dataset.update(field)
+            else:
+                dataset[var] = var.denormalize(dataset[var])
+
+    return dataset, ret_coords
 
 
 def constrained_lls(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray) -> np.ndarray:
@@ -203,7 +288,7 @@ def format_inputs(inputs: Dataset, var_shape: dict = None) -> tuple[Dataset, tup
 
     :param inputs: `dict` of input arrays
     :param var_shape: `dict` of expected input variable shapes (i.e. for field quantities); assumes all inputs are 1d
-                      if None or not specified
+                      if None or not specified (i.e. scalar)
     :returns: the reshaped inputs and the common loop shape
     """
     var_shape = var_shape or {}
@@ -344,7 +429,11 @@ def _tokenize(args_str: str) -> list[str]:
 
 
 def parse_function_string(call_string: str) -> tuple[str, list, dict]:
-    """Convert a function signature like `func(a, b, key=value)` to name, args, kwargs."""
+    """Convert a function signature like `func(a, b, key=value)` to name, args, kwargs.
+
+    :param call_string: a function-like string to parse
+    :returns: the function name, positional arguments, and keyword arguments
+    """
     # Regex pattern to match function name and arguments
     pattern = r"(\w+)(?:\((.*)\))?"
     match = re.match(pattern, call_string.strip())
@@ -383,6 +472,13 @@ def parse_function_string(call_string: str) -> tuple[str, list, dict]:
 
 
 def relative_error(pred, targ, axis=None):
+    """Compute the relative L2 error between two vectors along the given axis.
+
+    :param pred: the predicted values
+    :param targ: the target values
+    :param axis: the axis along which to compute the error
+    :returns: the relative L2 error
+    """
     with np.errstate(divide='ignore', invalid='ignore'):
         err = np.sqrt(np.sum((pred - targ)**2, axis=axis) / np.sum(targ**2, axis=axis))
     return np.nan_to_num(err, nan=np.nan, posinf=np.nan, neginf=np.nan)

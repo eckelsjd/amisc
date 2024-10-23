@@ -5,7 +5,7 @@
 groups = ["default", "dev", "doc", "jupyter", "test"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:87f4225555a92827a68f436ffbe3b617ca4bb795b5719a96295a0e017be70e32"
+content_hash = "sha256:9dfbf11c9dcf77b6c1086fbc708fc905a9d5a4e4274c45577b3dd8d95961cf0a"
 
 [[metadata.targets]]
 requires_python = ">=3.11"
@@ -635,17 +635,6 @@ groups = ["jupyter"]
 files = [
     {file = "defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61"},
     {file = "defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69"},
-]
-
-[[package]]
-name = "dill"
-version = "0.3.9"
-requires_python = ">=3.8"
-summary = "serialize all of Python"
-groups = ["default"]
-files = [
-    {file = "dill-0.3.9-py3-none-any.whl", hash = "sha256:468dff3b89520b474c0397703366b7b95eebe6303f108adf9b19da1f702be87a"},
-    {file = "dill-0.3.9.tar.gz", hash = "sha256:81aa267dddf68cbfe8029c42ca9ec6a4ab3b22371d1c450abc54422577b4512c"},
 ]
 
 [[package]]

@@ -7,6 +7,8 @@ Includes:
 - `Normal` — a normal distribution.
 - `Relative` — a relative distribution (i.e. uniform within a percentage of a nominal value).
 - `Tolerance` — a tolerance distribution (i.e. uniform within a tolerance of a nominal value).
+- `LogUniform` — a log-uniform distribution.
+- `LogNormal` — a log-normal distribution.
 
 Distribution objects can be converted easily to/from strings for serialization.
 """
@@ -18,11 +20,18 @@ import numpy as np
 
 from amisc.utils import parse_function_string
 
-__all__ = ['Distribution', 'Uniform', 'Normal', 'Relative', 'Tolerance']
+__all__ = ['Distribution', 'Uniform', 'Normal', 'Relative', 'Tolerance', 'LogNormal', 'LogUniform']
 
 
 class Distribution(ABC):
-    """Base class for PDF distributions that provide sample and pdf methods."""
+    """Base class for PDF distributions that provide sample and pdf methods. Distributions should:
+
+    - `sample` - return samples from the distribution
+    - `pdf` - return the probability density function of the distribution
+
+    :ivar dist_args: the arguments that define the distribution (e.g. mean and std for a normal distribution)
+    :vartype dist_args: tuple
+    """
 
     def __init__(self, dist_args: tuple):
         self.dist_args = dist_args
@@ -54,8 +63,9 @@ class Distribution(ABC):
         """Convert a string to a `Distribution` object.
 
         :param dist_string: specifies a PDF or distribution. Can be `Normal(mu, std)`, `Uniform(lb, ub)`,
-                            `Relative(pct)`, or `Tolerance(tol)`. The shorthands `N(0, 1)`, `U(0, 1)`, `rel(5)`, or
-                            `tol(1)` are also accepted.
+                            'LogUniform(lb, ub)', 'LogNormal(mu, std)',
+                            `Relative(pct)`, or `Tolerance(tol)`. The shorthands `N(0, 1)`, `U(0, 1)`, `LU(0, 1)`,
+                            `LN(0, 1)`, `rel(5)`, or `tol(1)` are also accepted.
         :return: the corresponding `Distribution` object
         """
         if not dist_string:
@@ -92,6 +102,24 @@ class Distribution(ABC):
                 return Tolerance((tol,))
             except Exception as e:
                 raise ValueError(f'Tolerance distribution string "{dist_string}" is not valid: Try tol(1).') from e
+        elif dist_name in ['LogUniform', 'LU']:
+            # LogUniform distribution like LU(1e-3, 1e-1)
+            try:
+                lb = float(kwargs.get('lb', args[0]))
+                ub = float(kwargs.get('ub', args[1]))
+                base = float(kwargs.get('base', args[2] if len(args) > 2 else 10))
+                return LogUniform((lb, ub), base=base)
+            except Exception as e:
+                raise ValueError(f'LogUniform distr string "{dist_string}" is not valid: Try LU(1e-3, 1e-1).') from e
+        elif dist_name in ['LogNormal', 'LN']:
+            # LogNniform distribution like LN(-2, 1)
+            try:
+                mu = float(kwargs.get('mu', args[0]))
+                std = float(kwargs.get('std', args[1]))
+                base = float(kwargs.get('base', args[2] if len(args) > 2 else 10))
+                return LogNormal((mu, std), base=base)
+            except Exception as e:
+                raise ValueError(f'LogNormal distr string "{dist_string}" is not valid: Try LN(-2, 1).') from e
         else:
             raise NotImplementedError(f'The distribution "{dist_string}" is not recognized.')
 
@@ -128,8 +156,41 @@ class Uniform(Distribution):
         return np.random.rand(*shape) * (ub - lb) + lb
 
     def pdf(self, x, dist_args=None):
+        x = np.atleast_1d(x)
         lb, ub = dist_args or self.dist_args
         pdf = np.broadcast_to(1 / (ub - lb), x.shape).copy()
+        pdf[np.where(x > ub)] = 0
+        pdf[np.where(x < lb)] = 0
+        return pdf
+
+
+class LogUniform(Distribution):
+    """A LogUniform distribution. Specify by string as "LogUniform(lb, ub)" or "LU(lb, ub)" in shorthand. Uses
+    base-10 by default.
+
+    !!! Example
+        ```python
+        x = LogUniform((1e-3, 1e-1))  # log10(x) ~ U(-3, -1)
+        ```
+    """
+    def __init__(self, dist_args: tuple, base=10):
+        self.base = base
+        super().__init__(dist_args)
+
+    def __str__(self):
+        return f'LU({self.dist_args[0]}, {self.dist_args[1]}, base={self.base})'
+
+    def sample(self, shape, nominal=None, dist_args=None):
+        lb, ub = dist_args or self.dist_args
+        c = 1 / np.log(self.base)
+        return self.base ** (np.random.rand(*shape) * c * (np.log(ub) - np.log(lb)) + c * np.log(lb))
+
+    def pdf(self, x, dist_args=None):
+        x = np.atleast_1d(x)
+        lb, ub = dist_args or self.dist_args
+        c = 1 / np.log(self.base)
+        const = 1 / (c * (np.log(ub) - np.log(lb)) * np.log(self.base))
+        pdf = const / x
         pdf[np.where(x > ub)] = 0
         pdf[np.where(x < lb)] = 0
         return pdf
@@ -142,6 +203,7 @@ class Normal(Distribution):
         return f'N({self.dist_args[0]}, {self.dist_args[1]})'
 
     def domain(self, dist_args=None):
+        """Defaults the domain of the distribution to 3 standard deviations above and below the mean."""
         mu, std = dist_args or self.dist_args
         return mu - 3 * std, mu + 3 * std
 
@@ -152,6 +214,37 @@ class Normal(Distribution):
     def pdf(self, x, dist_args=None):
         mu, std = dist_args or self.dist_args
         return (1 / (np.sqrt(2 * np.pi) * std)) * np.exp(-0.5 * ((x - mu) / std) ** 2)
+
+
+class LogNormal(Distribution):
+    """A LogNormal distribution. Specify by string as "LogNormal(mu, sigma)" or "LN(mu, sigma)" in shorthand.
+    Uses base-10 by default.
+
+    !!! Example
+        ```python
+        x = LogNormal((-2, 1))  # log10(x) ~ N(-2, 1)
+        ```
+    """
+    def __init__(self, dist_args: tuple, base=10):
+        self.base = base
+        super().__init__(dist_args)
+
+    def __str__(self):
+        return f'LN({self.dist_args[0]}, {self.dist_args[1]}, base={self.base})'
+
+    def domain(self, dist_args=None):
+        """Defaults the domain of the distribution to 3 standard deviations above and below the mean."""
+        mu, std = dist_args or self.dist_args
+        return self.base ** (mu - 3 * std), self.base ** (mu + 3 * std)
+
+    def sample(self, shape, nominal=None, dist_args=None):
+        mu, std = dist_args or self.dist_args
+        return self.base ** (np.random.randn(*shape) * std + mu)
+
+    def pdf(self, x, dist_args=None):
+        mu, std = dist_args or self.dist_args
+        const = (1 / (np.sqrt(2 * np.pi) * std * x * np.log(self.base)))
+        return const * np.exp(-0.5 * ((np.log(x)/np.log(self.base) - mu) / std) ** 2)
 
 
 class Relative(Distribution):
@@ -201,4 +294,4 @@ class Tolerance(Distribution):
         return np.random.rand(*shape) * 2 * tol - tol + nominal
 
     def pdf(self, x, dist_args=None):
-        return np.ones(x.shape)
+        return np.ones(np.atleast_1d(x).shape)

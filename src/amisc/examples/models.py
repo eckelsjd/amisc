@@ -1,4 +1,4 @@
-"""Providing some example test functions"""
+"""Provides some example test functions for demonstration purposes."""
 import pickle
 import uuid
 from pathlib import Path
@@ -8,9 +8,28 @@ import numpy as np
 from amisc.system import System
 
 
-def tanh_func(x, *args, A=2, L=1, frac=4, **kwargs):
+def f1(x):
+    y1 = x * np.sin(np.pi * x)
+    return y1
+
+
+def f2(y1):
+    y2 = 1 / (1 + 25*y1**2)
+    return y2
+
+
+def f3(x, y2):
+    y3 = x * np.cos(np.pi * y2)
+    return y3
+
+
+def f3_dict(inputs):
+    return {'y3': inputs['x'] * np.cos(np.pi * inputs['y2'])}
+
+
+def tanh_func(inputs, A=2, L=1, frac=4):
     """Simple tunable tanh function"""
-    return {'y': A*np.tanh(2/(L/frac)*(x-L/2)) + A + 1}
+    return {'y': A * np.tanh(2 / (L/frac) * (inputs['x'] - L/2)) + A + 1}
 
 
 def ishigami(x, *args, a=7.0, b=0.1, **kwargs):
@@ -56,10 +75,10 @@ def wing_weight_func(x, *args, **kwargs):
     return {'y': Wwing[..., np.newaxis]}
 
 
-def nonlinear_wave(x, *args, env_var=0.1**2, wavelength=0.5, wave_amp=0.1, tanh_amp=0.5, L=1, t=0.25, **kwargs):
+def nonlinear_wave(inputs, env_var=0.1**2, wavelength=0.5, wave_amp=0.1, tanh_amp=0.5, L=1, t=0.25):
     """Custom nonlinear model of a traveling Gaussian wave for testing.
 
-    :param x: `(..., x_dim)`, input locations
+    :param inputs: `dict` of input variables `d` and `theta`
     :param env_var: variance of Gaussian envelope
     :param wavelength: sinusoidal perturbation wavelength
     :param wave_amp: amplitude of perturbation
@@ -68,19 +87,20 @@ def nonlinear_wave(x, *args, env_var=0.1**2, wavelength=0.5, wave_amp=0.1, tanh_
     :param t: transition length of tanh function (as fraction of L)
     :returns: `(..., y_dim)`, model output
     """
-    # Traveling sinusoid with moving Gaussian envelope (theta is x2)
-    env_range = [0.2, 0.6]
-    mu = env_range[0] + x[..., 1] * (env_range[1] - env_range[0])
-    theta_env = 1 / (np.sqrt(2 * np.pi * env_var)) * np.exp(-0.5 * (x[..., 0] - mu) ** 2 / env_var)
-    ftheta = wave_amp * np.sin((2*np.pi/wavelength) * x[..., 1]) * theta_env
+    d = inputs['d']
+    theta = inputs['theta']
 
-    # Underlying tanh dependence on x1
-    fd = tanh_amp * np.tanh(2/(L*t)*(x[..., 0] - L/2)) + tanh_amp
+    # Traveling sinusoid with moving Gaussian envelope
+    env_range = [0.2, 0.6]
+    mu = env_range[0] + theta * (env_range[1] - env_range[0])
+    theta_env = 1 / (np.sqrt(2 * np.pi * env_var)) * np.exp(-0.5 * (d - mu) ** 2 / env_var)
+    ftheta = wave_amp * np.sin((2*np.pi/wavelength) * theta) * theta_env
+
+    # Underlying tanh dependence on d
+    fd = tanh_amp * np.tanh(2/(L*t)*(d - L/2)) + tanh_amp
 
     # Compute model = f(theta, d) + f(d)
-    y = np.expand_dims(ftheta + fd, axis=-1)  # (..., 1)
-
-    return {'y': y}
+    return {'y': ftheta + fd}
 
 
 # Fire sat system global variables

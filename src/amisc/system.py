@@ -26,6 +26,7 @@ import datetime
 import functools
 import logging
 import os
+import pickle
 import random
 import string
 import time
@@ -40,13 +41,13 @@ import networkx as nx
 import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from uqtils import ax_default
 
 from amisc.component import Component, IndexSet, MiscTree
 from amisc.serialize import Serializable
-from amisc.utils import get_logger, format_inputs, format_outputs, constrained_lls, relative_error
+from amisc.utils import get_logger, format_inputs, format_outputs, constrained_lls, relative_error, to_model_dataset, \
+    to_surrogate_dataset, _combine_latent_arrays
 from amisc.variable import VariableList
-from amisc.typing import Dataset, TrainIteration, MultiIndex
+from amisc.typing import Dataset, TrainIteration, MultiIndex, LATENT_STR_ID
 
 __all__ = ['TrainHistory', 'System']
 
@@ -347,18 +348,20 @@ class System(BaseModel, Serializable):
         for comp in self.components:
             comp.set_logger(log_file=log_file, stdout=stdout, logger=logger)
 
-    def sample_inputs(self, size: tuple | int, comp: str = 'System', use_pdf: bool = False, transform: bool = False,
+    def sample_inputs(self, size: tuple | int, comp: str = 'System', use_pdf: bool = False,
                       nominal: dict[str: float] = None, constants: set[str] = None) -> Dataset:
-        """Return samples of the inputs according to provided options.
+        """Return samples of the inputs according to provided options. Will return samples in the
+        normalized/compressed space of the surrogate. See [`to_model_dataset`][`amisc.utils.to_model_dataset`] to
+        convert the samples to be usable by the true model directly.
 
         :param size: tuple or integer specifying shape or number of samples to obtain
         :param comp: which component to sample inputs for (defaults to full system exogenous inputs)
         :param use_pdf: whether to sample from each variable's pdf, defaults to random samples over input domain instead
-        :param transform: whether to sample from the transformed variable domain(s), defaults to the original domain
         :param nominal: `dict(var_id=value)` of nominal values for params with relative uncertainty, also can use
-                        to specify constant values for a variable listed in `constants`
+                        to specify constant values for a variable listed in `constants`. Specify nominal values
+                        as the true model would expect them (i.e. not normalized or compressed)
         :param constants: set of param types to hold constant while sampling (i.e. calibration, design, etc.),
-                          can also put a `var_id` string in here to specify a single variable to hold constant
+                          can also put a `var.name` string in here to specify a single variable to hold constant
         :returns: `dict` of `(*size,)` samples for each input variable
         """
         size = (size, ) if isinstance(size, int) else size
@@ -367,28 +370,60 @@ class System(BaseModel, Serializable):
         inputs = self.inputs() if comp == 'System' else self[comp].inputs
         samples = {}
         for var in inputs:
-            # Set a constant value for this variable
-            if var.category in constants or var in constants:
-                samples[var] = nominal.get(var, var.get_nominal(transform=transform))
+            # Sample from latent variable domains for field quantities
+            if var.compression is not None:
+                if var.category in constants or var in constants:
+                    nom = nominal.get(var, None)
+                    if nom is not None:
+                        nom = np.broadcast_to(np.atleast_1d(nom), size + (var.compression.latent_size(),)).copy()
+                    for i, d in enumerate(var.get_domain(transform=True)):
+                        samples[f'{var.name}{LATENT_STR_ID}{i}'] = nom[..., i] if nom is not None else np.mean(d)
+                else:
+                    latent = var.sample_domain(size)
+                    for i in range(latent.shape[-1]):
+                        samples[f'{var.name}{LATENT_STR_ID}{i}'] = latent[..., i]
 
-            # Sample from this variable's pdf or randomly within its domain bounds (reject if outside bounds)
+            # Sample scalars normally
             else:
-                lb, ub = var.get_domain(transform=transform)
-                x_sample = var.sample(size, nominal=nominal.get(var, None), transform=transform) if use_pdf \
-                    else var.sample_domain(size, transform=transform)
-                good_idx = (x_sample < ub) & (x_sample > lb)
-                num_reject = np.sum(~good_idx)
+                # Set a constant value for this variable
+                if var.category in constants or var in constants:
+                    if nom := nominal.get(var):
+                        samples[var] = var.normalize(nom)
+                    else:
+                        samples[var] = var.get_nominal(transform=True)
 
-                while num_reject > 0:
-                    new_sample = var.sample((num_reject,), nominal=nominal.get(var, None), transform=transform) \
-                        if use_pdf else var.sample_domain((num_reject,), transform=transform)
-                    x_sample[~good_idx] = new_sample
+                # Sample from this variable's pdf or randomly within its domain bounds (reject if outside bounds)
+                else:
+                    lb, ub = var.get_domain(transform=True)
+                    x_sample = var.sample(size, nominal=nominal.get(var, None), transform=True) if use_pdf \
+                        else var.sample_domain(size, transform=True)
                     good_idx = (x_sample < ub) & (x_sample > lb)
                     num_reject = np.sum(~good_idx)
 
-                samples[var] = x_sample
+                    while num_reject > 0:
+                        new_sample = var.sample((num_reject,), nominal=nominal.get(var, None), transform=True) \
+                            if use_pdf else var.sample_domain((num_reject,), transform=True)
+                        x_sample[~good_idx] = new_sample
+                        good_idx = (x_sample < ub) & (x_sample > lb)
+                        num_reject = np.sum(~good_idx)
+
+                    samples[var] = x_sample
 
         return samples
+
+    def as_model_data(self):
+        """Convert samples from the surrogate space to the true model space. Primarily, reconstruct field
+        quantities and denormalize inputs.
+        """
+        # TODO
+        raise NotImplementedError
+
+    def as_surrogate_data(self):
+        """Convert samples from the true model space to the surrogate space. Primarily, compress field
+        quantities and normalize inputs.
+        """
+        # TODO
+        raise NotImplementedError
 
     def simulate_fit(self):
         """Loop back through training history and simulate each iteration to obtain the error indicator or new
@@ -397,10 +432,20 @@ class System(BaseModel, Serializable):
         # TODO
         raise NotImplementedError
 
+    def add_output(self):
+        """Add an output variable retroactively to a component surrogate. User should provide a callable that
+        takes a save path and extracts the model output data for given training point/location.
+        """
+        # TODO
+        # Loop back through the surrogate training history
+        # Simulate activate_index and extract the model output from file rather than calling the model
+        # Update all interpolator states
+        raise NotImplementedError
+
     @_save_on_error
     def fit(self, targets: list = None, num_refine: int = 100, max_iter: int = 20, max_tol: float = 1e-3,
-            runtime: float = 1., save_interval: int = 0, update_bounds: bool = True, test_set: tuple = None,
-            executor: Executor = None):
+            runtime: float = 1., save_interval: int = 0, update_bounds: bool = True,
+            test_set: tuple | str | Path = None, executor: Executor = None):
         """Train the system surrogate adaptively by iterative refinement until an end condition is met.
 
         :param targets: list of system output variables to focus refinement on, use all outputs if not specified
@@ -413,12 +458,13 @@ class System(BaseModel, Serializable):
         :param update_bounds: whether to continuously update coupling variable bounds during refinement
         :param test_set: `tuple` of `(xtest, ytest)` to show convergence of surrogate to the true model. The test set
                          inputs and outputs are specified as `dicts` of `np.ndarrays` with keys corresponding to the
-                         variable names.
+                         variable names. Can also pass a path to a `.pkl` file that has the test set data as
+                         {'test_set': (xtest, ytest)}.
         :param executor: a `concurrent.futures.Executor` object to parallelize the refinement process (defaults to
                          `system.executor` if available)
         """
         targets = targets or self.outputs()
-        xtest, ytest = test_set or (None, None)
+        xtest, ytest = self._get_test_set(test_set)
         max_iter = self.refine_level + max_iter
         curr_error = np.inf
         t_start = time.time()
@@ -427,7 +473,7 @@ class System(BaseModel, Serializable):
         if self.root_dir is not None:
             err_record = [res['added_error'] for res in self.train_history]
 
-            if test_set is not None:
+            if xtest is not None and ytest is not None:
                 num_plot = min(len(targets), 3)
                 test_record = np.full((self.refine_level, num_plot), np.nan)
                 for j, res in enumerate(self.train_history):
@@ -451,11 +497,11 @@ class System(BaseModel, Serializable):
                 fig, ax = plt.subplots(figsize=(6, 5), layout='tight')
                 ax.plot(err_record, '-k')
                 ax.set_yscale('log'); ax.grid()
-                ax_default(ax, 'Iteration', r'Relative error indicator', legend=False)
+                ax.set_xlabel('Iteration'); ax.set_ylabel('Relative error indicator')
                 fig.savefig(str(Path(self.root_dir) / 'error_indicator.pdf'), format='pdf', bbox_inches='tight')
 
             # Save performance on a test set
-            if test_set is not None:
+            if xtest is not None and ytest is not None:
                 perf = self.test_set_performance(xtest, ytest)
                 train_result['test_error'] = perf.copy()
 
@@ -467,7 +513,7 @@ class System(BaseModel, Serializable):
                         ax[0, i].plot(test_record[:, i], '-k')
                         ax[0, i].set_yscale('log'); ax.grid()
                         ax[0, i].set_title(self.outputs()[targets[i]].get_tex(units=True))
-                        ax_default(ax[0, i], 'Iteration', r'Test set relative error' if i == 0 else '', legend=False)
+                        ax[0, i].set_xlabel('Iteration'); ax[0, i].set_ylabel('Test set relative error' if i==0 else '')
                     fig.savefig(str(Path(self.root_dir) / 'test_set_error.pdf'), format='pdf', bbox_inches='tight')
 
             self.train_history.append(train_result)
@@ -493,12 +539,14 @@ class System(BaseModel, Serializable):
     def test_set_performance(self, xtest, ytest, index_set='train'):
         """Compute the relative L2 error on a test set for the given target output variables.
 
-        :param xtest: `dict` of test set input samples
-        :param ytest: `dict` of test set output samples
+        :param xtest: `dict` of test set input samples   (unnormalized)
+        :param ytest: `dict` of test set output samples  (unnormalized)
         :param index_set: index set to use for prediction (defaults to 'train')
         :returns: `dict` of relative L2 errors for each target output variable
         """
-        ysurr = self.predict(xtest, index_set=index_set)
+        xtest = to_surrogate_dataset(xtest, self.inputs(), del_fields=True)
+        ysurr = self.predict(xtest, index_set=index_set, targets=list(ytest.keys()))
+        ysurr = to_model_dataset(ysurr, self.outputs(), del_latent=True)
         return {var: relative_error(ysurr[var], ytest[var]) for var in ytest}
 
     def refine(self, targets: list = None, num_refine: int = 100, update_bounds: bool = True,
@@ -532,6 +580,7 @@ class System(BaseModel, Serializable):
         # Compute entire integrated-surrogate on a random test set for global system QoI error estimation
         x_samples = self.sample_inputs(num_refine)
         y_curr = self.predict(x_samples, index_set='train', targets=targets)
+        _combine_latent_arrays(y_curr)
         coupling_vars = {k: v for k, v in self.coupling_variables().items() if k in y_curr}
 
         y_min, y_max = None, None
@@ -564,15 +613,17 @@ class System(BaseModel, Serializable):
 
                 for i, y_cand in enumerate(ret):
                     alpha, beta = comp.candidate_set[i]
+                    _combine_latent_arrays(y_cand)
                     error = {}
-                    for var, array in y_cand.items():
-                        error[var] = relative_error(array, y_curr[var])
+                    for var, arr in y_cand.items():
+                        if var in targets:
+                            error[var] = relative_error(arr, y_curr[var])
 
                         if update_bounds and var in coupling_vars:
-                            y_min[var] = np.min(np.concatenate((y_min, array), axis=0), axis=0, keepdims=True)
-                            y_max[var] = np.max(np.concatenate((y_max, array), axis=0), axis=0, keepdims=True)
+                            y_min[var] = np.min(np.concatenate((y_min, arr), axis=0), axis=0, keepdims=True)
+                            y_max[var] = np.max(np.concatenate((y_max, arr), axis=0), axis=0, keepdims=True)
 
-                    delta_error = np.nanmax([np.nanmax(error[var]) for var in y_cand])  # Max error over all QoIs
+                    delta_error = np.nanmax([np.nanmax(error[var]) for var in error])  # Max error over all target QoIs
                     delta_work = max(1., comp.get_cost(alpha, beta))  # Cpu time (s)
                     error_indicator = delta_error / delta_work
 
@@ -588,8 +639,10 @@ class System(BaseModel, Serializable):
 
         # Update all coupling variable ranges
         if update_bounds:
-            for var in coupling_vars:
-                var.update_domain((y_min[var], y_max[var]), transform=False)
+            for var in coupling_vars.values():
+                new_domain = list(zip(y_min[var].tolist(), y_max[var].tolist())) if var.compression is not None else (
+                    (float(y_min[var]), float(y_max[var])))
+                var.update_domain(new_domain, transform=True)
 
         # Add the chosen multi-index to the chosen component
         if comp_star is not None:
@@ -605,20 +658,11 @@ class System(BaseModel, Serializable):
         return {'component': comp_star, 'alpha': alpha_star, 'beta': beta_star, 'num_evals': num_evals,
                 'added_cost': cost_star, 'added_error': err_star}
 
-    def _set_default(self, struct: dict, default=None):
-        """Helper to set a default value for each component key in a `dict`. Ensures all components have a value."""
-        if struct is not None:
-            if not isinstance(struct, dict):
-                struct = {node: struct for node in self.graph.nodes}  # use same for each component
-        else:
-            struct = {node: default for node in self.graph.nodes}
-        return {node: struct.get(node, default) for node in self.graph.nodes}
-
     def predict(self, x: dict | Dataset, max_fpi_iter: int = 100, anderson_mem: int = 10, fpi_tol: float = 1e-10,
                 use_model: str | tuple | dict = None, model_dir: str | Path = None, verbose: bool = False,
                 index_set: dict[str: IndexSet | Literal['train', 'test']] = 'test',
-                misc_coeff: dict[str: MiscTree] = None,
-                incremental: dict[str, bool] = False, targets=None) -> Dataset:
+                misc_coeff: dict[str: MiscTree] = None, normalized: bool = True,
+                incremental: dict[str, bool] = False, targets=None, var_shape=None) -> Dataset:
         """Evaluate the system surrogate at inputs `x`. Return `y = system(x)`.
 
         !!! Warning "Computing the true model with feedback loops"
@@ -641,19 +685,48 @@ class System(BaseModel, Serializable):
                           `IndexSet` object.
         :param misc_coeff: `dict(comp=MiscTree)` to override the default coefficients for a component, passes through
                            along with `index_set` and `incremental` to `comp.predict()`.
+        :param normalized: true if the passed inputs are compressed/normalized for surrogate evaluation (default),
+                           such as inputs returned by `sample_inputs`
         :param incremental: whether to add `index_set` to the current active set for each component (temporarily)
         :param targets: list of output variables to return, defaults to returning all system outputs
+        :param var_shape: (Optional) `dict` of shapes for field quantity inputs in `x` -- you would only specify this
+                          if passing field qtys directly to the models (i.e. not using `sample_inputs`)
         :returns: `dict` of output variables - the surrogate approximation of the system outputs (or the true model)
         """
-        # TODO: argument to return latent coeff instead of reconstructed fields
         # Format inputs and allocate space
-        x, loop_shape = format_inputs(x, var_shape={var: var.shape for var in self.inputs()})  # {'x': (N, ...)}
+        var_shape = var_shape or {}
+        x, loop_shape = format_inputs(x, var_shape=var_shape)  # {'x': (N, *var_shape)}
         y = {}
         all_inputs = ChainMap(x, y)
         N = int(np.prod(loop_shape))
         t1 = 0
         output_dir = None
-        is_computed = {var: False for var in (targets or self.outputs())}
+        norm_status = {var: normalized for var in x}  # keep track of whether inputs are normalized or not
+
+        # Keep track of what outputs are computed
+        is_computed = {}
+        for var in (targets or self.outputs()):
+            if (v := self.outputs().get(var, None)) is not None:
+                if v.compression is not None:
+                    for field in v.compression.fields:
+                        is_computed[field] = False
+                else:
+                    is_computed[var] = False
+
+        def _set_default(struct: dict, default=None):
+            """Helper to set a default value for each component key in a `dict`. Ensures all components have a value."""
+            if struct is not None:
+                if not isinstance(struct, dict):
+                    struct = {node: struct for node in self.graph.nodes}  # use same for each component
+            else:
+                struct = {node: default for node in self.graph.nodes}
+            return {node: struct.get(node, default) for node in self.graph.nodes}
+
+        # Ensure use_model, index_set, and incremental are specified for each component model
+        use_model = _set_default(use_model, None)
+        index_set = _set_default(index_set, 'test')
+        misc_coeff = _set_default(misc_coeff, None)
+        incremental = _set_default(incremental, False)
 
         class _Converged:
             """Store indices to track which samples have converged."""
@@ -670,11 +743,54 @@ class System(BaseModel, Serializable):
                 return np.logical_and(self.valid_idx, ~self.converged_idx)
         samples = _Converged(N)
 
-        # Ensure use_model, index_set, and incremental are specified for each component model
-        use_model = self._set_default(use_model, None)
-        index_set = self._set_default(index_set, 'test')
-        misc_coeff = self._set_default(misc_coeff, None)
-        incremental = self._set_default(incremental, False)
+        def _merge_shapes(target_shape, arr):
+            """Helper to merge an array into the target shape."""
+            shape1, shape2 = target_shape, arr.shape
+            if len(shape2) > len(shape1):
+                shape1, shape2 = shape2, shape1
+            result = []
+            for i in range(len(shape1)):
+                if i < len(shape2):
+                    if shape1[i] == 1:
+                        result.append(shape2[i])
+                    elif shape2[i] == 1:
+                        result.append(shape1[i])
+                    else:
+                        result.append(shape1[i])
+                else:
+                    result.append(1)
+            arr = arr.reshape(tuple(result))
+            return np.broadcast_to(arr, target_shape).copy()
+
+        def _gather_comp_inputs(comp):
+            """Helper to gather inputs for a component, making sure they are normalized correctly."""
+            # Will access but not modify: all_inputs, use_model, norm_status
+            comp_input = {}
+            kwds = {}
+            field_coords = {f'{var}_coords': comp.model_kwargs.get(f'{var}_coords', None) for var in comp.inputs}
+            for var, arr in all_inputs.items():
+                if var.split(LATENT_STR_ID)[0] in comp.inputs:
+                    comp_input[var] = np.copy(arr[samples.valid_idx, ...])
+            for var in comp.inputs:
+                if var not in comp_input and var.compression is not None:
+                    for field in var.compression.fields:
+                        if field in all_inputs:
+                            comp_input[field] = np.copy(all_inputs[field][samples.valid_idx, ...])
+            call_model = use_model.get(comp.name, None) is not None
+
+            if call_model:  # Make sure we format all inputs for model evaluation (i.e. denormalize)
+                denorm_inputs, field_coords = to_model_dataset({var: arr for var, arr in comp_input.items()
+                                                                if norm_status[var]}, comp.inputs, del_latent=True,
+                                                               **field_coords)
+                kwds.update(field_coords)
+                comp_input.update(denorm_inputs)
+            else:  # Otherwise, make sure we format inputs for surrogate evaluation (i.e. normalize)
+                norm_inputs, _ = to_surrogate_dataset({var: arr for var, arr in comp_input.items()
+                                                       if not norm_status[var]}, comp.inputs, del_fields=True,
+                                                      **field_coords)
+                comp_input.update(norm_inputs)
+
+            return comp_input, kwds, call_model
 
         # Convert system into DAG by grouping strongly-connected-components
         dag = nx.condensation(self.graph)
@@ -694,7 +810,7 @@ class System(BaseModel, Serializable):
 
                 # Gather inputs
                 comp = self[scc[0]]
-                comp_input = {var: arr[samples.valid_idx, ...] for var, arr in all_inputs.items() if var in comp.inputs}
+                comp_input, kwds, call_model = _gather_comp_inputs(comp)
 
                 # Compute outputs
                 if model_dir is not None:
@@ -703,14 +819,15 @@ class System(BaseModel, Serializable):
                         os.mkdir(output_dir)
                 comp_output = comp.predict(comp_input, use_model=use_model.get(scc[0]), model_dir=output_dir,
                                            index_set=index_set.get(scc[0]), incremental=incremental.get(scc[0]),
-                                           misc_coeff=misc_coeff.get(scc[0]))
+                                           misc_coeff=misc_coeff.get(scc[0]), **kwds)
                 for var, arr in comp_output.items():
                     output_shape = arr.shape[1:]
                     y.setdefault(var, np.full((N, *output_shape), np.nan))
                     y[var][samples.valid_idx, ...] = arr
                     samples.valid_idx = np.logical_and(samples.valid_idx, ~np.any(np.isnan(y[var]),
                                                                                   axis=tuple(range(1, y[var].ndim))))
-                    is_computed[var] = True
+                    is_computed[var.split(LATENT_STR_ID)[0]] = True
+                    norm_status[var] = call_model
 
                 if verbose:
                     self.logger.info(f"Component '{scc[0]}' completed. Runtime: {time.time() - t1} s")
@@ -723,30 +840,33 @@ class System(BaseModel, Serializable):
                 coupling_vars = [scc_inputs.get(var) for var in (scc_inputs.keys() - x.keys()) if var in scc_outputs]
                 coupling_prev = {}
                 for var in coupling_vars:
-                    lb, ub = var.get_domain()
-                    shape = (N,) + (1,) * len(var.shape)
-                    coupling_prev[var] = np.broadcast_to((lb + ub) / 2, shape).copy()
+                    domain = var.get_domain(transform=True)
+                    if isinstance(domain, list):  # Latent coefficients are the coupling variables
+                        for i, d in enumerate(domain):
+                            lb, ub = d
+                            coupling_prev[f'{var.name}{LATENT_STR_ID}{i}'] = np.broadcast_to((lb + ub) / 2, (N,)).copy()
+                            norm_status[f'{var.name}{LATENT_STR_ID}{i}'] = True
+                    else:
+                        lb, ub = domain
+                        shape = (N,) + (1,) * len(var_shape.get(var, ()))
+                        coupling_prev[var] = np.broadcast_to((lb + ub) / 2, shape).copy()
+                        norm_status[var] = True
 
-                # Main FPI loop
-                if verbose:
-                    self.logger.info(f"Initializing FPI for SCC {scc} ...")
-                    t1 = time.time()
-                k = 0
                 residual_hist = deque(maxlen=anderson_mem)
                 coupling_hist = deque(maxlen=anderson_mem)
                 samples.reset_convergence()
 
                 def _end_conditions_met():
-                    """Compute residual, update history, and check end conditions."""
+                    """Helper to compute residual, update history, and check end conditions."""
                     residual = {}
                     converged_idx = np.full(N, True)
-                    for var in coupling_vars:
+                    for var in coupling_prev:
                         residual[var] = y[var] - coupling_prev[var]
                         var_conv = np.all(np.abs(residual[var]) <= fpi_tol, axis=tuple(range(1, residual[var].ndim)))
                         converged_idx = np.logical_and(converged_idx, var_conv)
                     samples.converged_idx = np.logical_or(samples.converged_idx, converged_idx)
 
-                    for var in coupling_vars:
+                    for var in coupling_prev:
                         coupling_prev[var][samples.curr_idx, ...] = y[var][samples.curr_idx, ...]
                     residual_hist.append(copy.deepcopy(residual))
                     coupling_hist.append(copy.deepcopy(coupling_prev))
@@ -764,46 +884,32 @@ class System(BaseModel, Serializable):
                     if k >= max_fpi_iter:
                         self.logger.warning(f'FPI did not converge in {max_fpi_iter} iterations for SCC {scc}: '
                                             f'{max_error} > tol {fpi_tol}. Some samples will be returned as NaN.')
-                        for var in coupling_vars:
+                        for var in coupling_prev:
                             y[var][~samples.converged_idx, ...] = np.nan
                         samples.valid_idx = np.logical_and(samples.valid_idx, samples.converged_idx)
                         return True
                     else:
                         return False
 
-                def _merge_shapes(target_shape, arr):
-                    shape1, shape2 = target_shape, arr.shape
-                    if len(shape2) > len(shape1):
-                        shape1, shape2 = shape2, shape1
-                    result = []
-                    for i in range(len(shape1)):
-                        if i < len(shape2):
-                            if shape1[i] == 1:
-                                result.append(shape2[i])
-                            elif shape2[i] == 1:
-                                result.append(shape1[i])
-                            else:
-                                result.append(shape1[i])
-                        else:
-                            result.append(1)
-                    arr = arr.reshape(tuple(result))
-                    return np.broadcast_to(arr, target_shape).copy()
-
+                # Main FPI loop
+                if verbose:
+                    self.logger.info(f"Initializing FPI for SCC {scc} ...")
+                    t1 = time.time()
+                k = 0
                 while True:
                     for node in scc:
                         # Gather inputs from exogenous and coupling sources
                         comp = self[node]
-                        comp_input = {}
-                        for var in comp.inputs:
-                            if (arr := coupling_prev.get(var)) is not None:
-                                comp_input[var] = arr[samples.curr_idx, ...]
-                            else:
-                                comp_input[var] = all_inputs[var][samples.curr_idx, ...]
+                        comp_input, kwds, call_model = _gather_comp_inputs(comp)
 
-                        # Compute component outputs (just don't do this FPI with the real models, please..)
+                        if k == 0:  # use initial guess for coupling variables
+                            comp_input.update({var: np.copy(arr[samples.curr_idx, ...]) for var, arr in
+                                               coupling_prev.items() if var.split(LATENT_STR_ID)[0] in comp.inputs})
+
+                        # Compute outputs (just don't do this FPI with expensive real models, please..)
                         comp_output = comp.predict(comp_input, use_model=use_model.get(node), model_dir=None,
                                                    index_set=index_set.get(node), incremental=incremental.get(node),
-                                                   misc_coeff=misc_coeff.get(node))
+                                                   misc_coeff=misc_coeff.get(node), **kwds)
                         for var, arr in comp_output.items():
                             output_shape = arr.shape[1:]
                             if y.get(var) is not None:
@@ -811,6 +917,8 @@ class System(BaseModel, Serializable):
                                     y[var] = _merge_shapes((N, *output_shape), y[var])
                             else:
                                 y.setdefault(var, np.full((N, *output_shape), np.nan))
+                                norm_status[var] = call_model
+                                is_computed[var] = True
                             y[var][samples.curr_idx, ...] = arr
 
                     # Compute residual and check end conditions
@@ -827,7 +935,7 @@ class System(BaseModel, Serializable):
                     mk = len(residual_hist)  # Max of anderson mem
                     var_shapes = []
                     xdims = []
-                    for var in coupling_vars:
+                    for var in coupling_prev:
                         shape = coupling_prev[var].shape[1:]
                         var_shapes.append(shape)
                         xdims.append(int(np.prod(shape)))
@@ -836,7 +944,7 @@ class System(BaseModel, Serializable):
                     coupling_snap = np.empty((N_curr, N_couple, mk))  # Shortened snapshot of coupling history
                     for i, (coupling_iter, residual_iter) in enumerate(zip(coupling_hist, residual_hist)):
                         start_idx = 0
-                        for j, var in enumerate(coupling_vars):
+                        for j, var in enumerate(coupling_prev):
                             end_idx = start_idx + xdims[j]
                             coupling_snap[:, start_idx:end_idx, i] = coupling_iter[var][samples.curr_idx, ...].reshape((N_curr, -1))
                             res_snap[:, start_idx:end_idx, i] = residual_iter[var][samples.curr_idx, ...].reshape((N_curr, -1))
@@ -847,15 +955,11 @@ class System(BaseModel, Serializable):
                     alpha = np.expand_dims(constrained_lls(res_snap, b, C, d), axis=-3)   # (..., 1, mk, 1)
                     coupling_new = np.squeeze(coupling_snap[:, :, np.newaxis, :] @ alpha, axis=(-1, -2))
                     start_idx = 0
-                    for j, var in enumerate(coupling_vars):
+                    for j, var in enumerate(coupling_prev):
                         end_idx = start_idx + xdims[j]
                         coupling_prev[var][samples.curr_idx, ...] = coupling_new[:, start_idx:end_idx].reshape((N_curr, *var_shapes[j]))
                         start_idx = end_idx
                     k += 1
-
-                for node in scc:
-                    for var in self[node].outputs:
-                        is_computed[var] = True
 
         # Return all component outputs; samples that didn't converge during FPI are left as np.nan
         return format_outputs(y, loop_shape)
@@ -902,6 +1006,33 @@ class System(BaseModel, Serializable):
         """Restore the unpickleable attributes after unpickling."""
         self.executor = buffer['executor']
 
+    def _get_test_set(self, test_set: str | Path | tuple = None) -> tuple:
+        """Try to load a test set from the root directory if it exists."""
+        if isinstance(test_set, tuple):
+            return test_set  # (xtest, ytest)
+        else:
+            ret = (None, None)
+            if test_set is not None:
+                test_set = Path(test_set)
+            elif self.root_dir is not None:
+                test_set = self.root_dir / 'test_set.pkl'
+
+            if test_set is not None:
+                if test_set.exists():
+                    with open(test_set, 'rb') as fd:
+                        data = pickle.load(fd)
+                    ret = data['test_set']
+
+            return ret
+
+    def _save_test_set(self, test_set: tuple = None):
+        """Save the test set to the root directory if possible."""
+        if self.root_dir is not None and test_set is not None:
+            test_file = self.root_dir / 'test_set.pkl'
+            if not test_file.exists():
+                with open(test_file, 'wb') as fd:
+                    pickle.dump({'test_set': test_set}, fd)
+
     def save_to_file(self, filename: str, save_dir: str | Path = None, dumper=None):
         """Save surrogate to file. Defaults to `root/surrogates/filename.yml` with the default yaml encoder.
 
@@ -937,6 +1068,12 @@ class System(BaseModel, Serializable):
                     root_dir = Path(filename).resolve().parent.parent
         system.root_dir = root_dir
         return system
+
+    def clear(self):
+        """Clear all surrogate model data and reset the system."""
+        for comp in self.components:
+            comp.clear()
+        self.train_history.clear()
 
     def serialize(self, keep_components=False, serialize_args=None, serialize_kwargs=None) -> dict:
         """Convert to a `dict` with only standard Python types for fields."""

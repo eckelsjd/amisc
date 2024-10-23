@@ -1,9 +1,14 @@
+"""Test the package utilities."""
 import time
 
 import numpy as np
 from scipy.linalg import lapack
 
+from amisc.compression import SVD
+from amisc.typing import LATENT_STR_ID
 from amisc.utils import get_logger, parse_function_string, format_inputs, _inspect_function, constrained_lls
+from amisc.utils import to_model_dataset, to_surrogate_dataset
+from amisc.variable import Variable, VariableList
 
 
 def test_inspect_function():
@@ -119,3 +124,45 @@ def test_lls():
     diff = alpha - alpha2
     assert np.max(np.abs(diff)) < tol
     print(f'Custom CLLS time: {t2-t1} s. Scipy time: {t4-t3} s.')
+
+
+def test_dataset_conversion():
+    """Test conversion of datasets to/from model and surrogate forms."""
+    # Data matrix for field
+    param = np.random.rand(50)
+    svd_coords = np.linspace(0, 10, 100)
+    ux = np.sin(svd_coords)[..., np.newaxis] * param
+    uy = np.cos(svd_coords)[..., np.newaxis] * param
+    A = np.concatenate((ux, uy), axis=0)
+    compression = SVD(data_matrix=A, rank=4, fields=['ux', 'uy'], coords=svd_coords)
+    latent = compression.compress(A.T)  # (num_samples, rank)
+    domain = list(zip(np.min(latent, axis=0), np.max(latent, axis=0)))
+
+    # Scalar, normalized, and field quantity variables
+    scalar = Variable('scalar', dist='U(0, 1)')
+    norm = Variable('norm', dist='LN(0, 1)', norm='log10')
+    field = Variable('f', domain=domain, compression=compression)
+    vlist = VariableList([scalar, norm, field])
+
+    # Surrogate dataset
+    size = (10, 3)
+    s = field.sample_domain(size)
+    surr_ds = {f'{field}{LATENT_STR_ID}{i}': s[..., i] for i in range(s.shape[-1])}
+    surr_ds.update({var: var.normalize(var.sample(size)) for var in [scalar, norm]})
+
+    # To model dataset (denormalize/reconstruct)
+    model_ds, fc = to_model_dataset(surr_ds, vlist, del_latent=True, f_coords=svd_coords)
+    assert np.allclose(model_ds['scalar'], surr_ds['scalar'])
+    assert np.allclose(norm.normalize(model_ds['norm']), surr_ds['norm'])
+    assert np.allclose(fc['f_coords'], svd_coords)
+    assert all([var in model_ds for var in ['scalar', 'norm', 'ux', 'uy']])
+    assert all([LATENT_STR_ID not in var for var in model_ds])
+    assert all([model_ds[var].shape == (*size, 100) for var in ['ux', 'uy']])
+    latent = field.compress({var: model_ds[var] for var in ['ux', 'uy']})['latent']
+    assert all([np.allclose(latent[..., i], surr_ds[f'{field}{LATENT_STR_ID}{i}']) for i in range(latent.shape[-1])])
+
+    # Back to surrogate dataset (normalize/compress)
+    surr_ds2, surr_vars = to_surrogate_dataset(model_ds, vlist, del_fields=True, **fc)
+    assert all([v in surr_vars for v in surr_ds.keys()])
+    assert all([var not in surr_ds2 for var in ['ux', 'uy']])
+    assert all([np.allclose(surr_ds[var], surr_ds2[var]) for var in surr_ds2])
