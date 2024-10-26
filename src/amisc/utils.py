@@ -31,14 +31,14 @@ __all__ = ['parse_function_string', 'relative_error', 'get_logger', 'format_inpu
 import amisc.variable
 from amisc.typing import Dataset, LATENT_STR_ID
 
-LOG_FORMATTER = logging.Formatter(u"%(asctime)s — [%(levelname)s] — %(name)-20s — %(message)s")
+LOG_FORMATTER = logging.Formatter(u"%(asctime)s — [%(levelname)s] — %(name)-15s — %(message)s")
 
 
 def _combine_latent_arrays(arr):
     """Helper function to concatenate latent arrays into a single variable in the `arr` Dataset."""
     for var in list(arr.keys()):
         if LATENT_STR_ID in var:  # extract latent variables from surrogate data
-            base_id = var.split(LATENT_STR_ID)[0]
+            base_id = str(var).split(LATENT_STR_ID)[0]
             arr[base_id] = arr[var][..., np.newaxis] if arr.get(base_id) is None else (
                 np.concatenate((arr[base_id], arr[var][..., np.newaxis]), axis=-1))
             del arr[var]
@@ -484,16 +484,18 @@ def relative_error(pred, targ, axis=None):
     return np.nan_to_num(err, nan=np.nan, posinf=np.nan, neginf=np.nan)
 
 
-def get_logger(name: str, stdout=True, log_file: str | Path = None) -> logging.Logger:
+def get_logger(name: str, stdout: bool = True, log_file: str | Path = None,
+               level: int = logging.INFO) -> logging.Logger:
     """Return a file/stdout logger with the given name.
 
     :param name: the name of the logger to return
-    :param stdout: whether to add a stdout handler to the logger
+    :param stdout: whether to add a stdout stream handler to the logger
     :param log_file: add file logging to this file (optional)
+    :param level: the logging level to set
     :returns: the logger
     """
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(level)
     logger.handlers.clear()
     if stdout:
         std_handler = logging.StreamHandler(sys.stdout)
@@ -501,7 +503,7 @@ def get_logger(name: str, stdout=True, log_file: str | Path = None) -> logging.L
         logger.addHandler(std_handler)
     if log_file is not None:
         f_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
-        f_handler.setLevel(logging.DEBUG)
+        f_handler.setLevel(level)
         f_handler.setFormatter(LOG_FORMATTER)
         logger.addHandler(f_handler)
 

@@ -1,17 +1,18 @@
 """The `System` object is a framework for multidisciplinary models. It manages multiple single discipline component
 models and the connections between them. It provides a top-level interface for constructing and evaluating surrogates.
 
-Features
---------
+Features:
+
 - Manages multidisciplinary models in a graph data structure, supports feedforward and feedback connections
-- Feedback connections are solved with a fixed-point iteration (FPI) nonlinear solver
-- FPI uses Anderson acceleration and surrogate evaluations for speed-up
+- Feedback connections are solved with a fixed-point iteration (FPI) nonlinear solver with anderson acceleration
 - Top-level interface for training and using surrogates of each component model
 - Adaptive experimental design for choosing training data efficiently
 - Convenient testing, plotting, and performance metrics provided to assess quality of surrogates
 - Detailed logging and traceback information
-- Supports parallel execution with OpenMP and MPI protocols
+- Supports parallel or vectorized execution of component models
 - Abstract and flexible interfacing with component models
+- Easy serialization and deserialization to/from YAML files
+- Supports approximating field quantities via compression
 
 Includes:
 
@@ -41,9 +42,10 @@ import networkx as nx
 import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from uqtils import ax_default
 
 from amisc.component import Component, IndexSet, MiscTree
-from amisc.serialize import Serializable
+from amisc.serialize import Serializable, _builtin
 from amisc.utils import get_logger, format_inputs, format_outputs, constrained_lls, relative_error, to_model_dataset, \
     to_surrogate_dataset, _combine_latent_arrays
 from amisc.variable import VariableList
@@ -53,14 +55,14 @@ __all__ = ['TrainHistory', 'System']
 
 
 class TrainHistory(UserList, Serializable):
-    """Stores the training history of a system surrogate. as a list of `TrainIteration` objects."""
+    """Stores the training history of a system surrogate as a list of `TrainIteration` objects."""
 
     def __init__(self, data: list = None):
         data = data or []
         super().__init__(self._validate_data(data))
 
     def serialize(self) -> list[dict]:
-        """Return a list of each result in the history serialized to a dictionary."""
+        """Return a list of each result in the history serialized to a `dict`."""
         ret_list = []
         for res in self:
             new_res = res.copy()
@@ -71,7 +73,7 @@ class TrainHistory(UserList, Serializable):
 
     @classmethod
     def deserialize(cls, serialized_data: list[dict]) -> TrainHistory:
-        """Deserialize using pydantic model validation on `TrainHistory.data`."""
+        """Deserialize a list of `dict` objects into a `TrainHistory` object."""
         return TrainHistory(serialized_data)
 
     @classmethod
@@ -85,6 +87,8 @@ class TrainHistory(UserList, Serializable):
         item['alpha'] = MultiIndex(item['alpha'])
         item['beta'] = MultiIndex(item['beta'])
         item['num_evals'] = int(item['num_evals'])
+        item['added_cost'] = float(item['added_cost'])
+        item['added_error'] = float(item['added_error'])
         return item
 
     def append(self, item: dict):
@@ -103,15 +107,106 @@ class TrainHistory(UserList, Serializable):
     def __setitem__(self, key, value):
         super().__setitem__(key, self._validate_item(value))
 
+    def __eq__(self, other):
+        """Two `TrainHistory` objects are equal if they have the same length and all items are equal, excluding nans."""
+        if not isinstance(other, TrainHistory):
+            return False
+        if len(self) != len(other):
+            return False
+        for item_self, item_other in zip(self, other):
+            for key in item_self:
+                if key in item_other:
+                    val_self = item_self[key]
+                    val_other = item_other[key]
+                    if isinstance(val_self, float) and isinstance(val_other, float):
+                        if not (np.isnan(val_self) and np.isnan(val_other)) and val_self != val_other:
+                            return False
+                    elif isinstance(val_self, dict) and isinstance(val_other, dict):
+                        for v, err in val_self.items():
+                            if v in val_other:
+                                err_other = val_other[v]
+                                if not (np.isnan(err) and np.isnan(err_other)) and err != err_other:
+                                    return False
+                            else:
+                                return False
+                    elif val_self != val_other:
+                        return False
+                else:
+                    return False
+        return True
+
+
+class _Converged:
+    """Helper class to track which samples have converged during `System.predict()`."""
+    def __init__(self, num_samples):
+        self.num_samples = num_samples
+        self.valid_idx = np.full(num_samples, True)          # All samples are valid by default
+        self.converged_idx = np.full(num_samples, False)     # For FPI convergence
+
+    def reset_convergence(self):
+        self.converged_idx = np.full(self.num_samples, False)
+
+    @property
+    def curr_idx(self):
+        return np.logical_and(self.valid_idx, ~self.converged_idx)
+
+
+def _merge_shapes(target_shape, arr):
+    """Helper to merge an array into the target shape."""
+    shape1, shape2 = target_shape, arr.shape
+    if len(shape2) > len(shape1):
+        shape1, shape2 = shape2, shape1
+    result = []
+    for i in range(len(shape1)):
+        if i < len(shape2):
+            if shape1[i] == 1:
+                result.append(shape2[i])
+            elif shape2[i] == 1:
+                result.append(shape1[i])
+            else:
+                result.append(shape1[i])
+        else:
+            result.append(1)
+    arr = arr.reshape(tuple(result))
+    return np.broadcast_to(arr, target_shape).copy()
+
 
 class System(BaseModel, Serializable):
+    """
+    Multidisciplinary (MD) surrogate framework top-level class. Construct a `System` from a list of
+    `Component` models.
+
+    !!! Example
+        ```python
+        def f1(x):
+            y = x ** 2
+            return y
+        def f2(y):
+            z = y + 1
+            return z
+
+        system = System(f1, f2)
+        ```
+
+    A `System` object can saved/loaded from `.yml` files using the `!System` yaml tag.
+
+    :ivar name: the name of the system
+    :ivar components: list of `Component` models that make up the MD system
+    :ivar train_history: history of training iterations for the system surrogate (filled in during training)
+
+    :ivar _graph: internal graph data structure of the MD system
+    :ivar _root_dir: root directory where all surrogate build products are saved to file
+    :ivar _logger: logger object for the system
+    :ivar _executor: manages parallel execution for the system
+    """
     yaml_tag: ClassVar[str] = u'!System'
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True,
                               extra='allow')
 
     name: Annotated[str, Field(default_factory=lambda: "System_" + "".join(random.choices(string.digits, k=3)))]
     components: Callable | Component | list[Callable | Component]
-    train_history: TrainHistory = TrainHistory()
+    train_history: list[dict] | TrainHistory = TrainHistory()
+    amisc_version: str = None
 
     _graph: nx.DiGraph
     _root_dir: Optional[str]
@@ -119,6 +214,14 @@ class System(BaseModel, Serializable):
     _executor: Optional[Executor]
 
     def __init__(self, /, *args, components=None, executor=None, root_dir=None, **kwargs):
+        """Construct a `System` object from a list of `Component` models in `*args` or `components`. If
+        a `root_dir` is provided, then a new directory will be created under `root_dir` with the name
+        `amisc_{timestamp}`. This directory will be used to save all build products and log files.
+
+        :param components: list of `Component` models that make up the MD system
+        :param executor: manages parallel execution for the system
+        :param root_dir: root directory where all surrogate build products are saved to file (optional)
+        """
         if components is None:
             components = []
             for a in args:
@@ -130,14 +233,17 @@ class System(BaseModel, Serializable):
                     except TypeError as e:
                         raise ValueError(f"Invalid component: {a}") from e
 
-        super().__init__(components=components, **kwargs)
+        import amisc
+        amisc_version = kwargs.pop('amisc_version', amisc.__version__)
+        super().__init__(components=components, amisc_version=amisc_version, **kwargs)
         self.root_dir = root_dir
         self.executor = executor
         self.build_graph()
 
     def __repr__(self):
         s = f'---- {self.name} ----\n'
-        s += f'Refinement: {self.refine_level}\n'
+        s += f'amisc version: {self.amisc_version}\n'
+        s += f'Refinement level: {self.refine_level}\n'
         s += f'Components: {", ".join([comp.name for comp in self.components])}\n'
         s += f'Inputs:     {", ".join([var.name for var in self.inputs()])}\n'
         s += f'Outputs:    {", ".join([var.name for var in self.outputs()])}'
@@ -193,9 +299,9 @@ class System(BaseModel, Serializable):
             try:
                 return func(self, *args, **kwargs)
             except:
-                self.save_to_file('system_error.yml')
-                self.logger.critical(f'An error occurred during execution of {func.__name__}. Saving '
-                                     f'System object to system_error.yml', exc_info=True)
+                self.save_to_file(f'{self.name}_error.yml')
+                self.logger.critical(f'An error occurred during execution of "{func.__name__}". Saving '
+                                     f'System object to {self.name}_error.yml', exc_info=True)
                 self.logger.info(f'Final system surrogate on exit: \n {self}')
                 raise
         return wrap
@@ -250,14 +356,16 @@ class System(BaseModel, Serializable):
 
     def variables(self):
         """Iterator over all variables in the system (inputs and outputs)."""
-        yield from ChainMap(*self.inputs(), *self.outputs()).values()
+        yield from ChainMap(self.inputs(), self.outputs()).values()
 
     @property
     def refine_level(self) -> int:
+        """The total number of training iterations."""
         return len(self.train_history)
 
     @property
     def executor(self) -> Executor:
+        """An instance of `concurrent.futures.Executor` to manage parallel execution of the system."""
         return self._executor
 
     @executor.setter
@@ -278,10 +386,12 @@ class System(BaseModel, Serializable):
 
     @staticmethod
     def timestamp() -> str:
+        """Return a UTC timestamp string in the isoformat `YYYY-MM-DDTHH.MM.SS`."""
         return datetime.datetime.now(tz=timezone.utc).isoformat().split('.')[0].replace(':', '.')
 
     @property
     def root_dir(self):
+        """Return the root directory of the surrogate (if available), otherwise `None`."""
         return Path(self._root_dir) if self._root_dir is not None else None
 
     @root_dir.setter
@@ -328,14 +438,18 @@ class System(BaseModel, Serializable):
             self._root_dir = None
             self.set_logger(log_file=None)
 
-    def set_logger(self, log_file: str | Path = None, stdout: bool = None, logger: logging.Logger = None):
+    def set_logger(self, log_file: str | Path | bool = None, stdout: bool = None, logger: logging.Logger = None,
+                   level: int = logging.INFO):
         """Set a new `logging.Logger` object.
 
-        :param log_file: log to file (if provided)
-        :param stdout: whether to connect the logger to console (defaults to whatever is currently set or False)
-        :param logger: the logging object to use (if None, then a new logger is created; this will override
-                       the `log_file` and `stdout` arguments if set)
+        :param log_file: log to this file if str or Path (defaults to whatever is currently set or empty);
+                         set `False` to remove file logging or set `True` to create a default log file in the root dir
+        :param stdout: whether to connect the logger to console (defaults to whatever is currently set or `False`)
+        :param logger: the logging object to use (this will override the `log_file` and `stdout` arguments if set);
+                       if `None`, then a new logger is created according to `log_file` and `stdout`
+        :param level: the logging level to set the logger to (defaults to `logging.INFO`)
         """
+        # Decide whether to use stdout
         if stdout is None:
             stdout = False
             if self._logger is not None:
@@ -343,10 +457,24 @@ class System(BaseModel, Serializable):
                     if isinstance(handler, logging.StreamHandler):
                         stdout = True
                         break
-        self._logger = logger or get_logger(self.name, log_file=log_file, stdout=stdout)
+
+        # Decide what log_file to use (if any)
+        if log_file is True:
+            log_file = pth / f'amisc_{self.timestamp()}.log' if (pth := self.root_dir) is not None else (
+                f'amisc_{self.timestamp()}.log')
+        elif log_file is None:
+            if self._logger is not None:
+                for handler in self._logger.handlers:
+                    if isinstance(handler, logging.FileHandler):
+                        log_file = handler.baseFilename
+                        break
+        elif log_file is False:
+            log_file = None
+
+        self._logger = logger or get_logger(self.name, log_file=log_file, stdout=stdout, level=level)
 
         for comp in self.components:
-            comp.set_logger(log_file=log_file, stdout=stdout, logger=logger)
+            comp.set_logger(log_file=log_file, stdout=stdout, logger=logger, level=level)
 
     def sample_inputs(self, size: tuple | int, comp: str = 'System', use_pdf: bool = False,
                       nominal: dict[str: float] = None, constants: set[str] = None) -> Dataset:
@@ -359,7 +487,8 @@ class System(BaseModel, Serializable):
         :param use_pdf: whether to sample from each variable's pdf, defaults to random samples over input domain instead
         :param nominal: `dict(var_id=value)` of nominal values for params with relative uncertainty, also can use
                         to specify constant values for a variable listed in `constants`. Specify nominal values
-                        as the true model would expect them (i.e. not normalized or compressed)
+                        as the true model would expect them (i.e. not normalized or compressed) -- they will be
+                        returned in normalized form.
         :param constants: set of param types to hold constant while sampling (i.e. calibration, design, etc.),
                           can also put a `var.name` string in here to specify a single variable to hold constant
         :returns: `dict` of `(*size,)` samples for each input variable
@@ -376,7 +505,7 @@ class System(BaseModel, Serializable):
                     nom = nominal.get(var, None)
                     if nom is not None:
                         nom = np.broadcast_to(np.atleast_1d(nom), size + (var.compression.latent_size(),)).copy()
-                    for i, d in enumerate(var.get_domain(transform=True)):
+                    for i, d in enumerate(var.get_domain()):
                         samples[f'{var.name}{LATENT_STR_ID}{i}'] = nom[..., i] if nom is not None else np.mean(d)
                 else:
                     latent = var.sample_domain(size)
@@ -388,42 +517,27 @@ class System(BaseModel, Serializable):
                 # Set a constant value for this variable
                 if var.category in constants or var in constants:
                     if nom := nominal.get(var):
-                        samples[var] = var.normalize(nom)
+                        samples[var.name] = var.normalize(nom)
                     else:
-                        samples[var] = var.get_nominal(transform=True)
+                        samples[var.name] = var.normalize(var.get_nominal())
 
                 # Sample from this variable's pdf or randomly within its domain bounds (reject if outside bounds)
                 else:
-                    lb, ub = var.get_domain(transform=True)
-                    x_sample = var.sample(size, nominal=nominal.get(var, None), transform=True) if use_pdf \
-                        else var.sample_domain(size, transform=True)
+                    lb, ub = var.get_domain()
+                    x_sample = var.sample(size, nominal=nominal.get(var, None)) if use_pdf else var.sample_domain(size)
                     good_idx = (x_sample < ub) & (x_sample > lb)
                     num_reject = np.sum(~good_idx)
 
                     while num_reject > 0:
-                        new_sample = var.sample((num_reject,), nominal=nominal.get(var, None), transform=True) \
-                            if use_pdf else var.sample_domain((num_reject,), transform=True)
+                        new_sample = var.sample((num_reject,), nominal=nominal.get(var, None)) \
+                            if use_pdf else var.sample_domain((num_reject,))
                         x_sample[~good_idx] = new_sample
                         good_idx = (x_sample < ub) & (x_sample > lb)
                         num_reject = np.sum(~good_idx)
 
-                    samples[var] = x_sample
+                    samples[var.name] = var.normalize(x_sample)
 
         return samples
-
-    def as_model_data(self):
-        """Convert samples from the surrogate space to the true model space. Primarily, reconstruct field
-        quantities and denormalize inputs.
-        """
-        # TODO
-        raise NotImplementedError
-
-    def as_surrogate_data(self):
-        """Convert samples from the true model space to the surrogate space. Primarily, compress field
-        quantities and normalize inputs.
-        """
-        # TODO
-        raise NotImplementedError
 
     def simulate_fit(self):
         """Loop back through training history and simulate each iteration to obtain the error indicator or new
@@ -443,39 +557,82 @@ class System(BaseModel, Serializable):
         raise NotImplementedError
 
     @_save_on_error
-    def fit(self, targets: list = None, num_refine: int = 100, max_iter: int = 20, max_tol: float = 1e-3,
-            runtime: float = 1., save_interval: int = 0, update_bounds: bool = True,
-            test_set: tuple | str | Path = None, executor: Executor = None):
+    def fit(self, targets: list = None,
+            num_refine: int = 100,
+            max_iter: int = 20,
+            max_tol: float = 1e-3,
+            runtime_hr: float = 1.,
+            save_interval: int = 0,
+            estimate_bounds: bool = False,
+            update_bounds: bool = True,
+            test_set: tuple | str | Path = None,
+            start_test_check: int = None,
+            plot_interval: int = 1,
+            executor: Executor = None):
         """Train the system surrogate adaptively by iterative refinement until an end condition is met.
 
         :param targets: list of system output variables to focus refinement on, use all outputs if not specified
         :param num_refine: number of input samples to compute error indicators on
         :param max_iter: the maximum number of refinement steps to take
         :param max_tol: the max allowable value in relative L2 error to achieve
-        :param runtime: the threshold wall clock time (hr) at which to stop further refinement (will go
-                        until all models finish the current iteration)
-        :param save_interval: number of refinement steps between each progress save, none if 0
+        :param runtime_hr: the threshold wall clock time (hr) at which to stop further refinement (will go
+                           until all models finish the current iteration)
+        :param save_interval: number of refinement steps between each progress save, none if 0; `System.root_dir`
+                              must be specified to save to file
+        :param estimate_bounds: whether to estimate bounds for the coupling variables; will only try to estimate from
+                                the `test_set` if provided (defaults to `False`). Otherwise, you should manually
+                                provide domains for all coupling variables.
         :param update_bounds: whether to continuously update coupling variable bounds during refinement
         :param test_set: `tuple` of `(xtest, ytest)` to show convergence of surrogate to the true model. The test set
                          inputs and outputs are specified as `dicts` of `np.ndarrays` with keys corresponding to the
                          variable names. Can also pass a path to a `.pkl` file that has the test set data as
                          {'test_set': (xtest, ytest)}.
+        :param start_test_check: the iteration to start checking the test set error (defaults to twice the number
+                                 of components); surrogate evaluation isn't useful during initialization so you
+                                 should at least allow one iteration per component before checking test set error
+        :param plot_interval: how often to plot the error indicator and test set error (defaults to every iteration);
+                              will only plot and save to file if a root directory is set
         :param executor: a `concurrent.futures.Executor` object to parallelize the refinement process (defaults to
                          `system.executor` if available)
         """
+        start_test_check = start_test_check or 2 * len(self.components)
         targets = targets or self.outputs()
         xtest, ytest = self._get_test_set(test_set)
         max_iter = self.refine_level + max_iter
         curr_error = np.inf
         t_start = time.time()
 
+        # Estimate bounds from test set if provided (override current bounds if they are set)
+        if estimate_bounds:
+            if ytest is not None:
+                y_samples = to_surrogate_dataset(ytest, self.outputs(), del_fields=True)[0]  # normalize/compress
+                _combine_latent_arrays(y_samples)
+                coupling_vars = {k: v for k, v in self.coupling_variables().items() if k in y_samples}
+                y_min, y_max = {}, {}
+                for var in coupling_vars.values():
+                    y_min[var] = np.nanmin(y_samples[var], axis=0)
+                    y_max[var] = np.nanmax(y_samples[var], axis=0)
+                    if var.compression is not None:
+                        new_domain = list(zip(y_min[var].tolist(), y_max[var].tolist()))
+                        var.update_domain(new_domain, override=True)
+                    else:
+                        new_domain = (float(y_min[var]), float(y_max[var]))
+                        var.update_domain(var.denormalize(new_domain), override=True)
+                del y_samples
+            else:
+                self.logger.warning(f'Could not estimate bounds for coupling variables: no test set provided. '
+                                    f'Make sure you manually provide (good) coupling variable domains.')
+
         # Track convergence progress on the error indicator and test set (plot to file)
         if self.root_dir is not None:
             err_record = [res['added_error'] for res in self.train_history]
+            err_fig, err_ax = plt.subplots(figsize=(6, 5), layout='tight')
 
             if xtest is not None and ytest is not None:
                 num_plot = min(len(targets), 3)
                 test_record = np.full((self.refine_level, num_plot), np.nan)
+                t_fig, t_ax = plt.subplots(1, num_plot, figsize=(3.5 * num_plot, 4), layout='tight', squeeze=False,
+                                           sharey='row')
                 for j, res in enumerate(self.train_history):
                     for i, var in enumerate(targets[:num_plot]):
                         if (perf := res.get('test_error')) is not None:
@@ -494,31 +651,37 @@ class System(BaseModel, Serializable):
             # Plot progress of error indicator
             if self.root_dir is not None:
                 err_record.append(curr_error)
-                fig, ax = plt.subplots(figsize=(6, 5), layout='tight')
-                ax.plot(err_record, '-k')
-                ax.set_yscale('log'); ax.grid()
-                ax.set_xlabel('Iteration'); ax.set_ylabel('Relative error indicator')
-                fig.savefig(str(Path(self.root_dir) / 'error_indicator.pdf'), format='pdf', bbox_inches='tight')
+
+                if plot_interval > 0 and self.refine_level % plot_interval == 0:
+                    err_ax.clear(); err_ax.set_yscale('log'); err_ax.grid()
+                    err_ax.plot(err_record, '-k')
+                    err_ax.set_xlabel('Iteration'); err_ax.set_ylabel('Relative error indicator')
+                    err_fig.savefig(str(Path(self.root_dir) / 'error_indicator.pdf'), format='pdf', bbox_inches='tight')
 
             # Save performance on a test set
             if xtest is not None and ytest is not None:
-                perf = self.test_set_performance(xtest, ytest)
+                perf = self.test_set_performance(xtest, ytest) if self.refine_level >= start_test_check else (
+                    {str(var): np.nan for var in ytest})  # don't compute if components are uninitialized
                 train_result['test_error'] = perf.copy()
 
                 if self.root_dir is not None:
                     test_record = np.vstack((test_record, np.array([perf[var] for var in targets[:num_plot]])))
-                    fig, ax = plt.subplots(1, num_plot, figsize=(3.5*num_plot, 4), layout='tight', squeeze=False,
-                                           sharey='row')
-                    for i in range(num_plot):
-                        ax[0, i].plot(test_record[:, i], '-k')
-                        ax[0, i].set_yscale('log'); ax.grid()
-                        ax[0, i].set_title(self.outputs()[targets[i]].get_tex(units=True))
-                        ax[0, i].set_xlabel('Iteration'); ax[0, i].set_ylabel('Test set relative error' if i==0 else '')
-                    fig.savefig(str(Path(self.root_dir) / 'test_set_error.pdf'), format='pdf', bbox_inches='tight')
+
+                    if plot_interval > 0 and self.refine_level % plot_interval == 0:
+                        for i in range(num_plot):
+                            t_ax[0, i].clear(); t_ax[0, i].set_yscale('log'); t_ax[0, i].grid()
+                            t_ax[0, i].plot(test_record[:, i], '-k')
+                            t_ax[0, i].set_title(self.outputs()[targets[i]].get_tex(units=True))
+                            t_ax[0, i].set_xlabel('Iteration')
+                            t_ax[0, i].set_ylabel('Test set relative error' if i==0 else '')
+                        t_fig.savefig(str(Path(self.root_dir) / 'test_set_error.pdf'),format='pdf',bbox_inches='tight')
 
             self.train_history.append(train_result)
-            if save_interval > 0 and self.refine_level % save_interval == 0:
-                self.save_to_file(f'system_iter{self.refine_level}.yml')
+            if self.root_dir is not None and save_interval > 0 and self.refine_level % save_interval == 0:
+                iter_name = f'{self.name}_iter{self.refine_level}'
+                if not (pth := self.root_dir / 'surrogates' / iter_name).is_dir():
+                    os.mkdir(pth)
+                self.save_to_file(f'{iter_name}.yml', save_dir=pth)  # Save to an iteration-specific directory
 
             # Check all end conditions
             if self.refine_level >= max_iter:
@@ -527,16 +690,21 @@ class System(BaseModel, Serializable):
             if curr_error < max_tol:
                 self._print_title_str(f'Termination criteria reached: relative error {curr_error} < tol {max_tol}')
                 break
-            if ((time.time() - t_start) / 3600.0) >= runtime:
+            if ((time.time() - t_start) / 3600.0) >= runtime_hr:
                 actual = datetime.timedelta(seconds=time.time() - t_start)
-                target = datetime.timedelta(seconds=runtime * 3600)
+                target = datetime.timedelta(seconds=runtime_hr * 3600)
                 self._print_title_str(f'Termination criteria reached: runtime {str(actual)} > {str(target)}')
                 break
 
-        self.save_to_file(f'system_iter{self.refine_level}.yml')
+        if self.root_dir is not None:
+            iter_name = f'{self.name}_iter{self.refine_level}'
+            if not (pth := self.root_dir / 'surrogates' / iter_name).is_dir():
+                os.mkdir(pth)
+            self.save_to_file(f'{iter_name}.yml', save_dir=pth)
+
         self.logger.info(f'Final system surrogate: \n {self}')
 
-    def test_set_performance(self, xtest, ytest, index_set='train'):
+    def test_set_performance(self, xtest: Dataset, ytest: Dataset, index_set='train') -> Dataset:
         """Compute the relative L2 error on a test set for the given target output variables.
 
         :param xtest: `dict` of test set input samples   (unnormalized)
@@ -544,10 +712,10 @@ class System(BaseModel, Serializable):
         :param index_set: index set to use for prediction (defaults to 'train')
         :returns: `dict` of relative L2 errors for each target output variable
         """
-        xtest = to_surrogate_dataset(xtest, self.inputs(), del_fields=True)
+        xtest = to_surrogate_dataset(xtest, self.inputs(), del_fields=True)[0]
         ysurr = self.predict(xtest, index_set=index_set, targets=list(ytest.keys()))
-        ysurr = to_model_dataset(ysurr, self.outputs(), del_latent=True)
-        return {var: relative_error(ysurr[var], ytest[var]) for var in ytest}
+        ysurr = to_model_dataset(ysurr, self.outputs(), del_latent=True)[0]
+        return {str(var): float(relative_error(ysurr[var], ytest[var])) for var in ytest}
 
     def refine(self, targets: list = None, num_refine: int = 100, update_bounds: bool = True,
                executor: Executor = None) -> TrainIteration:
@@ -570,12 +738,13 @@ class System(BaseModel, Serializable):
                 alpha_star = (0,) * len(comp.max_alpha)
                 beta_star = (0,) * len(comp.max_beta)
                 self.logger.info(f"Initializing component {comp.name}: adding {(alpha_star, beta_star)} to active set")
-                comp.activate_index(alpha_star, beta_star)
+                model_dir = (pth / 'components' / comp.name) if (pth := self.root_dir) is not None else None
+                comp.activate_index(alpha_star, beta_star, model_dir=model_dir, executor=executor)
                 cost_star = max(1., comp.get_cost(alpha_star, beta_star))  # Cpu time (s)
                 err_star = np.nan
                 num_evals = round(cost_star / comp.model_costs.get(alpha_star, 1.))
-                return {'component': comp.name, 'alpha': alpha_star, 'beta': beta_star, 'num_evals': num_evals,
-                        'added_cost': cost_star, 'added_error': err_star}
+                return {'component': comp.name, 'alpha': alpha_star, 'beta': beta_star, 'num_evals': int(num_evals),
+                        'added_cost': float(cost_star), 'added_error': float(err_star)}
 
         # Compute entire integrated-surrogate on a random test set for global system QoI error estimation
         x_samples = self.sample_inputs(num_refine)
@@ -585,8 +754,8 @@ class System(BaseModel, Serializable):
 
         y_min, y_max = None, None
         if update_bounds:
-            y_min = {var: np.min(y_curr[var], axis=0, keepdims=True) for var in coupling_vars}  # (1, ydim)
-            y_max = {var: np.max(y_curr[var], axis=0, keepdims=True) for var in coupling_vars}  # (1, ydim)
+            y_min = {var: np.nanmin(y_curr[var], axis=0, keepdims=True) for var in coupling_vars}  # (1, ydim)
+            y_max = {var: np.nanmax(y_curr[var], axis=0, keepdims=True) for var in coupling_vars}  # (1, ydim)
 
         # Find the candidate surrogate with the largest error indicator
         error_max, error_indicator = -np.inf, -np.inf
@@ -598,21 +767,22 @@ class System(BaseModel, Serializable):
             self.logger.info(f"Estimating error for component '{comp.name}'...")
 
             if len(comp.candidate_set) > 0:
+                candidates = list(comp.candidate_set)
                 if executor is None:
                     ret = [self.predict(x_samples, targets=targets, index_set={comp.name: {(alpha, beta)}},
                                         incremental={comp.name: True})
-                           for alpha, beta in comp.candidate_set]
+                           for alpha, beta in candidates]
                 else:
                     temp_buffer = self._remove_unpickleable()
                     futures = [executor.submit(self.predict, x_samples, targets=targets,
                                                index_set={comp.name: {(alpha, beta)}}, incremental={comp.name: True})
-                               for alpha, beta in comp.candidate_set]
+                               for alpha, beta in candidates]
                     wait(futures, timeout=None, return_when=ALL_COMPLETED)
                     ret = [f.result() for f in futures]
                     self._restore_unpickleable(temp_buffer)
 
                 for i, y_cand in enumerate(ret):
-                    alpha, beta = comp.candidate_set[i]
+                    alpha, beta = candidates[i]
                     _combine_latent_arrays(y_cand)
                     error = {}
                     for var, arr in y_cand.items():
@@ -620,8 +790,8 @@ class System(BaseModel, Serializable):
                             error[var] = relative_error(arr, y_curr[var])
 
                         if update_bounds and var in coupling_vars:
-                            y_min[var] = np.min(np.concatenate((y_min, arr), axis=0), axis=0, keepdims=True)
-                            y_max[var] = np.max(np.concatenate((y_max, arr), axis=0), axis=0, keepdims=True)
+                            y_min[var] = np.nanmin(np.concatenate((y_min[var], arr), axis=0), axis=0, keepdims=True)
+                            y_max[var] = np.nanmax(np.concatenate((y_max[var], arr), axis=0), axis=0, keepdims=True)
 
                     delta_error = np.nanmax([np.nanmax(error[var]) for var in error])  # Max error over all target QoIs
                     delta_work = max(1., comp.get_cost(alpha, beta))  # Cpu time (s)
@@ -640,9 +810,13 @@ class System(BaseModel, Serializable):
         # Update all coupling variable ranges
         if update_bounds:
             for var in coupling_vars.values():
-                new_domain = list(zip(y_min[var].tolist(), y_max[var].tolist())) if var.compression is not None else (
-                    (float(y_min[var]), float(y_max[var])))
-                var.update_domain(new_domain, transform=True)
+                if np.all(~np.isnan(y_min[var])) and np.all(~np.isnan(y_max[var])):
+                    if var.compression is not None:
+                        new_domain = list(zip(y_min[var].tolist(), y_max[var].tolist()))
+                        var.update_domain(new_domain)
+                    else:
+                        new_domain = (float(y_min[var]), float(y_max[var]))
+                        var.update_domain(var.denormalize(new_domain))  # bds will be in norm space from predict() call
 
         # Add the chosen multi-index to the chosen component
         if comp_star is not None:
@@ -655,14 +829,22 @@ class System(BaseModel, Serializable):
             num_evals = 0
 
         # Return the results of the refinement step
-        return {'component': comp_star, 'alpha': alpha_star, 'beta': beta_star, 'num_evals': num_evals,
-                'added_cost': cost_star, 'added_error': err_star}
+        return {'component': comp_star, 'alpha': alpha_star, 'beta': beta_star, 'num_evals': int(num_evals),
+                'added_cost': float(cost_star), 'added_error': float(err_star)}
 
-    def predict(self, x: dict | Dataset, max_fpi_iter: int = 100, anderson_mem: int = 10, fpi_tol: float = 1e-10,
-                use_model: str | tuple | dict = None, model_dir: str | Path = None, verbose: bool = False,
+    def predict(self, x: dict | Dataset,
+                max_fpi_iter: int = 100,
+                anderson_mem: int = 10,
+                fpi_tol: float = 1e-10,
+                use_model: str | tuple | dict = None,
+                model_dir: str | Path = None,
+                verbose: bool = False,
                 index_set: dict[str: IndexSet | Literal['train', 'test']] = 'test',
-                misc_coeff: dict[str: MiscTree] = None, normalized: bool = True,
-                incremental: dict[str, bool] = False, targets=None, var_shape=None) -> Dataset:
+                misc_coeff: dict[str: MiscTree] = None,
+                normalized: bool = True,
+                incremental: dict[str, bool] = False,
+                targets: list[str] = None,
+                var_shape: dict[str, tuple] = None) -> Dataset:
         """Evaluate the system surrogate at inputs `x`. Return `y = system(x)`.
 
         !!! Warning "Computing the true model with feedback loops"
@@ -680,14 +862,16 @@ class System(BaseModel, Serializable):
                            specify a `dict` of the above to assign different model fidelities for diff components
         :param model_dir: directory to save model outputs if `use_model` is specified
         :param verbose: whether to print out iteration progress during execution
-        :param index_set: `dict(comp=[indices])` to override the index set for a component, defaults to using the
+        :param index_set: `dict(comp=[indices])` to override the active set for a component, defaults to using the
                           `test` set for every component. Can also specify `train` for any component or a valid
-                          `IndexSet` object.
+                          `IndexSet` object. If `incremental` is specified, will be overwritten with `train`.
         :param misc_coeff: `dict(comp=MiscTree)` to override the default coefficients for a component, passes through
                            along with `index_set` and `incremental` to `comp.predict()`.
         :param normalized: true if the passed inputs are compressed/normalized for surrogate evaluation (default),
                            such as inputs returned by `sample_inputs`
-        :param incremental: whether to add `index_set` to the current active set for each component (temporarily)
+        :param incremental: whether to add `index_set` to the current active set for each component (temporarily);
+                            this will set `index_set='train'` for all other components (since incremental will
+                            augment the "training" active sets, not the "testing" candidate sets)
         :param targets: list of output variables to return, defaults to returning all system outputs
         :param var_shape: (Optional) `dict` of shapes for field quantity inputs in `x` -- you would only specify this
                           if passing field qtys directly to the models (i.e. not using `sample_inputs`)
@@ -724,58 +908,39 @@ class System(BaseModel, Serializable):
 
         # Ensure use_model, index_set, and incremental are specified for each component model
         use_model = _set_default(use_model, None)
-        index_set = _set_default(index_set, 'test')
-        misc_coeff = _set_default(misc_coeff, None)
         incremental = _set_default(incremental, False)
+        index_set = _set_default(index_set, 'train' if any([incremental[node] for node in self.graph.nodes
+                                                            ]) else 'test')  # default to train if incremental anywhere
+        misc_coeff = _set_default(misc_coeff, None)
 
-        class _Converged:
-            """Store indices to track which samples have converged."""
-            def __init__(self, num_samples):
-                self.num_samples = num_samples
-                self.valid_idx = np.full(num_samples, True)          # All samples are valid by default
-                self.converged_idx = np.full(num_samples, False)     # For FPI convergence
+        samples = _Converged(N)  # track convergence of samples
 
-            def reset_convergence(self):
-                self.converged_idx = np.full(self.num_samples, False)
-
-            @property
-            def curr_idx(self):
-                return np.logical_and(self.valid_idx, ~self.converged_idx)
-        samples = _Converged(N)
-
-        def _merge_shapes(target_shape, arr):
-            """Helper to merge an array into the target shape."""
-            shape1, shape2 = target_shape, arr.shape
-            if len(shape2) > len(shape1):
-                shape1, shape2 = shape2, shape1
-            result = []
-            for i in range(len(shape1)):
-                if i < len(shape2):
-                    if shape1[i] == 1:
-                        result.append(shape2[i])
-                    elif shape2[i] == 1:
-                        result.append(shape1[i])
-                    else:
-                        result.append(shape1[i])
-                else:
-                    result.append(1)
-            arr = arr.reshape(tuple(result))
-            return np.broadcast_to(arr, target_shape).copy()
-
-        def _gather_comp_inputs(comp):
-            """Helper to gather inputs for a component, making sure they are normalized correctly."""
+        def _gather_comp_inputs(comp, coupling=None):
+            """Helper to gather inputs for a component, making sure they are normalized correctly. Any coupling
+            variables passed in will be used in preference over `all_inputs`.
+            """
             # Will access but not modify: all_inputs, use_model, norm_status
-            comp_input = {}
             kwds = {}
-            field_coords = {f'{var}_coords': comp.model_kwargs.get(f'{var}_coords', None) for var in comp.inputs}
+            comp_input = {}
+            coupling = coupling or {}
+
+            # Take coupling variables as a priority
+            comp_input.update({var: np.copy(arr[samples.curr_idx, ...]) for var, arr in
+                               coupling.items() if str(var).split(LATENT_STR_ID)[0] in comp.inputs})
+            # Gather all other inputs
             for var, arr in all_inputs.items():
-                if var.split(LATENT_STR_ID)[0] in comp.inputs:
-                    comp_input[var] = np.copy(arr[samples.valid_idx, ...])
+                var_id = str(var).split(LATENT_STR_ID)[0]
+                if var_id in comp.inputs and var not in coupling:
+                    comp_input[var] = np.copy(arr[samples.curr_idx, ...])
+
+            # Gather extra fields (will never be in coupling since field couplings should always be latent coeff)
+            field_coords = {f'{var}_coords': comp.model_kwargs.get(f'{var}_coords', None) for var in comp.inputs}
             for var in comp.inputs:
                 if var not in comp_input and var.compression is not None:
                     for field in var.compression.fields:
                         if field in all_inputs:
-                            comp_input[field] = np.copy(all_inputs[field][samples.valid_idx, ...])
+                            comp_input[field] = np.copy(all_inputs[field][samples.curr_idx, ...])
+
             call_model = use_model.get(comp.name, None) is not None
 
             if call_model:  # Make sure we format all inputs for model evaluation (i.e. denormalize)
@@ -801,6 +966,7 @@ class System(BaseModel, Serializable):
                 break  # Exit early if all selected return qois are computed
 
             scc = [n for n in dag.nodes[supernode]['members']]
+            samples.reset_convergence()
 
             # Compute single component feedforward output (no FPI needed)
             if len(scc) == 1:
@@ -822,12 +988,13 @@ class System(BaseModel, Serializable):
                                            misc_coeff=misc_coeff.get(scc[0]), **kwds)
                 for var, arr in comp_output.items():
                     output_shape = arr.shape[1:]
-                    y.setdefault(var, np.full((N, *output_shape), np.nan))
-                    y[var][samples.valid_idx, ...] = arr
+                    if y.get(var) is None:
+                        y.setdefault(var, np.full((N, *output_shape), np.nan))
+                    y[var][samples.curr_idx, ...] = arr
                     samples.valid_idx = np.logical_and(samples.valid_idx, ~np.any(np.isnan(y[var]),
                                                                                   axis=tuple(range(1, y[var].ndim))))
-                    is_computed[var.split(LATENT_STR_ID)[0]] = True
-                    norm_status[var] = call_model
+                    is_computed[str(var).split(LATENT_STR_ID)[0]] = True
+                    norm_status[var] = not call_model
 
                 if verbose:
                     self.logger.info(f"Component '{scc[0]}' completed. Runtime: {time.time() - t1} s")
@@ -840,21 +1007,20 @@ class System(BaseModel, Serializable):
                 coupling_vars = [scc_inputs.get(var) for var in (scc_inputs.keys() - x.keys()) if var in scc_outputs]
                 coupling_prev = {}
                 for var in coupling_vars:
-                    domain = var.get_domain(transform=True)
+                    domain = var.get_domain()
                     if isinstance(domain, list):  # Latent coefficients are the coupling variables
                         for i, d in enumerate(domain):
                             lb, ub = d
                             coupling_prev[f'{var.name}{LATENT_STR_ID}{i}'] = np.broadcast_to((lb + ub) / 2, (N,)).copy()
                             norm_status[f'{var.name}{LATENT_STR_ID}{i}'] = True
                     else:
-                        lb, ub = domain
+                        lb, ub = var.normalize(domain)
                         shape = (N,) + (1,) * len(var_shape.get(var, ()))
                         coupling_prev[var] = np.broadcast_to((lb + ub) / 2, shape).copy()
                         norm_status[var] = True
 
                 residual_hist = deque(maxlen=anderson_mem)
                 coupling_hist = deque(maxlen=anderson_mem)
-                samples.reset_convergence()
 
                 def _end_conditions_met():
                     """Helper to compute residual, update history, and check end conditions."""
@@ -864,6 +1030,7 @@ class System(BaseModel, Serializable):
                         residual[var] = y[var] - coupling_prev[var]
                         var_conv = np.all(np.abs(residual[var]) <= fpi_tol, axis=tuple(range(1, residual[var].ndim)))
                         converged_idx = np.logical_and(converged_idx, var_conv)
+                        samples.valid_idx = np.logical_and(samples.valid_idx, ~np.isnan(coupling_prev[var]))
                     samples.converged_idx = np.logical_or(samples.converged_idx, converged_idx)
 
                     for var in coupling_prev:
@@ -900,11 +1067,7 @@ class System(BaseModel, Serializable):
                     for node in scc:
                         # Gather inputs from exogenous and coupling sources
                         comp = self[node]
-                        comp_input, kwds, call_model = _gather_comp_inputs(comp)
-
-                        if k == 0:  # use initial guess for coupling variables
-                            comp_input.update({var: np.copy(arr[samples.curr_idx, ...]) for var, arr in
-                                               coupling_prev.items() if var.split(LATENT_STR_ID)[0] in comp.inputs})
+                        comp_input, kwds, call_model = _gather_comp_inputs(comp, coupling=coupling_prev)
 
                         # Compute outputs (just don't do this FPI with expensive real models, please..)
                         comp_output = comp.predict(comp_input, use_model=use_model.get(node), model_dir=None,
@@ -917,7 +1080,7 @@ class System(BaseModel, Serializable):
                                     y[var] = _merge_shapes((N, *output_shape), y[var])
                             else:
                                 y.setdefault(var, np.full((N, *output_shape), np.nan))
-                                norm_status[var] = call_model
+                                norm_status[var] = not call_model
                                 is_computed[var] = True
                             y[var][samples.curr_idx, ...] = arr
 
@@ -997,14 +1160,28 @@ class System(BaseModel, Serializable):
         self.logger.info('-' * int(len(title_str)/2) + title_str + '-' * int(len(title_str)/2))
 
     def _remove_unpickleable(self) -> dict:
-        """Remove and return unpickleable attributes before pickling (just the executor)."""
-        buffer = {'executor': self.executor}
+        """Remove and return unpickleable attributes before pickling (just the executor and logger)."""
+        stdout = False
+        log_file = None
+        if self._logger is not None:
+            for handler in self._logger.handlers:
+                if isinstance(handler, logging.StreamHandler):
+                    stdout = True
+                    break
+            for handler in self._logger.handlers:
+                if isinstance(handler, logging.FileHandler):
+                    log_file = handler.baseFilename
+                    break
+
+        buffer = {'executor': self.executor, 'log_stdout': stdout, 'log_file': log_file}
         self.executor = None
+        self.logger = None
         return buffer
 
     def _restore_unpickleable(self, buffer: dict):
-        """Restore the unpickleable attributes after unpickling."""
-        self.executor = buffer['executor']
+        """Restore the unpickleable attributes from `buffer` after unpickling."""
+        self.executor = buffer.get('executor', None)
+        self.set_logger(log_file=buffer.get('log_file', None), stdout=buffer.get('log_stdout', None))
 
     def _get_test_set(self, test_set: str | Path | tuple = None) -> tuple:
         """Try to load a test set from the root directory if it exists."""
@@ -1060,12 +1237,15 @@ class System(BaseModel, Serializable):
         system = encoder.load(filename)
         root_dir = root_dir or system.root_dir
 
-        # Try to infer amisc_root/surrogates/filename structure
+        # Try to infer amisc_root/surrogates/iter/filename structure
         if root_dir is None:
             parts = Path(filename).resolve().parts
             if len(parts) > 2:
                 if parts[-3].startswith('amisc_'):
                     root_dir = Path(filename).resolve().parent.parent
+            elif len(parts) > 3:
+                if parts[-4].startswith('amisc_'):
+                    root_dir = Path(filename).resolve().parent.parent.parent
         system.root_dir = root_dir
         return system
 
@@ -1075,8 +1255,176 @@ class System(BaseModel, Serializable):
             comp.clear()
         self.train_history.clear()
 
+    def plot_slice(self, inputs: list[str] = None,
+                   outputs: list[str] = None,
+                   num_steps: int = 20,
+                   show_surr: bool = True,
+                   show_model: list = None,
+                   model_dir: str | Path = None,
+                   nominal: dict[str: float] = None,
+                   random_walk: bool = False,
+                   from_file: str | Path = None,
+                   subplot_size_in: float = 3.):
+        """Helper function to plot 1d slices of the surrogate and/or model outputs over the inputs. A single
+        "slice" works by smoothly stepping from the lower bound of an input to its upper bound, while holding all other
+        inputs constant at their nominal values (or smoothly varying them if `random_walk=True`).
+        This function is useful for visualizing the behavior of the system surrogate and/or model(s) over a
+        single input variable at a time.
+
+        :param inputs: list of input variables to take 1d slices of (defaults to first 3 in `System.inputs`)
+        :param outputs: list of model output variables to plot 1d slices of (defaults to first 3 in `System.outputs`)
+        :param num_steps: the number of points to take in the 1d slice for each input variable; this amounts to a total
+                          of `num_steps*len(inputs)` model/surrogate evaluations
+        :param show_surr: whether to show the surrogate prediction
+        :param show_model: also plot model predictions, `list` of ['best', 'worst', tuple(alpha), etc.]
+        :param model_dir: base directory to save model outputs (if specified)
+        :param nominal: `dict` of `var->nominal` to use as constant values for all non-sliced variables (use
+                        unnormalized values only; use `var_LATENT0` to specify nominal latent values)
+        :param random_walk: whether to slice in a random d-dimensional direction instead of holding all non-slice
+                            variables const at `nominal`
+        :param from_file: path to a `.pkl` file to load a saved slice from disk
+        :param subplot_size_in: side length size of each square subplot in inches
+        :returns: `fig, ax` with `len(inputs)` by `len(outputs)` subplots
+        """
+        # Manage loading important quantities from file (if provided)
+        input_slices, output_slices_model, output_slices_surr = None, None, None
+        if from_file is not None:
+            with open(Path(from_file), 'rb') as fd:
+                slice_data = pickle.load(fd)
+                inputs = slice_data['inputs']           # Must use same input slices as save file
+                show_model = slice_data['show_model']   # Must use same model data as save file
+                outputs = slice_data.get('outputs') if outputs is None else outputs
+                input_slices = slice_data['input_slices']
+                model_dir = None  # Don't run or save any models if loading from file
+
+        # Set default values (take up to the first 3 inputs by default)
+        all_inputs = self.inputs()
+        all_outputs = self.outputs()
+        rand_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        if model_dir is not None:
+            os.mkdir(Path(model_dir) / f'sweep_{rand_id}')
+        if nominal is None:
+            nominal = dict()
+        inputs = all_inputs[:3] if inputs is None else inputs
+        outputs = all_outputs[:3] if outputs is None else outputs
+
+        if show_model is not None and not isinstance(show_model, list):
+            show_model = [show_model]
+
+        # Handle field quantities (directly use latent variables or only the first one)
+        for i, var in enumerate(list(inputs)):
+            if LATENT_STR_ID not in str(var) and all_inputs[var].compression is not None:
+                inputs[i] = f'{var}{LATENT_STR_ID}0'
+        for i, var in enumerate(list(outputs)):
+            if LATENT_STR_ID not in str(var) and all_outputs[var].compression is not None:
+                outputs[i] = f'{var}{LATENT_STR_ID}0'
+
+        bds = all_inputs.get_domains()
+        xlabels = [all_inputs[var].get_tex(units=True) if LATENT_STR_ID not in str(var) else
+                   all_inputs[str(var).split(LATENT_STR_ID)[0]].get_tex(units=True) +
+                   f' (latent {str(var).split(LATENT_STR_ID)[1]})' for var in inputs]
+
+        ylabels = [all_outputs[var].get_tex(units=True) if LATENT_STR_ID not in str(var) else
+                   all_outputs[str(var).split(LATENT_STR_ID)[0]].get_tex(units=True) +
+                   f' (latent {str(var).split(LATENT_STR_ID)[1]})' for var in outputs]
+
+        # Construct slices of model inputs (if not provided)
+        if input_slices is None:
+            input_slices = {}  # Each input variable with shape (num_steps, num_slice)
+            for i in range(len(inputs)):
+                if random_walk:
+                    # Make a random straight-line walk across d-cube
+                    r0 = self.sample_inputs((1,), use_pdf=False)
+                    rf = self.sample_inputs((1,), use_pdf=False)
+
+                    for var, bd in bds.items():
+                        if var == inputs[i]:
+                            r0[var] = np.atleast_1d(bd[0])          # Start slice at this lower bound
+                            rf[var] = np.atleast_1d(bd[1])          # Slice up to this upper bound
+
+                        step_size = (rf[var] - r0[var]) / (num_steps - 1)
+                        arr = r0[var] + step_size * np.arange(num_steps)
+
+                        input_slices[var] = arr[..., np.newaxis] if input_slices.get(var) is None else (
+                            np.concatenate((input_slices[var], arr[..., np.newaxis]), axis=-1))
+                else:
+                    # Otherwise, only slice one variable
+                    for var, bd in bds.items():
+                        nom = nominal.get(var, np.mean(bd)) if LATENT_STR_ID in str(var) else (
+                            all_inputs[var].normalize(nominal.get(var, all_inputs[var].get_nominal())))
+                        arr = np.linspace(bd[0], bd[1], num_steps) if var == inputs[i] else np.full(num_steps, nom)
+
+                        input_slices[var] = arr[..., np.newaxis] if input_slices.get(var) is None else (
+                            np.concatenate((input_slices[var], arr[..., np.newaxis]), axis=-1))
+
+        # Walk through each model that is requested by show_model
+        if show_model is not None:
+            if from_file is not None:
+                output_slices_model = slice_data['output_slices_model']
+            else:
+                output_slices_model = list()
+                for model in show_model:
+                    output_dir = None
+                    if model_dir is not None:
+                        output_dir = (Path(model_dir) / f'sweep_{rand_id}' /
+                                      str(model).replace('{', '').replace('}', '').replace(':', '=').replace("'", ''))
+                        os.mkdir(output_dir)
+                    output_slices_model.append(self.predict(input_slices, use_model=model, model_dir=output_dir))
+        if show_surr:
+            output_slices_surr = self.predict(input_slices) if from_file is None else slice_data['output_slices_surr']
+
+        # Make len(outputs) by len(inputs) grid of subplots
+        fig, axs = plt.subplots(len(outputs), len(inputs), sharex='col', sharey='row', squeeze=False)
+        for i, output_var in enumerate(outputs):
+            for j, input_var in enumerate(inputs):
+                ax = axs[i, j]
+                x = input_slices[input_var][:, j]
+
+                if show_model is not None:
+                    c = np.array([[0, 0, 0, 1], [0.5, 0.5, 0.5, 1]]) if len(show_model) <= 2 else (
+                        plt.get_cmap('jet')(np.linspace(0, 1, len(show_model))))
+                    for k in range(len(show_model)):
+                        model_str = (str(show_model[k]).replace('{', '').replace('}', '')
+                                     .replace(':', '=').replace("'", ''))
+                        model_ret = to_surrogate_dataset(output_slices_model[k], all_outputs)[0]
+                        y_model = model_ret[output_var][:, j]
+                        label = {'best': 'High-fidelity' if len(show_model) > 1 else 'Model',
+                                 'worst': 'Low-fidelity'}.get(model_str, model_str)
+                        ax.plot(x, y_model, ls='-', c=c[k, :], label=label)
+
+                if show_surr:
+                    y_surr = output_slices_surr[output_var][:, j]
+                    ax.plot(x, y_surr, '--r', label='Surrogate')
+
+                ylabel = ylabels[i] if j == 0 else ''
+                xlabel = xlabels[j] if i == len(outputs) - 1 else ''
+                legend = (i == 0 and j == len(inputs) - 1)
+                ax_default(ax, xlabel, ylabel, legend=legend)
+        fig.set_size_inches(subplot_size_in * len(inputs), subplot_size_in * len(outputs))
+        fig.tight_layout()
+
+        # Save results (unless we were already loading from a save file)
+        if from_file is None and self.root_dir is not None:
+            fname = f'in={",".join([str(v) for v in inputs])}_out={",".join([str(v) for v in outputs])}'
+            fname = f'sweep_rand{rand_id}_' + fname if random_walk else f'sweep_nom{rand_id}_' + fname
+            fdir = Path(self.root_dir) if model_dir is None else Path(model_dir) / f'sweep_{rand_id}'
+            fig.savefig(fdir / f'{fname}.pdf', bbox_inches='tight', format='pdf')
+            save_dict = {'inputs': inputs, 'outputs': outputs, 'show_model': show_model, 'show_surr': show_surr,
+                         'nominal': nominal, 'random_walk': random_walk, 'input_slices': input_slices,
+                         'output_slices_model': output_slices_model, 'output_slices_surr': output_slices_surr}
+            with open(fdir / f'{fname}.pkl', 'wb') as fd:
+                pickle.dump(save_dict, fd)
+
+        return fig, axs
+
     def serialize(self, keep_components=False, serialize_args=None, serialize_kwargs=None) -> dict:
-        """Convert to a `dict` with only standard Python types for fields."""
+        """Convert to a `dict` with only standard Python types for fields.
+
+        :param keep_components: whether to serialize the components as well (defaults to False)
+        :param serialize_args: `dict` of arguments to pass to each component's serialize method
+        :param serialize_kwargs: `dict` of keyword arguments to pass to each component's serialize method
+        :returns: a `dict` representation of the `System` object
+        """
         serialize_args = serialize_args or dict()
         serialize_kwargs = serialize_kwargs or dict()
         d = {}
@@ -1091,6 +1439,9 @@ class System(BaseModel, Serializable):
                     if len(value) > 0:
                         d[key] = value.serialize()
                 else:
+                    if not isinstance(value, _builtin):
+                        self.logger.warning(f"Attribute '{key}' of type '{type(value)}' may not be a builtin "
+                                            f"Python type. This may cause issues when saving/loading from file.")
                     d[key] = value
         return d
 
@@ -1116,55 +1467,6 @@ class System(BaseModel, Serializable):
             raise NotImplementedError(f'The "{System.yaml_tag}" yaml tag can only be used on a yaml sequence or '
                                       f'mapping, not a "{type(node)}".')
 
-
-# class SystemSurrogate:
-#     """Multidisciplinary (MD) surrogate framework top-level class.
-#
-#     !!! Note "Accessing individual components"
-#         The `Component` objects that compose `SystemSurrogate` are internally stored in the `self.graph.nodes`
-#         data structure. You can access them with `get_component(comp_name)`.
-#
-#     :ivar exo_vars: global list of exogenous/external inputs for the MD system
-#     :ivar coupling_vars: global list of coupling variables for the MD system (including all system-level outputs)
-#     :ivar refine_level: the total number of refinement steps that have been made
-#     :ivar build_metrics: contains data that summarizes surrogate training progress
-#     :ivar root_dir: root directory where all surrogate build products are saved to file
-#     :ivar log_file: log file where all logs are written to by default
-#     :ivar executor: manages parallel execution for the system
-#     :ivar graph: the internal graph data structure of the MD system
-#
-#     :vartype exo_vars: list[Variable]
-#     :vartype coupling_vars: list[Variable]
-#     :vartype refine_level: int
-#     :vartype build_metrics: dict
-#     :vartype root_dir: str
-#     :vartype log_file: str
-#     :vartype executor: Executor
-#     :vartype graph: nx.DiGraph
-#     """
-#
-#     def __init__(self, components: list[Component] | Component, exo_vars: list[Variable] | Variable,
-#                  coupling_vars: list[Variable] | Variable, est_bds: int = 0, save_dir: str | Path = None,
-#                  executor: Executor = None, stdout: bool = True, init_surr: bool = True, logger_name: str = None):
-#         # Estimate coupling variable bounds
-#         if est_bds > 0:
-#             self._estimate_coupling_bds(est_bds)
-#
-#         # Init system with most coarse fidelity indices in each component
-#         if init_surr:
-#             self.init_system()
-#         self._save_progress('sys_init.pkl')
-#
-#     def init_system(self):
-#         """Add the coarsest multi-index to each component surrogate."""
-#         self._print_title_str('Initializing all component surrogates')
-#         for node, node_obj in self.graph.nodes.items():
-#             node_obj['surrogate'].init_coarse()
-#             # for alpha, beta in list(node_obj['surrogate'].candidate_set):
-#             #     # Add one refinement in each input dimension to initialize
-#             #     node_obj['surrogate'].activate_index(alpha, beta)
-#             self.logger.info(f"Initialized component '{node}'.")
-#
 #     def get_allocation(self, idx: int = None):
 #         """Get a breakdown of cost allocation up to a certain iteration number during training (starting at 1).
 #
@@ -1211,173 +1513,7 @@ class System(BaseModel, Serializable):
 #                 offline_alloc[node][str(alpha)] += [round(added_cost/base_cost), float(added_cost)]
 #
 #         return cost_alloc, offline_alloc, np.cumsum(cost_cum)
-
-#     def _estimate_coupling_bds(self, num_est: int, anderson_mem: int = 10, fpi_tol: float = 1e-10,
-#                                max_fpi_iter: int = 100):
-#         """Estimate and set the coupling variable bounds.
 #
-#         :param num_est: the number of samples of exogenous inputs to use
-#         :param anderson_mem: FPI hyperparameter (default is usually good)
-#         :param fpi_tol: floating point tolerance for FPI convergence
-#         :param max_fpi_iter: maximum number of FPI iterations
-#         """
-#         self._print_title_str('Estimating coupling variable bounds')
-#         x = self.sample_inputs((num_est,))
-#         y = self(x, use_model='best', verbose=True, anderson_mem=anderson_mem, fpi_tol=fpi_tol,
-#                  max_fpi_iter=max_fpi_iter)
-#         for i in range(len(self.coupling_vars)):
-#             lb = np.nanmin(y[:, i])
-#             ub = np.nanmax(y[:, i])
-#             self._update_coupling_bds(i, (lb, ub), init=True)
-#
-#     def _update_coupling_bds(self, global_idx: int, bds: tuple, init: bool = False, buffer: float = 0.05):
-#         """Update coupling variable bounds.
-#
-#         :param global_idx: global index of coupling variable to update
-#         :param bds: new bounds to update the current bounds with
-#         :param init: whether to set new bounds or update existing (default)
-#         :param buffer: fraction of domain length to buffer upper/lower bounds
-#         """
-#         offset = buffer * (bds[1] - bds[0])
-#         offset_bds = (bds[0] - offset, bds[1] + offset)
-#         coupling_bds = [rv.get_domain() for rv in self.coupling_vars]
-#         new_bds = offset_bds if init else (min(coupling_bds[global_idx][0], offset_bds[0]),
-#                                            max(coupling_bds[global_idx][1], offset_bds[1]))
-#         self.coupling_vars[global_idx].update(domain=new_bds)
-#
-#         # Iterate over all components and update internal coupling variable bounds
-#         for node_name, node_obj in self.graph.nodes.items():
-#             if global_idx in node_obj['global_in']:
-#                 # Get the local index for this coupling variable within each component's inputs
-#                 local_idx = len(node_obj['exo_in']) + node_obj['global_in'].index(global_idx)
-#                 node_obj['surrogate'].update_input_bds(local_idx, new_bds)
-#
-#     def plot_slice(self, slice_idx = None, qoi_idx = None, show_surr: bool = True,
-#                    show_model: list = None, model_dir: str | Path = None, N: int = 50, nominal: dict[str: float] = None,
-#                    random_walk: bool = False, from_file: str | Path = None):
-#         """Helper function to plot 1d slices of the surrogate and/or model(s) over the inputs.
-#
-#         :param slice_idx: list of exogenous input variables or indices to take 1d slices of
-#         :param qoi_idx: list of model output variables or indices to plot 1d slices of
-#         :param show_surr: whether to show the surrogate prediction
-#         :param show_model: also plot model predictions, list() of ['best', 'worst', tuple(alpha), etc.]
-#         :param model_dir: base directory to save model outputs (if specified)
-#         :param N: the number of points to take in the 1d slice
-#         :param nominal: `dict` of `str(var)->nominal` to use as constant value for all non-sliced variables
-#         :param random_walk: whether to slice in a random d-dimensional direction or hold all params const while slicing
-#         :param from_file: path to a .pkl file to load a saved slice from disk
-#         :returns: `fig, ax` with `num_slice` by `num_qoi` subplots
-#         """
-#         # Manage loading important quantities from file (if provided)
-#         xs, ys_model, ys_surr = None, None, None
-#         if from_file is not None:
-#             with open(Path(from_file), 'rb') as fd:
-#                 slice_data = pickle.load(fd)
-#                 slice_idx = slice_data['slice_idx']     # Must use same input slices as save file
-#                 show_model = slice_data['show_model']   # Must use same model data as save file
-#                 qoi_idx = slice_data['qoi_idx'] if qoi_idx is None else qoi_idx
-#                 xs = slice_data['xs']
-#                 model_dir = None  # Don't run or save any models if loading from file
-#
-#         # Set default values (take up to the first 3 slices by default)
-#         rand_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
-#         if model_dir is not None:
-#             os.mkdir(Path(model_dir) / f'sweep_{rand_id}')
-#         if nominal is None:
-#             nominal = dict()
-#         slice_idx = list(np.arange(0, min(3, len(self.exo_vars)))) if slice_idx is None else slice_idx
-#         qoi_idx = list(np.arange(0, min(3, len(self.coupling_vars)))) if qoi_idx is None else qoi_idx
-#         if isinstance(slice_idx[0], str | Variable):
-#             slice_idx = [self.exo_vars.index(var) for var in slice_idx]
-#         if isinstance(qoi_idx[0], str | Variable):
-#             qoi_idx = [self.coupling_vars.index(var) for var in qoi_idx]
-#
-#         exo_bds = [var.get_domain() for var in self.exo_vars]
-#         xlabels = [self.exo_vars[idx].get_tex(units=True) for idx in slice_idx]
-#         ylabels = [self.coupling_vars[idx].get_tex(units=True) for idx in qoi_idx]
-#
-#         # Construct slice model inputs (if not provided)
-#         if xs is None:
-#             xs = np.zeros((N, len(slice_idx), len(self.exo_vars)))
-#             for i in range(len(slice_idx)):
-#                 if random_walk:
-#                     # Make a random straight-line walk across d-cube
-#                     r0 = np.squeeze(self.sample_inputs((1,), use_pdf=False), axis=0)
-#                     r0[slice_idx[i]] = exo_bds[slice_idx[i]][0]             # Start slice at this lower bound
-#                     rf = np.squeeze(self.sample_inputs((1,), use_pdf=False), axis=0)
-#                     rf[slice_idx[i]] = exo_bds[slice_idx[i]][1]             # Slice up to this upper bound
-#                     xs[0, i, :] = r0
-#                     for k in range(1, N):
-#                         xs[k, i, :] = xs[k-1, i, :] + (rf-r0)/(N-1)
-#                 else:
-#                     # Otherwise, only slice one variable
-#                     for j in range(len(self.exo_vars)):
-#                         if j == slice_idx[i]:
-#                             xs[:, i, j] = np.linspace(exo_bds[slice_idx[i]][0], exo_bds[slice_idx[i]][1], N)
-#                         else:
-#                             xs[:, i, j] = nominal.get(self.exo_vars[j], self.exo_vars[j].nominal)
-#
-#         # Walk through each model that is requested by show_model
-#         if show_model is not None:
-#             if from_file is not None:
-#                 ys_model = slice_data['ys_model']
-#             else:
-#                 ys_model = list()
-#                 for model in show_model:
-#                     output_dir = None
-#                     if model_dir is not None:
-#                         output_dir = (Path(model_dir) / f'sweep_{rand_id}' /
-#                                       str(model).replace('{', '').replace('}', '').replace(':', '=').replace("'", ''))
-#                         os.mkdir(output_dir)
-#                     ys_model.append(self(xs, use_model=model, model_dir=output_dir))
-#         if show_surr:
-#             ys_surr = self(xs) if from_file is None else slice_data['ys_surr']
-#
-#         # Make len(qoi) by len(inputs) grid of subplots
-#         fig, axs = plt.subplots(len(qoi_idx), len(slice_idx), sharex='col', sharey='row')
-#         for i in range(len(qoi_idx)):
-#             for j in range(len(slice_idx)):
-#                 if len(qoi_idx) == 1:
-#                     ax = axs if len(slice_idx) == 1 else axs[j]
-#                 elif len(slice_idx) == 1:
-#                     ax = axs if len(qoi_idx) == 1 else axs[i]
-#                 else:
-#                     ax = axs[i, j]
-#                 x = xs[:, j, slice_idx[j]]
-#                 if show_model is not None:
-#                     c = np.array([[0, 0, 0, 1], [0.5, 0.5, 0.5, 1]]) if len(show_model) <= 2 else (
-#                         plt.get_cmap('jet')(np.linspace(0, 1, len(show_model))))
-#                     for k in range(len(show_model)):
-#                         model_str = (str(show_model[k]).replace('{', '').replace('}', '')
-#                                      .replace(':', '=').replace("'", ''))
-#                         model_ret = ys_model[k]
-#                         y_model = model_ret[:, j, qoi_idx[i]]
-#                         label = {'best': 'High-fidelity' if len(show_model) > 1 else 'Model',
-#                                  'worst': 'Low-fidelity'}.get(model_str, model_str)
-#                         ax.plot(x, y_model, ls='-', c=c[k, :], label=label)
-#                 if show_surr:
-#                     y_surr = ys_surr[:, j, qoi_idx[i]]
-#                     ax.plot(x, y_surr, '--r', label='Surrogate')
-#                 ylabel = ylabels[i] if j == 0 else ''
-#                 xlabel = xlabels[j] if i == len(qoi_idx) - 1 else ''
-#                 legend = (i == 0 and j == len(slice_idx) - 1)
-#                 ax_default(ax, xlabel, ylabel, legend=legend)
-#         fig.set_size_inches(3 * len(slice_idx), 3 * len(qoi_idx))
-#         fig.tight_layout()
-#
-#         # Save results (unless we were already loading from a save file)
-#         if from_file is None and self.root_dir is not None:
-#             fname = f's{",".join([str(i) for i in slice_idx])}_q{",".join([str(i) for i in qoi_idx])}'
-#             fname = f'sweep_rand{rand_id}_' + fname if random_walk else f'sweep_nom{rand_id}_' + fname
-#             fdir = Path(self.root_dir) if model_dir is None else Path(model_dir) / f'sweep_{rand_id}'
-#             fig.savefig(fdir / f'{fname}.png', dpi=300, format='png')
-#             save_dict = {'slice_idx': slice_idx, 'qoi_idx': qoi_idx, 'show_model': show_model, 'show_surr': show_surr,
-#                          'nominal': nominal, 'random_walk': random_walk, 'xs': xs, 'ys_model': ys_model,
-#                          'ys_surr': ys_surr}
-#             with open(fdir / f'{fname}.pkl', 'wb') as fd:
-#                 pickle.dump(save_dict, fd)
-#
-#         return fig, axs
 #
 #     def plot_allocation(self, cmap: str = 'Blues', text_bar_width: float = 0.06, arrow_bar_width: float = 0.02):
 #         """Plot bar charts showing cost allocation during training.

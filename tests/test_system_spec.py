@@ -16,6 +16,10 @@ def simple_model(x, output_path='.'):
     return x
 
 
+def simple_model_dict(inputs, output_path='.'):
+    return {'y': inputs['x'] ** 2}
+
+
 def test_basic_init(tmp_path):
     """Test inputs/output/graph and root directory/logger/executor initialization."""
     comp1 = Component(simple_model, [Variable(l) for l in 'abc'], [Variable(l) for l in 'def'], name='comp1')
@@ -202,3 +206,23 @@ def test_train_history():
     hist = TrainHistory(data=hist)
     hist.extend(new_hist)
     assert TrainHistory.deserialize(hist.serialize()) == hist
+
+
+def test_save_dir(tmp_path):
+    """Test saving and loading from `amisc_timestamp` directory"""
+    comp = Component(simple_model_dict, Variable('x', domain=(0, 1)), Variable('y'), name='comp1', max_beta_train=(4,))
+    surr = System(comp, root_dir=tmp_path)
+    surr.fit(max_iter=3, save_interval=1)
+    surr.save_to_file('test_surrogate.yml')
+
+    found_dir = False
+    for f in os.listdir(tmp_path):
+        if f.startswith('amisc_'):
+            amisc_dir = tmp_path / f
+            surr2 = System.load_from_file(amisc_dir / 'surrogates' / 'test_surrogate.yml')
+            assert (amisc_dir / 'components' / 'comp1').is_dir()
+            assert all([(amisc_dir / 'surrogates' / f'system_iter{i}.yml').exists() for i in range(1, 4)])
+            assert surr2 == surr
+            found_dir = True
+
+    assert found_dir

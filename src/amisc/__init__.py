@@ -156,7 +156,7 @@ class YamlLoader(FileLoader):
         try:
             with open(_Path(stream).with_suffix('.yml'), 'r', encoding='utf-8') as fd:
                 return _yaml.load(fd, Loader=cls._yaml_loader())
-        except:
+        except (TypeError, OSError, FileNotFoundError):
             return _yaml.load(stream, Loader=cls._yaml_loader())
 
     @classmethod
@@ -164,5 +164,5 @@ class YamlLoader(FileLoader):
         try:
             with open(_Path(stream).with_suffix('.yml'), 'w', encoding='utf-8') as fd:
                 return _yaml.dump(obj, fd, Dumper=cls._yaml_dumper(), allow_unicode=True, sort_keys=False)
-        except:
+        except (TypeError, OSError, FileNotFoundError):
             return _yaml.dump(obj, stream, Dumper=cls._yaml_dumper(), allow_unicode=True, sort_keys=False)

@@ -3,6 +3,7 @@ name: FireSat
 components: !Component
   - name: 'Orbit'
     model: !!python/name:amisc.examples.models.orbit_fun
+    max_beta_train: (2, 2)
     inputs: !VariableList
       - name: H
         dist: N(18e6, 1e6)
@@ -10,35 +11,42 @@ components: !Component
         dist: N(235e3, 10e3)
     outputs: !VariableList
       - name: Vsat
-        dist: U(2000, 6000)
+        dist: U(3000, 3100)
       - name: To
-        dist: U(20000, 60000)
+        dist: U(30000, 50000)
       - name: Te
-        dist: U(1000, 5000)
+        dist: U(2000, 4000)
       - name: Slew
-        dist: U(0, 4)
+        description: Max slewing angle
+        units: rad
   - name: 'Power'
     model: !!python/name:amisc.examples.models.power_fun
+    max_alpha: (2,)
+    max_beta_train: (2, 2, 2, 2, 2)
     inputs: !VariableList
       - name: Po
         dist: N(1000, 50)
       - name: Fs
         dist: N(1400, 20)
-      - name: To
-      - name: Te
+      - name: To  # duplicate
+      - name: Te  # duplicate
       - name: Pat
-        dist: U(0, 100)
+        dist: U(60, 80)
     outputs: !VariableList
       - name: Imin
-        dist: U(0, 12000)
+        dist: U(4500, 5500)
+        description: Min moment of inertia
+        units: '$kg\cdot m^2$'
       - name: Imax
-        dist: U(0, 12000)
+        dist: U(6200, 6800)
       - name: Ptot
-        dist: U(0, 10000)
+        domain: (800, 1200)
       - name: Asa
-        dist: U(0, 50)
+        domain: (5, 15)
   - name: 'Attitude'
     model: !!python/name:amisc.examples.models.attitude_fun
+    max_alpha: (2,)
+    max_beta_train: (2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
     inputs: !VariableList
       - name: H
       - name: Fs
@@ -56,5 +64,8 @@ components: !Component
       - name: Imax
     outputs: !VariableList
       - name: Pat
+        description: Attitude control power
+        units: W
       - name: tau_tot
-        dist: U(0, 5)
+        description: Total torque
+        units: '$N\cdot m$'

@@ -26,7 +26,7 @@ from numpy.typing import ArrayLike
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 
 from amisc.compression import Compression
-from amisc.distribution import Distribution, Normal
+from amisc.distribution import Distribution, Normal, Uniform, LogUniform
 from amisc.serialize import Serializable
 from amisc.transform import Transform, Minmax, Zscore
 from amisc.utils import search_for_file, _get_yaml_path, _inspect_assignment
@@ -225,18 +225,6 @@ class Variable(BaseModel, Serializable):
         else:
             return False
 
-    def update(self, new_attrs: dict = None, **kwargs):
-        """Update this variable with `new_attrs` or any specific attributes via `update(domain=...)` for example.
-
-        :param new_attrs: the Variable attributes to update
-        """
-        if new_attrs:
-            for attr, value in new_attrs.items():
-                setattr(self, attr, value)
-        if kwargs:
-            for attr, value in kwargs.items():
-                setattr(self, attr, value)
-
     def get_tex(self, units: bool = False, symbol: bool = True) -> str:
         """Return a raw string that is well-formatted for plotting (with latex).
 
@@ -245,7 +233,7 @@ class Variable(BaseModel, Serializable):
         :returns: the latex formatted string
         """
         s = (self.tex if symbol else self.description) or self.name
-        return r'{} [{}]'.format(s, self.units) if units else r'{}'.format(s)
+        return r'{} [{}]'.format(s, self.units or '-') if units else r'{}'.format(s)
 
     def get_nominal(self) -> float | list | None:
         """Return the nominal value of the variable. Defaults to the mean for a normal distribution or the
@@ -305,17 +293,20 @@ class Variable(BaseModel, Serializable):
         else:
             raise RuntimeError(f'Variable "{self.name}" does not have a domain specified.')
 
-    def update_domain(self, domain: tuple[float, float] | list[tuple]):
-        """Update the domain of this variable. Will attempt to update the domain of each latent dimension if this is
-        a field quantity with compression.
+    def update_domain(self, domain: tuple[float, float] | list[tuple], override: bool = False):
+        """Update the domain of this variable by taking the minimum or maximum of the new domain with the current domain
+        for the lower and upper bounds, respectively. Will attempt to update the domain of each latent dimension
+        if this is a field quantity with compression. If the variable has a `Uniform` distribution, this will
+        update the distribution's bounds too.
 
-        :param domain: the new domain(s) to set
+        :param domain: the new domain(s) to update with
+        :param override: will simply set the domain to the new values rather than update against the current domain;
+                         (default `False`)
         """
         def _update_domain(domain, curr_domain):
             lb, ub = domain
-            lb = min(lb, curr_domain[0]) if curr_domain is not None else lb
-            ub = max(ub, curr_domain[1]) if curr_domain is not None else ub
-            return lb, ub
+            return (lb, ub) if override else (min(lb, curr_domain[0]) if curr_domain is not None else lb,
+                                              max(ub, curr_domain[1]) if curr_domain is not None else ub)
 
         curr_domain = self.get_domain()
         if isinstance(curr_domain, list):
@@ -324,6 +315,8 @@ class Variable(BaseModel, Serializable):
             self.domain = [_update_domain(d, curr_domain[i]) for i, d in enumerate(domain)]
         else:
             self.domain = _update_domain(domain, curr_domain)
+            if (dist := self.dist) is not None and isinstance(dist, Uniform | LogUniform):  # keep Uniform dist in sync
+                dist.dist_args = self.domain
 
     def pdf(self, x: np.ndarray) -> np.ndarray:
         """Compute the PDF of the Variable at the given `x` locations. Will just return one's if the variable
