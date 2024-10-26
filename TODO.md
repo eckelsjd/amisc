@@ -1,4 +1,4 @@
-- combine system tests and test field qtys
+- test field qtys
 - test convergence
 - system plots
 - system documentation
@@ -12,3 +12,6 @@
 - system simulate training
 - system retroactively add outputs (load training data from saved files)
 - make sure thread pool works/is efficient on refine
+
+- profile memory/time of predict and fit for various executors and input sizes
+- optimize predict() mainly (fit will be overwhelmed by model costs)

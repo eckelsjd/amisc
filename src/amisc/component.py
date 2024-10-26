@@ -25,6 +25,7 @@ import itertools
 import logging
 import random
 import string
+import traceback
 import typing
 import warnings
 from collections import UserDict, deque
@@ -644,8 +645,7 @@ class Component(BaseModel, Serializable):
                     and self.max_alpha == other.max_alpha and self.max_beta == other.max_beta and
                     self.interpolator == other.interpolator
                     and self.active_set == other.active_set and self.candidate_set == other.candidate_set
-                    and self.training_data == other.training_data and self.misc_states == other.misc_states
-                    and self.misc_costs == other.misc_costs
+                    and self.misc_states == other.misc_states and self.misc_costs == other.misc_costs
                     )
         else:
             return False
@@ -696,6 +696,27 @@ class Component(BaseModel, Serializable):
             else:
                 y_vars.append(var.name)
         return y_vars
+
+    def _match_index_set(self, index_set, misc_coeff):
+        """Helper function to grab the correct data structures for the given index set and MISC coefficients."""
+        if misc_coeff is None:
+            match index_set:
+                case 'train':
+                    misc_coeff = self.misc_coeff_train
+                case 'test':
+                    misc_coeff = self.misc_coeff_test
+                case other:
+                    raise ValueError(f"Index set must be 'train' or 'test' if you do not provide `misc_coeff`.")
+        if isinstance(index_set, str):
+            match index_set:
+                case 'train':
+                    index_set = self.active_set
+                case 'test':
+                    index_set = self.active_set.union(self.candidate_set)
+                case other:
+                    raise ValueError(f"Index set must be 'train' or 'test'.")
+
+        return index_set, misc_coeff
 
     def get_training_data(self, alpha: Literal['best', 'worst'] | MultiIndex = 'best',
                           beta: Literal['best', 'worst'] | MultiIndex = 'best',
@@ -846,7 +867,7 @@ class Component(BaseModel, Serializable):
                         results.append(ret)
                     except Exception as e:
                         results.append({'inputs': {k: v[i] for k, v in inputs.items()}, 'index': i,
-                                        'model_kwargs': kwargs.copy(), 'error': str(e)})
+                                        'model_kwargs': kwargs.copy(), 'error': traceback.format_exc()})
             else:  # Parallel
                 results = deque(maxlen=N)
                 futures = []
@@ -871,7 +892,7 @@ class Component(BaseModel, Serializable):
                         results.append(ret)
                     except Exception as e:
                         results.append({'inputs': {k: v[i] for k, v in inputs.items()}, 'index': i,
-                                        'model_kwargs': kwargs.copy(), 'error': str(e)})
+                                        'model_kwargs': kwargs.copy(), 'error': traceback.format_exc()})
 
             # Collect parallel/serial results
             output_dict = {}
@@ -881,25 +902,32 @@ class Component(BaseModel, Serializable):
                     errors[i] = res
                 else:
                     for key, val in res.items():
+                        # Save numeric outputs
+                        numeric_flag = False
                         for var in self.outputs:
                             if var.compression is not None:  # field quantity return values
                                 if key in var.compression.fields:
                                     if output_dict.get(key) is None:
                                         output_dict.setdefault(key, np.full((N, *np.atleast_1d(val).shape), np.nan))
                                     output_dict[key][i, ...] = np.atleast_1d(val)
+                                    numeric_flag = True
+                                    break
                             elif key == var:
                                 if output_dict.get(key) is None:
                                     output_dict.setdefault(key, np.full((N, *np.atleast_1d(val).shape), np.nan))
                                 output_dict[key][i, ...] = np.atleast_1d(val)
-
-                        if key == 'model_cost':
-                            if output_dict.get(key) is None:
-                                output_dict.setdefault(key, np.full((N,), np.nan))
-                            output_dict[key][i] = val
-                        else:
-                            if output_dict.get(key) is None:
-                                output_dict.setdefault(key, np.full((N,), None, dtype=object))
-                            output_dict[key][i]
+                                numeric_flag = True
+                                break
+                        # Otherwise, save other objects
+                        if not numeric_flag:
+                            if key == 'model_cost':
+                                if output_dict.get(key) is None:
+                                    output_dict.setdefault(key, np.full((N,), np.nan))
+                                output_dict[key][i] = val
+                            else:
+                                if output_dict.get(key) is None:
+                                    output_dict.setdefault(key, np.full((N,), None, dtype=object))
+                                output_dict[key][i] = val
 
         # Save average model costs for each alpha fidelity
         if alpha is not None and output_dict.get('model_cost') is not None:
@@ -918,9 +946,12 @@ class Component(BaseModel, Serializable):
             if var.compression is not None:
                 for field in var.compression.fields:
                     if field not in output_dict:
-                        self.logger.warning(f"Missing field '{field}' for output variable '{var}'.")
+                        self.logger.warning(f"Model return missing field '{field}' for output variable '{var}'. "
+                                            f"Returning NaNs...")
+                        output_dict[field].setdefault(field, np.full((N,), np.nan))
             elif var.name not in output_dict:
-                self.logger.warning(f"Missing output variable '{var.name}'.")
+                self.logger.warning(f"Model return missing output variable '{var.name}'. Returning NaNs...")
+                output_dict[var.name] = np.full((N,), np.nan)
 
         # Return the output dictionary and any errors
         if errors:
@@ -958,7 +989,7 @@ class Component(BaseModel, Serializable):
             ret = {}
             for var in self.outputs:
                 if var in outputs:
-                    ret[var] = outputs[var]
+                    ret[var.name] = outputs[var.name]
                 elif var.compression is not None:
                     for field in var.compression.fields:
                         ret[field] = outputs[field]
@@ -972,7 +1003,7 @@ class Component(BaseModel, Serializable):
             field_coords.update(kwds)
             outputs = self.call_model(inputs, alpha=use_model or 'best', output_path=model_dir, **field_coords)
             outputs, surr_vars = to_surrogate_dataset(outputs, self.outputs, del_fields=True, **field_coords)
-            return {var: outputs[var] for var in surr_vars}
+            return {str(var): outputs[var] for var in surr_vars}
 
         # Choose the correct index set and misc_coeff data structures
         if incremental:
@@ -980,10 +1011,7 @@ class Component(BaseModel, Serializable):
             self.update_misc_coeff(index_set, self.active_set, misc_coeff)
             index_set = self.active_set.union(index_set)
         else:
-            if isinstance(index_set, str):
-                index_set = self.active_set if index_set == 'train' else self.active_set.union(self.candidate_set)
-            if misc_coeff is None:
-                misc_coeff = self.misc_coeff_train if index_set == 'train' else self.misc_coeff_test
+            index_set, misc_coeff = self._match_index_set(index_set, misc_coeff)
 
         # Format inputs for surrogate prediction (all scalars at this point, including latent coeffs)
         inputs, loop_shape = format_inputs(inputs)  # {'x': (N,)}
@@ -992,7 +1020,7 @@ class Component(BaseModel, Serializable):
         # Handle prediction with empty active set (return nan)
         if len(index_set) == 0:
             for var in self.outputs:
-                outputs[var] = np.full(loop_shape, np.nan)
+                outputs[var.name] = np.full(loop_shape, np.nan)
             return outputs
 
         y_vars = self._surrogate_outputs()  # Only request this component's specified outputs (ignore all extras)
@@ -1006,9 +1034,9 @@ class Component(BaseModel, Serializable):
                                                                      skip_nan=True, y_vars=y_vars))
                 for var, arr in y.items():
                     if outputs.get(var) is None:
-                        outputs[var] = comb_coeff * arr
+                        outputs[str(var)] = comb_coeff * arr
                     else:
-                        outputs[var] += comb_coeff * arr
+                        outputs[str(var)] += comb_coeff * arr
 
         return format_outputs(outputs, loop_shape)
 
@@ -1029,22 +1057,7 @@ class Component(BaseModel, Serializable):
                            training or testing coefficients depending on the `index_set` parameter. This data structure
                            is modified in place.
         """
-        if misc_coeff is None:
-            match index_set:
-                case 'train':
-                    misc_coeff = self.misc_coeff_train
-                case 'test':
-                    misc_coeff = self.misc_coeff_test
-                case other:
-                    raise ValueError(f"Index set must be 'train' or 'test' if you do not provide `misc_coeff`.")
-        if isinstance(index_set, str):
-            match index_set:
-                case 'train':
-                    index_set = self.active_set
-                case 'test':
-                    index_set = self.active_set.union(self.candidate_set)
-                case other:
-                    raise ValueError(f"Index set must be 'train' or 'test'.")
+        index_set, misc_coeff = self._match_index_set(index_set, misc_coeff)
 
         for new_alpha, new_beta in new_indices:
             new_ind = np.array(new_alpha + new_beta)
@@ -1192,11 +1205,7 @@ class Component(BaseModel, Serializable):
             self.logger.warning("No surrogate model available for gradient computation.")
             return None
 
-        if isinstance(index_set, str):
-            index_set = self.active_set if index_set == 'train' else self.active_set.union(self.candidate_set)
-        if misc_coeff is None:
-            misc_coeff = self.misc_coeff_train if index_set == 'train' else self.misc_coeff_test
-
+        index_set, misc_coeff = self._match_index_set(index_set, misc_coeff)
         inputs, loop_shape = format_inputs(inputs)  # {'x': (N,)}
         outputs = {}
 
@@ -1242,13 +1251,15 @@ class Component(BaseModel, Serializable):
                 return True
         return False
 
-    def set_logger(self, log_file: str | Path = None, stdout: bool = None, logger: logging.Logger = None):
+    def set_logger(self, log_file: str | Path = None, stdout: bool = None, logger: logging.Logger = None,
+                   level: int = logging.INFO):
         """Set a new `logging.Logger` object.
 
         :param log_file: log to file (if provided)
         :param stdout: whether to connect the logger to console (defaults to whatever is currently set or False)
         :param logger: the logging object to use (if None, then a new logger is created; this will override
                        the `log_file` and `stdout` arguments if set)
+        :param level: the logging level to set (default is `logging.INFO`)
         """
         if stdout is None:
             stdout = False
@@ -1257,7 +1268,7 @@ class Component(BaseModel, Serializable):
                     if isinstance(handler, logging.StreamHandler):
                         stdout = True
                         break
-        self._logger = logger or get_logger(self.name, log_file=log_file, stdout=stdout)
+        self._logger = logger or get_logger(self.name, log_file=log_file, stdout=stdout, level=level)
 
     def update_model(self, new_model: callable = None, model_kwargs: dict = None, **kwargs):
         """Update the underlying component model or its kwargs."""

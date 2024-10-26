@@ -212,6 +212,7 @@ class Lagrange(Interpolator, StringSerializable):
     def predict(self, x: Dataset, state: LagrangeState, training_data: tuple[Dataset, Dataset]):
         """Predict the output of the model at points `x` with barycentric Lagrange interpolation."""
         # Convert `x` and `yi` to 2d arrays: (N, xdim) and (N, ydim)
+        # Inputs `x` may come in unordered, but they should get realigned with the internal `x_grids` state
         xi, yi = training_data
         x_arr = np.concatenate([x[var][..., np.newaxis] for var in xi], axis=-1)
         yi_arr = np.concatenate([yi[var][..., np.newaxis] for var in yi], axis=-1)
@@ -225,7 +226,7 @@ class Lagrange(Interpolator, StringSerializable):
         # Create ragged edge matrix of interpolation pts and weights
         x_j = np.full((xdim, max_size), np.nan)                             # For example:
         w_j = np.full((xdim, max_size), np.nan)                             # A= [#####--
-        for n, var in enumerate(x):                                         #     #######
+        for n, var in enumerate(state.x_grids):                             #     #######
             x_j[n, :grid_sizes[var]] = state.x_grids[var]                   #     ###----]
             w_j[n, :grid_sizes[var]] = state.weights[var]
 
@@ -278,7 +279,7 @@ class Lagrange(Interpolator, StringSerializable):
         # Create ragged edge matrix of interpolation pts and weights
         x_j = np.full((xdim, max_size), np.nan)                             # For example:
         w_j = np.full((xdim, max_size), np.nan)                             # A= [#####--
-        for n, var in enumerate(x):                                         #     #######
+        for n, var in enumerate(state.x_grids):                             #     #######
             x_j[n, :grid_sizes[var]] = state.x_grids[var]                   #     ###----]
             w_j[n, :grid_sizes[var]] = state.weights[var]
 
@@ -352,7 +353,7 @@ class Lagrange(Interpolator, StringSerializable):
         # Create ragged edge matrix of interpolation pts and weights
         x_j = np.full((xdim, max_size), np.nan)                             # For example:
         w_j = np.full((xdim, max_size), np.nan)                             # A= [#####--
-        for n, var in enumerate(x):                                         #     #######
+        for n, var in enumerate(state.x_grids):                             #     #######
             x_j[n, :grid_sizes[var]] = state.x_grids[var]                   #     ###----]
             w_j[n, :grid_sizes[var]] = state.weights[var]
 

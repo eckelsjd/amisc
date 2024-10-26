@@ -25,6 +25,8 @@ with the custom methods.
 - can also request specific coords in model_kwargs, and those will be passed through call_model() after interpolation
 - LATENT_STR_ID -- training_Data/interpolator can import this to handle latent coeff variables in a special way _if they want to_
 - vectorized alpha will be np.array (*shape, len(alpha))
+- anywhere update_domain, get_domain, or LATENT_STR_ID is involved -- will cause issues with latent variable normalization (when it gets implemented)
+- struggles with bad coupling domain bounds -- try to estimate from test set is probably the best move
 
 
 Serialization
