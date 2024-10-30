@@ -211,7 +211,7 @@ def test_train_history():
 def test_save_dir(tmp_path):
     """Test saving and loading from `amisc_timestamp` directory"""
     comp = Component(simple_model_dict, Variable('x', domain=(0, 1)), Variable('y'), name='comp1', max_beta_train=(4,))
-    surr = System(comp, root_dir=tmp_path)
+    surr = System(comp, root_dir=tmp_path, name='test_system')
     surr.fit(max_iter=3, save_interval=1)
     surr.save_to_file('test_surrogate.yml')
 
@@ -221,7 +221,8 @@ def test_save_dir(tmp_path):
             amisc_dir = tmp_path / f
             surr2 = System.load_from_file(amisc_dir / 'surrogates' / 'test_surrogate.yml')
             assert (amisc_dir / 'components' / 'comp1').is_dir()
-            assert all([(amisc_dir / 'surrogates' / f'system_iter{i}.yml').exists() for i in range(1, 4)])
+            assert all([(amisc_dir / 'surrogates' / f'{surr.name}_iter{i}' / f'{surr.name}_iter{i}.yml').exists()
+                        for i in range(1, 4)])
             assert surr2 == surr
             found_dir = True
 

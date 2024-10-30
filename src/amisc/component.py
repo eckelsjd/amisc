@@ -282,6 +282,11 @@ class MiscTree(UserDict, Serializable):
         else:
             return super().__getitem__(MultiIndex(key))
 
+    def clear(self):
+        """Clear the `MiscTree` data."""
+        for key in list(self.data.keys()):
+            del self.data[key]
+
     def __eq__(self, other):
         if isinstance(other, MiscTree):
             try:
@@ -754,8 +759,11 @@ class Component(BaseModel, Serializable):
             self.logger.error(f"Error getting training data for alpha={alpha}, beta={beta}.")
             raise e
 
-    def call_model(self, inputs: dict | Dataset, alpha: Literal['best', 'worst'] | tuple | list = None,
-                   output_path: str | Path = None, executor: Executor = None, **kwds) -> Dataset:
+    def call_model(self, inputs: dict | Dataset,
+                   alpha: Literal['best', 'worst'] | tuple | list = None,
+                   output_path: str | Path = None,
+                   executor: Executor = None,
+                   **kwds) -> Dataset:
         """Wrapper function for calling the underlying component model.
 
         This function formats the input data, calls the model, and processes the output data.
@@ -958,9 +966,13 @@ class Component(BaseModel, Serializable):
             output_dict['errors'] = errors
         return output_dict
 
-    def predict(self, inputs: dict | Dataset, use_model: Literal['best', 'worst'] | tuple = None,
-                model_dir: str | Path = None, index_set: Literal['train', 'test'] | IndexSet = 'test',
-                misc_coeff: MiscTree = None, incremental: bool = False, **kwds) -> Dataset:
+    def predict(self, inputs: dict | Dataset,
+                use_model: Literal['best', 'worst'] | tuple = None,
+                model_dir: str | Path = None,
+                index_set: Literal['train', 'test'] | IndexSet = 'test',
+                misc_coeff: MiscTree = None,
+                incremental: bool = False,
+                **kwds) -> Dataset:
         """Evaluate the MISC surrogate approximation at new inputs `x`.
 
         !!! Note "Using the underlying model"
@@ -1143,8 +1155,9 @@ class Component(BaseModel, Serializable):
         start_idx = 0
         for i, (a, b) in enumerate(indices):
             num_train_pts = len(design_list[i])
-            end_idx = start_idx + num_train_pts
-            yi_dict = {var: model_outputs[var][start_idx:end_idx, ...] for var in model_outputs}
+            end_idx = start_idx + num_train_pts  # Ensure loop dim of 1 gets its own axis (might have been squeezed)
+            yi_dict = {var: arr[np.newaxis, ...] if len(alpha_list) == 1 and arr.shape[0] != 1 else
+                       arr[start_idx:end_idx, ...] for var, arr in model_outputs.items()}
 
             # Check for errors and store
             err_coords = []
@@ -1188,8 +1201,10 @@ class Component(BaseModel, Serializable):
         self.update_misc_coeff(neighbors, index_set='test')  # neighbors will only ever pass through here once
         self.candidate_set.update(neighbors)
 
-    def gradient(self, inputs: dict | Dataset, index_set: Literal['train', 'test'] | IndexSet = 'test',
-                misc_coeff: MiscTree = None, derivative: Literal['first', 'second'] = 'first') -> Dataset:
+    def gradient(self, inputs: dict | Dataset,
+                 index_set: Literal['train', 'test'] | IndexSet = 'test',
+                 misc_coeff: MiscTree = None,
+                 derivative: Literal['first', 'second'] = 'first') -> Dataset:
         """Evaluate the Jacobian or Hessian of the MISC surrogate approximation at new `inputs`, i.e.
         the first or second derivatives, respectively.
 
@@ -1365,7 +1380,10 @@ class Component(BaseModel, Serializable):
                     if len(value) > 0:
                         d[key] = {str(k): float(v) for k, v in value.items()}
                 elif key in ComponentSerializers.__annotations__.keys():
-                    d[key] = value.serialize(*serialize_args.get(key, ()), **serialize_kwargs.get(key, {}))
+                    if key in ['training_data', 'interpolator'] and not self.has_surrogate:
+                        continue
+                    else:
+                        d[key] = value.serialize(*serialize_args.get(key, ()), **serialize_kwargs.get(key, {}))
                 else:
                     d[key] = value
         return d

@@ -17,9 +17,9 @@ def test_sparse_grid():
         y3 = inputs['x3'] - 5
         return {'y1': y1, 'y2': y2, 'y3': y3}
 
-    x_vars = VariableList([Variable('x1', dist='U(0, 1)', norm='linear(2, 2)'),
-                           Variable('x2', dist='LU(1e-3, 1e-1)', norm='log10'),
-                           Variable('x3', dist='LN(0, 1)', norm='log10')])
+    x_vars = VariableList([Variable('x1', distribution='U(0, 1)', norm='linear(2, 2)'),
+                           Variable('x2', distribution='LU(1e-3, 1e-1)', norm='log10'),
+                           Variable('x3', distribution='LN(0, 1)', norm='log10')])
     y_vars = VariableList(['y1', 'y2', 'y3'])
     domains = x_vars.get_domains(norm=True)
     weight_fcns = x_vars.get_pdfs(norm=True)
@@ -59,9 +59,9 @@ def test_imputer():
             y2[0] = np.nan
         return {'y1': y1, 'y2': y2}
 
-    x_vars = VariableList([Variable('x1', dist='U(5, 10)', norm='minmax'),
-                           Variable('x2', dist='LU(1e-3, 1e-1)', norm='log10'),
-                           Variable('x3', dist='N(5, 1)', norm='zscore')])
+    x_vars = VariableList([Variable('x1', distribution='U(5, 10)', norm='minmax'),
+                           Variable('x2', distribution='LU(1e-3, 1e-1)', norm='log10'),
+                           Variable('x3', distribution='N(5, 1)', norm='zscore')])
     domains = x_vars.get_domains()
     weight_fcns = x_vars.get_pdfs()
     grid = SparseGrid()
@@ -97,8 +97,8 @@ def test_field_quantity():
     rank = 4
     dof = 100
     svd = SVD(rank=rank, data_matrix=np.random.rand(dof, 50), coords=np.linspace(0, 1, dof))
-    inputs = VariableList([Variable('x', dist='U(0, 1)'), Variable('p', compression=svd, domain=(-20, 20)),
-                           Variable('a', dist='N(0, 1)')])
+    inputs = VariableList([Variable('x', distribution='U(0, 1)'), Variable('p', compression=svd, domain=(-20, 20)),
+                           Variable('a', distribution='N(0, 1)')])
     weight_fcns = inputs.get_pdfs()
     domains = inputs.get_domains()
     def model(inputs, alpha=(0,), frac=0.05):

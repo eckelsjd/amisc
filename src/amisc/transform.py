@@ -49,7 +49,7 @@ class Transform(ABC):
                        default, `(a, b)` is the Variable's domain and `(l, u)` is `(0, 1)`. Use simply as `minmax`
                        to use all defaults.
         - **zscore** — $x_{norm} = \\frac{x - m}{s}$ specified as `zscore(m, s)` or `zscore(mu=m, std=s)`. If the
-                       Variable is specified as `dist=normal`, then `zscore` defaults to the Variable's own `mu, std`.
+                       Variable is specified as `distribution=normal`, then `zscore` defaults to the Variable's own `mu, std`.
 
         !!! Example
             ```python
@@ -64,7 +64,7 @@ class Transform(ABC):
         !!! Warning
             You may optionally leave the `minmax` arguments blank to defer to the bounds of the parent `Variable`.
             You may also optionally leave the `zscore` arguments blank to defer to the `(mu, std)` of the parent
-            `Variable`, but this will throw a runtime error if `Variable.dist` is not `Normal(mu, std)`.
+            `Variable`, but this will throw a runtime error if `Variable.distribution` is not `Normal(mu, std)`.
         """
         if transform_spec is None:
             return None

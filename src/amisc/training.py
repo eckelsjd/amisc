@@ -133,7 +133,7 @@ class SparseGrid(TrainingData, PickleSerializable):
     by their coordinate location in a larger tensor-product grid, and obtains new training data by refining
     a single 1d grid at a time.
 
-    !!! Note "MISC and sparse grids
+    !!! Note "MISC and sparse grids"
         MISC itself can be thought of as an extension to the well-known sparse grid technique, so this class
         readily integrates with the MISC implementation in `Component`. Sparse grids limit the curse
         of dimensionality up to about `dim = 10-15` for the input space (which would otherwise be infeasible with a
