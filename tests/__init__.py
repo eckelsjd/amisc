@@ -1,7 +1,7 @@
 """Tests for the `amisc` package. Ordered according to the following hierarchy of modules, with higher-level
 modules dependent on the lower-levels.
 
-Includes:
+Testing modules:
 
 - `test_utils` - tests for the `amisc.utils` module including dataset conversion, formatting, and other utilities.
 - `test_serialize` - tests for the `amisc.serialize` module including serialization mixin classes.
@@ -15,4 +15,8 @@ Includes:
 - `test_system` - tests for the `amisc.system` module, primarily focused on the `System` class and its methods.
 - `test_convergence` - tests for the `amisc.system` module to ensure convergence of the `System` surrogate on
                        various test models.
+
+Profiling modules:
+
+- `profile_fit` - profile the performance of `System.fit` for various configurations.
 """

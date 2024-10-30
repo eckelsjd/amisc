@@ -6,16 +6,16 @@ components: !Component
     max_beta_train: (2, 2)
     inputs: !VariableList
       - name: H
-        dist: N(18e6, 1e6)
+        distribution: N(18e6, 1e6)
       - name: Φ
-        dist: N(235e3, 10e3)
+        distribution: N(235e3, 10e3)
     outputs: !VariableList
       - name: Vsat
-        dist: U(3000, 3100)
+        distribution: U(3000, 3100)
       - name: To
-        dist: U(30000, 50000)
+        distribution: U(30000, 50000)
       - name: Te
-        dist: U(2000, 4000)
+        distribution: U(2000, 4000)
       - name: Slew
         description: Max slewing angle
         units: rad
@@ -25,20 +25,20 @@ components: !Component
     max_beta_train: (2, 2, 2, 2, 2)
     inputs: !VariableList
       - name: Po
-        dist: N(1000, 50)
+        distribution: N(1000, 50)
       - name: Fs
-        dist: N(1400, 20)
+        distribution: N(1400, 20)
       - name: To  # duplicate
       - name: Te  # duplicate
       - name: Pat
-        dist: U(60, 80)
+        distribution: U(60, 80)
     outputs: !VariableList
       - name: Imin
-        dist: U(4500, 5500)
+        distribution: U(4500, 5500)
         description: Min moment of inertia
         units: '$kg\cdot m^2$'
       - name: Imax
-        dist: U(6200, 6800)
+        distribution: U(6200, 6800)
       - name: Ptot
         domain: (800, 1200)
       - name: Asa
@@ -51,13 +51,13 @@ components: !Component
       - name: H
       - name: Fs
       - name: Lsp
-        dist: N(2, 0.4)
+        distribution: N(2, 0.4)
       - name: q
-        dist: N(0.5, 0.1)
+        distribution: N(0.5, 0.1)
       - name: La
-        dist: N(2, 0.4)
+        distribution: N(2, 0.4)
       - name: Cd
-        dist: N(1, 0.2)
+        distribution: N(1, 0.2)
       - name: Vsat
       - name: Slew
       - name: Imin

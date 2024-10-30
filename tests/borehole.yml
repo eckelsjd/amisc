@@ -1,22 +1,26 @@
-exo:
-  !Variable
+!System
+name: Borehole system
+components: !Component
+- name: Borehole
+  model: !!python/name:amisc.examples.models.borehole_func
+  vectorized: True
+  max_beta_train: (2, 2, 2, 2, 2, 2, 2, 2)
+  inputs: !VariableList
   - name: rw
-    dist: U(0.05, 0.15)
+    distribution: U(0.05, 0.15)
   - name: r
-    dist: U(100, 50000)
+    distribution: U(100, 50000)
   - name: Tu
-    dist: U(63070, 115600)
+    distribution: U(63070, 115600)
   - name: Hu
-    dist: U(990, 1110)
+    distribution: U(990, 1110)
   - name: Tl
-    dist: U(63.1, 116)
+    distribution: U(63.1, 116)
   - name: Hl
-    dist: U(700, 820)
+    distribution: U(700, 820)
   - name: L
-    dist: U(1120, 1680)
+    distribution: U(1120, 1680)
   - name: Kw
-    dist: U(9855, 12045)
-coupling:
-  !Variable
+    distribution: U(9855, 12045)
+  outputs: !VariableList
   - name: vdot
-    dist: U(0, 1000)

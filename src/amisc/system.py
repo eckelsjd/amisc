@@ -219,7 +219,7 @@ class System(BaseModel, Serializable):
         `amisc_{timestamp}`. This directory will be used to save all build products and log files.
 
         :param components: list of `Component` models that make up the MD system
-        :param executor: manages parallel execution for the system
+        :param executor: manages parallel execution for the system (optional)
         :param root_dir: root directory where all surrogate build products are saved to file (optional)
         """
         if components is None:
@@ -299,7 +299,8 @@ class System(BaseModel, Serializable):
             try:
                 return func(self, *args, **kwargs)
             except:
-                self.save_to_file(f'{self.name}_error.yml')
+                if self.root_dir is not None:
+                    self.save_to_file(f'{self.name}_error.yml')
                 self.logger.critical(f'An error occurred during execution of "{func.__name__}". Saving '
                                      f'System object to {self.name}_error.yml', exc_info=True)
                 self.logger.info(f'Final system surrogate on exit: \n {self}')
@@ -540,11 +541,63 @@ class System(BaseModel, Serializable):
         return samples
 
     def simulate_fit(self):
-        """Loop back through training history and simulate each iteration to obtain the error indicator or new
-        test metrics etc.
+        """Loop back through training history and simulate each iteration. Will yield the internal data structures
+        of each `Component` surrogate after each iteration of training (without needing to call `fit()` or any
+        of the underlying models). This might be useful, for example, for computing the surrogate predictions on
+        a new test set or viewing cumulative training costs.
+
+        !!! Example
+            Say you have a new test set: `(new_xtest, new_ytest)`, and you want to compute the accuracy of the
+            surrogate fit at each iteration of the training history:
+
+            ```python
+            for train_iter, active_sets, candidate_sets, misc_coeff_train, misc_coeff_test in system.simulate_fit():
+                # Do something with the surrogate data structures
+                new_ysurr = system.predict(new_xtest, index_set=active_sets, misc_coeff=misc_coeff_train)
+                train_error = relative_error(new_ysurr, new_ytest)
+            ```
+
+        :yields: the active index sets, candidate index sets, and MISC coefficients of each component model at each
+                 iteration of the training history
         """
-        # TODO
-        raise NotImplementedError
+        # "Simulated" data structures for each component
+        active_sets = {comp.name: IndexSet() for comp in self.components}       # active index sets for each component
+        candidate_sets = {comp.name: IndexSet() for comp in self.components}    # candidate sets for each component
+        misc_coeff_train = {comp.name: MiscTree() for comp in self.components}  # MISC coeff for active sets
+        misc_coeff_test = {comp.name: MiscTree() for comp in self.components}   # MISC coeff for active + candidate sets
+
+        for train_result in self.train_history:
+            # The selected refinement component and indices
+            comp_star = train_result['component']
+            alpha_star = train_result['alpha']
+            beta_star = train_result['beta']
+            comp = self[comp_star]
+
+            # Get forward neighbors for the selected index
+            neighbors = comp._neighbors(alpha_star, beta_star, active_set=active_sets[comp_star], forward=True)
+
+            # "Activate" the index in the simulated data structure
+            s = set()
+            s.add((alpha_star, beta_star))
+            comp.update_misc_coeff(IndexSet(s), index_set=active_sets[comp_star],
+                                   misc_coeff=misc_coeff_train[comp_star])
+
+            if (alpha_star, beta_star) in candidate_sets[comp_star]:
+                candidate_sets[comp_star].remove((alpha_star, beta_star))
+            else:
+                # Only for initial index which didn't come from the candidate set
+                comp.update_misc_coeff(IndexSet(s), index_set=active_sets[comp_star].union(candidate_sets[comp_star]),
+                                       misc_coeff=misc_coeff_test[comp_star])
+            active_sets[comp_star].update(s)
+
+            comp.update_misc_coeff(neighbors, index_set=active_sets[comp_star].union(candidate_sets[comp_star]),
+                                   misc_coeff=misc_coeff_test[comp_star])  # neighbors will only ever pass here once
+            candidate_sets[comp_star].update(neighbors)
+
+            # Caller can now do whatever they want as if the system surrogate were at this training iteration
+            # See the "index_set" and "misc_coeff" overrides for `System.predict()` for example
+            yield train_result, active_sets, candidate_sets, misc_coeff_train, misc_coeff_test
+
 
     def add_output(self):
         """Add an output variable retroactively to a component surrogate. User should provide a callable that
@@ -580,7 +633,7 @@ class System(BaseModel, Serializable):
         :param save_interval: number of refinement steps between each progress save, none if 0; `System.root_dir`
                               must be specified to save to file
         :param estimate_bounds: whether to estimate bounds for the coupling variables; will only try to estimate from
-                                the `test_set` if provided (defaults to `False`). Otherwise, you should manually
+                                the `test_set` if provided (defaults to `True`). Otherwise, you should manually
                                 provide domains for all coupling variables.
         :param update_bounds: whether to continuously update coupling variable bounds during refinement
         :param test_set: `tuple` of `(xtest, ytest)` to show convergence of surrogate to the true model. The test set
@@ -702,6 +755,9 @@ class System(BaseModel, Serializable):
                 os.mkdir(pth)
             self.save_to_file(f'{iter_name}.yml', save_dir=pth)
 
+            if xtest is not None and ytest is not None:
+                self._save_test_set((xtest, ytest))
+
         self.logger.info(f'Final system surrogate: \n {self}')
 
     def test_set_performance(self, xtest: Dataset, ytest: Dataset, index_set='train') -> Dataset:
@@ -812,7 +868,8 @@ class System(BaseModel, Serializable):
             for var in coupling_vars.values():
                 if np.all(~np.isnan(y_min[var])) and np.all(~np.isnan(y_max[var])):
                     if var.compression is not None:
-                        new_domain = list(zip(y_min[var].tolist(), y_max[var].tolist()))
+                        new_domain = list(zip(np.squeeze(y_min[var], axis=0).tolist(),
+                                              np.squeeze(y_max[var], axis=0).tolist()))
                         var.update_domain(new_domain)
                     else:
                         new_domain = (float(y_min[var]), float(y_max[var]))
@@ -841,7 +898,7 @@ class System(BaseModel, Serializable):
                 verbose: bool = False,
                 index_set: dict[str: IndexSet | Literal['train', 'test']] = 'test',
                 misc_coeff: dict[str: MiscTree] = None,
-                normalized: bool = True,
+                normalized_inputs: bool = True,
                 incremental: dict[str, bool] = False,
                 targets: list[str] = None,
                 var_shape: dict[str, tuple] = None) -> Dataset:
@@ -867,8 +924,9 @@ class System(BaseModel, Serializable):
                           `IndexSet` object. If `incremental` is specified, will be overwritten with `train`.
         :param misc_coeff: `dict(comp=MiscTree)` to override the default coefficients for a component, passes through
                            along with `index_set` and `incremental` to `comp.predict()`.
-        :param normalized: true if the passed inputs are compressed/normalized for surrogate evaluation (default),
-                           such as inputs returned by `sample_inputs`
+        :param normalized_inputs: true if the passed inputs are compressed/normalized for surrogate evaluation
+                                  (default), such as inputs returned by `sample_inputs`. Set to `False` if you are
+                                  passing inputs as the true models would expect them instead (i.e. not normalized).
         :param incremental: whether to add `index_set` to the current active set for each component (temporarily);
                             this will set `index_set='train'` for all other components (since incremental will
                             augment the "training" active sets, not the "testing" candidate sets)
@@ -885,7 +943,7 @@ class System(BaseModel, Serializable):
         N = int(np.prod(loop_shape))
         t1 = 0
         output_dir = None
-        norm_status = {var: normalized for var in x}  # keep track of whether inputs are normalized or not
+        norm_status = {var: normalized_inputs for var in x}  # keep track of whether inputs are normalized or not
 
         # Keep track of what outputs are computed
         is_computed = {}
@@ -943,17 +1001,26 @@ class System(BaseModel, Serializable):
 
             call_model = use_model.get(comp.name, None) is not None
 
-            if call_model:  # Make sure we format all inputs for model evaluation (i.e. denormalize)
-                denorm_inputs, field_coords = to_model_dataset({var: arr for var, arr in comp_input.items()
-                                                                if norm_status[var]}, comp.inputs, del_latent=True,
-                                                               **field_coords)
-                kwds.update(field_coords)
-                comp_input.update(denorm_inputs)
-            else:  # Otherwise, make sure we format inputs for surrogate evaluation (i.e. normalize)
-                norm_inputs, _ = to_surrogate_dataset({var: arr for var, arr in comp_input.items()
-                                                       if not norm_status[var]}, comp.inputs, del_fields=True,
-                                                      **field_coords)
-                comp_input.update(norm_inputs)
+            # Make sure we format all inputs for model evaluation (i.e. denormalize)
+            if call_model:
+                norm_inputs = {var: arr for var, arr in comp_input.items() if norm_status[var]}
+                if len(norm_inputs) > 0:
+                    denorm_inputs, field_coords = to_model_dataset(norm_inputs, comp.inputs, del_latent=True,
+                                                                   **field_coords)
+                    for var in norm_inputs:
+                        del comp_input[var]
+                    kwds.update(field_coords)
+                    comp_input.update(denorm_inputs)
+
+            # Otherwise, make sure we format inputs for surrogate evaluation (i.e. normalize)
+            else:
+                denorm_inputs = {var: arr for var, arr in comp_input.items() if not norm_status[var]}
+                if len(denorm_inputs) > 0:
+                    norm_inputs, _ = to_surrogate_dataset(denorm_inputs, comp.inputs, del_fields=True, **field_coords)
+
+                    for var in denorm_inputs:
+                        del comp_input[var]
+                    comp_input.update(norm_inputs)
 
             return comp_input, kwds, call_model
 
@@ -1417,6 +1484,118 @@ class System(BaseModel, Serializable):
 
         return fig, axs
 
+    def get_allocation(self, idx: int = None):
+        """Get a breakdown of cost allocation up to a certain iteration number during training (starting at 1).
+
+        :param idx: the iteration number to get allocation results for (defaults to last refinement step)
+        :returns: `cost_alloc, eval_alloc, cost_cum, eval_cum` - the cost allocation per model/fidelity, the
+                  number of model evaluations per model/fidelity, the cumulative training cost, and the cumulative
+                  number of model evaluations
+        """
+        if idx is None:
+            idx = self.refine_level
+        if idx > self.refine_level:
+            raise ValueError(f'Specified index: {idx} is greater than the max training level of {self.refine_level}')
+
+        eval_alloc = dict()     # Model evaluation counts per node and model fidelity
+        cost_alloc = dict()     # Cost allocation (cpu time in s) per node and model fidelity
+        cost_cum = []           # Cumulative cost allocation during training
+        eval_cum = []           # Cumulative number of model evaluations during training
+
+        prev_cands = {comp.name: IndexSet() for comp in self.components}  # empty candidate sets
+
+        # Add cumulative training costs
+        for train_res, active_sets, cand_sets, misc_coeff_train, misc_coeff_test in self.simulate_fit():
+            comp = train_res['component']
+            alpha = train_res['alpha']
+            beta = train_res['beta']
+
+            eval_alloc.setdefault(comp, dict())
+            cost_alloc.setdefault(comp, dict())
+
+            new_cands = cand_sets[comp].union({(alpha, beta)}) - prev_cands[comp]  # newly computed candidates
+
+            iter_cost = 0.
+            iter_eval = 0
+            for alpha_new, beta_new in new_cands:
+                eval_alloc[comp].setdefault(alpha_new, 0.)
+                cost_alloc[comp].setdefault(alpha_new, 0.)
+
+                added_cost = self[comp].get_cost(alpha_new, beta_new)
+                model_cost = self[comp].model_costs.get(alpha_new, 1.)
+                added_eval = round(added_cost / model_cost)
+
+                iter_cost += added_cost
+                iter_eval += added_eval
+
+                eval_alloc[comp][alpha_new] += added_eval
+                cost_alloc[comp][alpha_new] += added_cost
+
+            cost_cum.append(iter_cost)
+            eval_cum.append(iter_eval)
+            prev_cands[comp] = cand_sets[comp].union({(alpha, beta)})
+
+        return cost_alloc, eval_alloc, np.cumsum(cost_cum), np.cumsum(eval_cum)
+
+    def plot_allocation(self, cmap: str = 'Blues', text_bar_width: float = 0.06, arrow_bar_width: float = 0.02):
+        """Plot bar charts showing cost allocation during training.
+
+        !!! Warning "Beta feature"
+            This has pretty good default settings, but it might look terrible for your use. Mostly provided here as
+            a template for making cost allocation bar charts. Please feel free to copy and edit in your own code.
+
+        :param cmap: the colormap string identifier for `plt`
+        :param text_bar_width: the minimum total cost fraction above which a bar will print centered model fidelity text
+        :param arrow_bar_width: the minimum total cost fraction above which a bar will try to print text with an arrow;
+                                below this amount, the bar is too skinny and won't print any text
+        :returns: `fig, ax`, Figure and Axes objects
+        """
+        # Get total cost (including offline overhead)
+        cost_alloc, eval_alloc, cost_cum, _ = self.get_allocation()
+        total_cost = cost_cum[-1]
+
+        # Remove nodes with cost=0 from alloc dicts (i.e. analytical models)
+        remove_nodes = []
+        for node, alpha_dict in cost_alloc.items():
+            if len(alpha_dict) == 0:
+                remove_nodes.append(node)
+        for node in remove_nodes:
+            del cost_alloc[node]
+            del eval_alloc[node]
+
+        # Bar chart showing cost allocation breakdown for MF system at final iteration
+        fig, ax = plt.subplots(figsize=(6, 5), layout='tight')
+        width = 0.7
+        x = np.arange(len(cost_alloc))
+        xlabels = list(cost_alloc.keys())  # One bar for each component
+        cmap = plt.get_cmap(cmap)
+
+        for j, (node, alpha_dict) in enumerate(cost_alloc.items()):
+            bottom = 0
+            c_intervals = np.linspace(0, 1, len(alpha_dict))
+            bars = [(alpha, cost, cost / total_cost) for alpha, cost in alpha_dict.items()]
+            bars = sorted(bars, key=lambda ele: ele[2], reverse=True)
+            for i, (alpha, cost, frac) in enumerate(bars):
+                p = ax.bar(x[j], frac, width, color=cmap(c_intervals[i]), linewidth=1,
+                           edgecolor=[0, 0, 0], bottom=bottom)
+                bottom += frac
+                if frac > text_bar_width:
+                    ax.bar_label(p, labels=[f'{alpha}, {round(eval_alloc[node][alpha])}'], label_type='center')
+                elif frac > arrow_bar_width:
+                    xy = (x[j] + width / 2, bottom - frac / 2)  # Label smaller bars with a text off to the side
+                    ax.annotate(f'{alpha}, {round(eval_alloc[node][alpha])}', xy, xytext=(xy[0] + 0.2, xy[1]),
+                                arrowprops={'arrowstyle': '->', 'linewidth': 1})
+                else:
+                    pass  # Don't label really small bars
+        ax_default(ax, '', "Fraction of total cost", legend=False)
+        ax.set_xticks(x, xlabels)
+        ax.set_xlim(left=-1, right=x[-1] + 1)
+
+        if self.root_dir is not None:
+            fig.savefig(Path(self.root_dir) / 'mf_allocation.pdf', bbox_inches='tight', format='pdf')
+
+        return fig, ax
+
     def serialize(self, keep_components=False, serialize_args=None, serialize_kwargs=None) -> dict:
         """Convert to a `dict` with only standard Python types for fields.
 
@@ -1466,118 +1645,3 @@ class System(BaseModel, Serializable):
         else:
             raise NotImplementedError(f'The "{System.yaml_tag}" yaml tag can only be used on a yaml sequence or '
                                       f'mapping, not a "{type(node)}".')
-
-#     def get_allocation(self, idx: int = None):
-#         """Get a breakdown of cost allocation up to a certain iteration number during training (starting at 1).
-#
-#         :param idx: the iteration number to get allocation results for (defaults to last refinement step)
-#         :returns: `cost_alloc, offline_alloc, cost_cum` - the cost alloc per node/fidelity and cumulative training cost
-#         """
-#         if idx is None:
-#             idx = self.refine_level
-#         if idx > self.refine_level:
-#             raise ValueError(f'Specified index: {idx} is greater than the max training level of {self.refine_level}')
-#
-#         cost_alloc = dict()     # Cost allocation per node and model fidelity
-#         cost_cum = [0.0]        # Cumulative cost allocation during training
-#
-#         # Add initialization costs for each node
-#         for node, node_obj in self.graph.nodes.items():
-#             surr = node_obj['surrogate']
-#             base_alpha = (0,) * len(surr.truth_alpha)
-#             base_beta = (0,) * (len(surr.max_refine) - len(surr.truth_alpha))
-#             base_cost = surr.get_cost(base_alpha, base_beta)
-#             cost_alloc[node] = dict()
-#             if base_cost > 0:
-#                 cost_alloc[node][str(base_alpha)] = np.array([1, float(base_cost)])
-#                 cost_cum[0] += float(base_cost)
-#
-#         # Add cumulative training costs
-#         for i in range(idx):
-#             err_indicator, node, alpha, beta, num_evals, cost = self.build_metrics['train_record'][i]
-#             if cost_alloc[node].get(str(alpha), None) is None:
-#                 cost_alloc[node][str(alpha)] = np.zeros(2)  # (num model evals, total cpu_time cost)
-#             cost_alloc[node][str(alpha)] += [round(num_evals), float(cost)]
-#             cost_cum.append(float(cost))
-#
-#         # Get summary of total offline costs spent building search candidates (i.e. training overhead)
-#         offline_alloc = dict()
-#         for node, node_obj in self.graph.nodes.items():
-#             surr = node_obj['surrogate']
-#             offline_alloc[node] = dict()
-#             for alpha, beta in surr.candidate_set:
-#                 if offline_alloc[node].get(str(alpha), None) is None:
-#                     offline_alloc[node][str(alpha)] = np.zeros(2)   # (num model evals, total cpu_time cost)
-#                 added_cost = surr.get_cost(alpha, beta)
-#                 base_cost = surr.get_sub_surrogate(alpha, beta).model_cost
-#                 offline_alloc[node][str(alpha)] += [round(added_cost/base_cost), float(added_cost)]
-#
-#         return cost_alloc, offline_alloc, np.cumsum(cost_cum)
-#
-#
-#     def plot_allocation(self, cmap: str = 'Blues', text_bar_width: float = 0.06, arrow_bar_width: float = 0.02):
-#         """Plot bar charts showing cost allocation during training.
-#
-#         !!! Warning "Beta feature"
-#             This has pretty good default settings, but it might look terrible for your use. Mostly provided here as
-#             a template for making cost allocation bar charts. Please feel free to copy and edit in your own code.
-#
-#         :param cmap: the colormap string identifier for `plt`
-#         :param text_bar_width: the minimum total cost fraction above which a bar will print centered model fidelity text
-#         :param arrow_bar_width: the minimum total cost fraction above which a bar will try to print text with an arrow;
-#                                 below this amount, the bar is too skinny and won't print any text
-#         :returns: `fig, ax`, Figure and Axes objects
-#         """
-#         # Get total cost (including offline overhead)
-#         train_alloc, offline_alloc, cost_cum = self.get_allocation()
-#         total_cost = cost_cum[-1]
-#         for node, alpha_dict in offline_alloc.items():
-#             for alpha, cost in alpha_dict.items():
-#                 total_cost += cost[1]
-#
-#         # Remove nodes with cost=0 from alloc dicts (i.e. analytical models)
-#         remove_nodes = []
-#         for node, alpha_dict in train_alloc.items():
-#             if len(alpha_dict) == 0:
-#                 remove_nodes.append(node)
-#         for node in remove_nodes:
-#             del train_alloc[node]
-#             del offline_alloc[node]
-#
-#         # Bar chart showing cost allocation breakdown for MF system at end
-#         fig, axs = plt.subplots(1, 2, sharey='row')
-#         width = 0.7
-#         x = np.arange(len(train_alloc))
-#         xlabels = list(train_alloc.keys())
-#         cmap = plt.get_cmap(cmap)
-#         for k in range(2):
-#             ax = axs[k]
-#             alloc = train_alloc if k == 0 else offline_alloc
-#             ax.set_title('Online training' if k == 0 else 'Overhead')
-#             for j, (node, alpha_dict) in enumerate(alloc.items()):
-#                 bottom = 0
-#                 c_intervals = np.linspace(0, 1, len(alpha_dict))
-#                 bars = [(alpha, cost, cost[1] / total_cost) for alpha, cost in alpha_dict.items()]
-#                 bars = sorted(bars, key=lambda ele: ele[2], reverse=True)
-#                 for i, (alpha, cost, frac) in enumerate(bars):
-#                     p = ax.bar(x[j], frac, width, color=cmap(c_intervals[i]), linewidth=1,
-#                                edgecolor=[0, 0, 0], bottom=bottom)
-#                     bottom += frac
-#                     if frac > text_bar_width:
-#                         ax.bar_label(p, labels=[f'{alpha}, {round(cost[0])}'], label_type='center')
-#                     elif frac > arrow_bar_width:
-#                         xy = (x[j] + width / 2, bottom - frac / 2)  # Label smaller bars with a text off to the side
-#                         ax.annotate(f'{alpha}, {round(cost[0])}', xy, xytext=(xy[0] + 0.2, xy[1]),
-#                                     arrowprops={'arrowstyle': '->', 'linewidth': 1})
-#                     else:
-#                         pass  # Don't label really small bars
-#             ax_default(ax, '', "Fraction of total cost" if k == 0 else '', legend=False)
-#             ax.set_xticks(x, xlabels)
-#             ax.set_xlim(left=-1, right=x[-1] + 1)
-#         fig.set_size_inches(8, 4)
-#         fig.tight_layout()
-#
-#         if self.root_dir is not None:
-#             fig.savefig(Path(self.root_dir) / 'mf_allocation.png', dpi=300, format='png')
-#
-#         return fig, axs

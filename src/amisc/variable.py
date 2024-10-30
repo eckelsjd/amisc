@@ -47,7 +47,7 @@ class Variable(BaseModel, Serializable):
     With the `pyyaml` library installed, all `Variable` objects can be saved or loaded directly from a `.yml` file by
     using the `!Variable` yaml tag (which is loaded by default with `amisc`).
 
-    - Use `Variable.dist` to specify sampling PDFs, such as for random variables. See the `Distribution` classes.
+    - Use `Variable.distribution` to specify PDFs, such as for random variables. See the `Distribution` classes.
     - Use `Variable.norm` to specify a transformed-space that is more amenable to surrogate construction
       (e.g. mapping to the range (0,1)). See the `Transform` classes.
     - Use `Variable.compression` to specify high-dimensional, coordinate-based field quantities,
@@ -58,7 +58,7 @@ class Variable(BaseModel, Serializable):
     !!! Example
         ```python
         # Random variable
-        temp = Variable(name='T', description='Temperature', units='K', dist='Uniform(280, 320)')
+        temp = Variable(name='T', description='Temperature', units='K', distribution='Uniform(280, 320)')
         samples = temp.sample(100)
         pdf = temp.pdf(samples)
 
@@ -80,7 +80,7 @@ class Variable(BaseModel, Serializable):
     :ivar category: an additional descriptor for how this variable is used, e.g. calibration, operating, design, etc.
     :ivar tex: latex format for the variable, i.e. r"$x_i$"
     :ivar compression: specifies field quantities and links to relevant compression data
-    :ivar dist: a string specifier of a probability distribution function (see the `Distribution` types)
+    :ivar distribution: a string specifier of a probability distribution function (see the `Distribution` types)
     :ivar domain: the explicit domain bounds of the variable (limits of where you expect to use it);
                   for field quantities, this is a list of domains for each latent dimension
     :ivar norm: specifier of a map to a transformed-space for surrogate construction (see the `Transform` types)
@@ -95,7 +95,7 @@ class Variable(BaseModel, Serializable):
     category: Optional[str] = None
     tex: Optional[str] = None
     compression: Optional[str | dict | Compression] = None
-    dist: Optional[str | Distribution] = None
+    distribution: Optional[str | Distribution] = None
     domain: Optional[str | tuple[float, float] | list] = None
     norm: Optional[_TransformLike] = None
 
@@ -131,7 +131,7 @@ class Variable(BaseModel, Serializable):
             compression.fields = compression.fields or [info.data['name']]
             return compression
 
-    @field_validator('dist')
+    @field_validator('distribution')
     @classmethod
     def _validate_dist(cls, dist: str | Distribution) -> Distribution | None:
         if dist is None:
@@ -150,7 +150,7 @@ class Variable(BaseModel, Serializable):
         Returns a list of domains for each latent dimension if this is a field quantity with compression.
         """
         if domain is None:
-            if dist := info.data['dist']:
+            if dist := info.data['distribution']:
                 domain = dist.domain()
             elif compression := info.data['compression']:
                 domain = compression.estimate_latent_ranges()
@@ -182,7 +182,7 @@ class Variable(BaseModel, Serializable):
         # Set default values for minmax and zscore transforms
         domain = info.data['domain']
         normal_args = None
-        if dist := info.data['dist']:
+        if dist := info.data['distribution']:
             if isinstance(dist, Normal):
                 normal_args = dist.dist_args
         for transform in norm:
@@ -244,7 +244,7 @@ class Variable(BaseModel, Serializable):
         """
         nominal = self.nominal
         if nominal is None:
-            if dist := self.dist:
+            if dist := self.distribution:
                 nominal = float(dist.nominal())
             elif domain := self.get_domain():
                 nominal = [np.mean(d) for d in domain] if isinstance(domain, list) else float(np.mean(domain))
@@ -305,18 +305,23 @@ class Variable(BaseModel, Serializable):
         """
         def _update_domain(domain, curr_domain):
             lb, ub = domain
-            return (lb, ub) if override else (min(lb, curr_domain[0]) if curr_domain is not None else lb,
-                                              max(ub, curr_domain[1]) if curr_domain is not None else ub)
+            ret = (lb, ub) if override else (min(lb, curr_domain[0]) if curr_domain is not None else lb,
+                                             max(ub, curr_domain[1]) if curr_domain is not None else ub)
+            return tuple(map(float, ret))
 
         curr_domain = self.get_domain()
-        if isinstance(curr_domain, list):
+        if isinstance(domain, list):
+            if not isinstance(curr_domain, list):
+                curr_domain = [curr_domain] * len(domain)
+            self.domain = [_update_domain(d, curr_domain[i]) for i, d in enumerate(domain)]
+        elif isinstance(curr_domain, list):
             if not isinstance(domain, list):
                 domain = [domain] * len(curr_domain)
             self.domain = [_update_domain(d, curr_domain[i]) for i, d in enumerate(domain)]
         else:
             self.domain = _update_domain(domain, curr_domain)
-            if (dist := self.dist) is not None and isinstance(dist, Uniform | LogUniform):  # keep Uniform dist in sync
-                dist.dist_args = self.domain
+            if (dist := self.distribution) is not None and isinstance(dist, Uniform | LogUniform):
+                dist.dist_args = self.domain  # keep Uniform dist in sync
 
     def pdf(self, x: np.ndarray) -> np.ndarray:
         """Compute the PDF of the Variable at the given `x` locations. Will just return one's if the variable
@@ -325,7 +330,7 @@ class Variable(BaseModel, Serializable):
         :param x: locations to compute the PDF at
         :returns: the PDF evaluations at `x`
         """
-        if dist := self.dist:
+        if dist := self.distribution:
             return dist.pdf(x)
         else:
             return np.ones(x.shape)  # No pdf if no dist is specified
@@ -343,7 +348,7 @@ class Variable(BaseModel, Serializable):
         if nominal is None:
             nominal = self.get_nominal()
 
-        if dist := self.dist:
+        if dist := self.distribution:
             return dist.sample(shape, nominal)
         else:
             # Variable's with no distribution
@@ -359,8 +364,8 @@ class Variable(BaseModel, Serializable):
 
         !!! Note
             If this Variable's `self.norm` was specified as a list of norm methods, then each will be applied in
-            sequence in the original order (and in reverse for `denorm=True`). When `self.dist` is involved in the
-            transforms (only for `minmax` and `zscore`), the `dist_args` will get normalized too at each
+            sequence in the original order (and in reverse for `denorm=True`). When `self.distribution` is involved in
+            the transforms (only for `minmax` and `zscore`), the `dist_args` will get normalized too at each
             transform before applying the next transform.
 
         :param values: the values to normalize (array-like)
@@ -369,7 +374,7 @@ class Variable(BaseModel, Serializable):
         """
         if not self.norm or values is None:
             return values
-        if dist := self.dist:
+        if dist := self.distribution:
             normal_dist = isinstance(dist, Normal)
         else:
             normal_dist = False
@@ -385,7 +390,7 @@ class Variable(BaseModel, Serializable):
             return transform.transform(values, inverse=inverse, transform_args=transform_args)
 
         domain = self.get_domain() or ()
-        dist_args = self.dist.dist_args if normal_dist else []
+        dist_args = self.distribution.dist_args if normal_dist else []
         if isinstance(domain, list):
             domain = ()  # For field quantities, domain is not used in normalization
 
@@ -488,7 +493,7 @@ class Variable(BaseModel, Serializable):
             if value is not None and not key.startswith('_'):
                 if key == 'domain':
                     d[key] = [str(v) for v in value] if isinstance(value, list) else str(value)
-                elif key == 'dist':
+                elif key == 'distribution':
                     d[key] = str(value)
                 elif key == 'norm':
                     d[key] = [str(transform) for transform in value]

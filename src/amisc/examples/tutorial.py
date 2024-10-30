@@ -9,8 +9,8 @@ def single_component():
     def fun(x):
         return dict(y=x ** 2)
 
-    x = Variable(dist='U(-1, 1)')
-    y = Variable(dist='U(0, 1)')
+    x = Variable(distribution='U(-1, 1)')
+    y = Variable(distribution='U(0, 1)')
     component = ComponentSpec(fun)
     system = SystemSurrogate([component], x, y)
 
@@ -32,9 +32,9 @@ def simple():
     def fun2(x):
         return dict(y=1 / (1 + 25 * x ** 2))
 
-    x = Variable(dist='U(0, 1)')
-    y = Variable(dist='U(0, 1)')
-    z = Variable(dist='U(0, 1)')
+    x = Variable(distribution='U(0, 1)')
+    y = Variable(distribution='U(0, 1)')
+    z = Variable(distribution='U(0, 1)')
     model1 = ComponentSpec(fun1, exo_in=x, coupling_out=y)
     model2 = ComponentSpec(fun2, coupling_in=y, coupling_out=z)
 

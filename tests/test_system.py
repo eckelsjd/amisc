@@ -2,7 +2,7 @@
 import copy
 import time
 import warnings
-from concurrent.futures.process import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,7 +11,8 @@ from scipy.stats import gaussian_kde
 from uqtils import ax_default
 
 from amisc import Variable, Component, System
-from amisc.utils import relative_error
+from amisc.compression import SVD
+from amisc.utils import relative_error, to_model_dataset
 
 
 def test_feedforward_simple(plots=False):
@@ -39,7 +40,7 @@ def test_feedforward_simple(plots=False):
         plt.show()
 
 
-def test_feedforward_three(plots=True):
+def test_feedforward_three(plots=False):
     """Test the MD system in Figure 6 in Jakeman 2022."""
     def coupled_system(D1, D2, Q1, Q2):
         """Scalable number of inputs (D1, D2) and outputs (Q1, Q2)."""
@@ -85,8 +86,8 @@ def test_feedforward_three(plots=True):
     Q1 = 1
     Q2 = Q1
     alpha = (15,)
-    inputs = ([Variable(f'z1_{i}', dist='U(0, 1)') for i in range(1, D1+1)] +
-              [Variable(f'z2_{i}', dist='U(0, 1)') for i in range(1, D2+1)])
+    inputs = ([Variable(f'z1_{i}', distribution='U(0, 1)') for i in range(1, D1+1)] +
+              [Variable(f'z2_{i}', distribution='U(0, 1)') for i in range(1, D2+1)])
     outputs = ([Variable(f'y1_{i}') for i in range(1, Q1+1)] + [Variable(f'y2_{i}') for i in range(1, Q2+1)] +
                [Variable('y3_1')])
     f1, f2, f3 = coupled_system(D1, D2, Q1, Q2)
@@ -129,18 +130,13 @@ def test_feedforward_three(plots=True):
         plt.show()
 
 
-def test_field_quantity():
-    # TODO
-    pass
-
-
 def test_fpi():
     """Test fixed point iteration implementation against scipy fsolve."""
     f1 = lambda x: {'y1': -x['x']**3 + 2 * x['y2']**2}
     f2 = lambda x: {'y2': 3*x['x']**2 + 4 * x['y1']**(-2)}
-    x = Variable('x', dist='U(1, 4)')
-    y1 = Variable('y1', dist='U(1, 10)')
-    y2 = Variable('y2', dist='U(1, 10)')
+    x = Variable('x', distribution='U(1, 4)')
+    y1 = Variable('y1', distribution='U(1, 10)')
+    y2 = Variable('y2', distribution='U(1, 10)')
     comp1 = Component(f1, [x, y2], y1, name='m1')
     comp2 = Component(f2, [x, y1], y2, name='m2')
     surr = System(comp1, comp2)
@@ -176,11 +172,6 @@ def test_fpi():
     y_true = np.delete(y_true, nan_idx + bad_idx, axis=0)
     l2_error = relative_error(y_surr, y_true)
     assert np.max(l2_error) < tol
-
-
-def test_fpi_field_quantity():
-    # TODO
-    pass
 
 
 def test_system_refine(plots=False):
@@ -267,7 +258,65 @@ def test_system_refine(plots=False):
         plt.show()
 
 
-def test_fire_sat(tmp_path, plots=True):
+def test_simulate_fit():
+    """Test looping back through training history and recomputing on a test set."""
+    from amisc.examples.models import f1, f2
+
+    beta_max = (4,)
+    surr = System(Component(f1, name='f1', vectorized=True, max_beta_train=beta_max),
+                  Component(f2, name='f2', vectorized=True, max_beta_train=beta_max))
+
+    for var in surr.variables():
+        var.domain = (0, 1)
+
+    xtest = {'x': np.linspace(0, 1, 100)}
+    y1_ret = f1(xtest['x'])
+    y2_ret = f2(f1(xtest['x']))
+    ytest = {'y1': y1_ret, 'y2': y2_ret}
+
+    max_iter = 8
+    surr.fit(max_iter=max_iter, test_set=(xtest, ytest))
+
+    i = 0
+    for train_res, active_set, candidate_set, misc_coeff_train, misc_coeff_test in surr.simulate_fit():
+        error = train_res['test_error']
+        if all([~np.isnan(val) for val in error.values()]):
+            test_index_set = {comp: active_set[comp].union(candidate_set[comp]) for comp in active_set}
+            y_surr_train = surr.predict(xtest, index_set=active_set, misc_coeff=misc_coeff_train)
+            y_surr_test = surr.predict(xtest, index_set=test_index_set, misc_coeff=misc_coeff_test)
+
+            train_error = {var: relative_error(y_surr_train[var], ytest[var]) for var in ytest}
+            test_error = {var: relative_error(y_surr_test[var], ytest[var]) for var in ytest}
+
+            # Training error should be the same as was originally computed during fit
+            assert all([np.allclose(error[var], train_error[var]) for var in train_error])
+
+            # Error using the candidate set should be less than the training error
+            assert all([np.all(test_error[var] <= train_error[var]) for var in test_error])
+
+        i += 1
+
+    assert i == max_iter
+
+
+def test_fit_with_executor(model_cost=1, max_iter=5, max_workers=8):
+    """Run fit with an executor."""
+
+    def expensive_model(inputs, model_cost=1):
+        time.sleep(model_cost)
+        return {'y': -inputs['x1'] ** 3 + 2 * inputs['x2'] ** 2 + inputs['x3']}
+
+    inputs = [Variable('x1', distribution='U(0, 1)'), Variable('x2', distribution='U(0, 1)'),
+              Variable('x3', distribution='U(0, 1)')]
+    outputs = Variable('y')
+    comp = Component(expensive_model, inputs, outputs, max_beta_train=(3, 3, 3), model_cost=model_cost)
+    surr = System(comp)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        surr.fit(max_iter=max_iter, executor=executor)
+
+
+def test_fire_sat(tmp_path, plots=False):
     """Test the fire satellite coupled system from Chaudhuri (2018)."""
     from amisc.examples.models import fire_sat_system
 
@@ -303,7 +352,7 @@ def test_fire_sat(tmp_path, plots=True):
         print('Its alright. Sometimes the random walks are wacky and FPI wont converge.')
 
     # Plot allocation bar charts
-    # surr.plot_allocation()
+    surr.plot_allocation()
 
     if plots:
         # Plot error histograms
@@ -317,3 +366,118 @@ def test_fire_sat(tmp_path, plots=True):
         fig.set_size_inches(9, 3)
         fig.tight_layout()
         plt.show()
+
+
+def test_turbojet_cycle(tmp_path):
+    """Test for coupling a compressor, combuster, and turbine models. Includes a mix of analytical and surrogate
+    models, as well as coupling field quantities along with scalar random variables.
+    """
+    def compressor(inputs):
+        """Simple compressor model.
+
+        :param inputs: `dict` of `Ta` and `v1` for ambient temperature and inlet velocity distribution
+        :returns: `dict` of modified velocity `v2` and pressure distribution `p1`
+        """
+        inlet_velocity_distribution = inputs['v1']
+        ambient_temp = inputs['Ta']
+        compression_ratio = 1.5
+        modified_velocity = inlet_velocity_distribution * compression_ratio
+        modified_velocity += ambient_temp * 0.05
+        base_pressure = 100
+        pressure_boost_factor = 1.2
+        pressure_distribution = base_pressure + (modified_velocity * pressure_boost_factor)
+        return {'v2': modified_velocity, 'p1': pressure_distribution}
+
+    def combuster(inputs, alpha=None):
+        """Simple combuster model.
+
+        :param inputs: `dict` of `v2` and `Ta` for compressor outlet velocity and ambient temperature.
+        :param alpha: `tuple` of fidelity levels for combustion factor and temperature effect
+        :returns: `dict` of outlet velocity `v3`
+        """
+        # Fidelity levels for combustion factor and external input effect
+        alpha = alpha or (3, 3)
+        combustion_factor = 1.5 + 0.5 * alpha[0]
+        temperature_factor = 0.05 + 0.03 * alpha[1]
+
+        # Applying the combustion effect
+        outlet_velocity = inputs['v2'] * combustion_factor + inputs['Ta'] * temperature_factor
+
+        return {'v3': outlet_velocity}
+
+    def turbine(inputs, alpha=None):
+        """Simple turbine model.
+
+        :param inputs: `dict` of `v3` and `eta_t` for combuster outlet velocity and blade efficiency.
+        :param alpha: `tuple` of fidelity levels for turbine efficiency and other effects.
+        :returns: `dict` of exit velocity `v4`
+        """
+        # Fidelity levels for turbine efficiency and other effects
+        alpha = alpha or (3,)
+        turbine_efficiency = 0.7 + 0.1 * alpha[0]
+        pressure_effect = 0.01 + 0.005 * alpha[0]
+        efficiency_effect = 0.01 + 0.005 * alpha[0]
+
+        # Applying the turbine efficiency effect
+        exit_velocity_field = inputs['v3'] * turbine_efficiency
+
+        # Adjustments based on pressure field and external input effects
+        blade_efficiency = inputs['eta_t']
+        exit_velocity_field += inputs['p1'] * pressure_effect
+        exit_velocity_field += efficiency_effect * blade_efficiency
+
+        return {'v4': exit_velocity_field}
+
+    # Synthetic velocity distributions
+    num_samples = 100
+    num_points = 80
+    inlet_grid = np.linspace(-1, 1, num_points)
+    means = np.random.uniform(200, 300, num_samples)
+    stds = np.random.uniform(0.15, 0.35, num_samples)
+    v1_samples = np.zeros((num_points, num_samples))
+    for i in range(num_samples):
+        v1_samples[:, i] = means[i] * np.exp(-0.5 * (inlet_grid / stds[i]) ** 2)
+
+    # Random variables
+    Ta = Variable('Ta', distribution='N(300, 20)', units='K', description='Ambient temperature', norm='zscore')
+    eta_t = Variable('eta_t', distribution='N(0.8, 0.04)', description='Turbine blade efficiency')
+    Ta_samples = Ta.sample(num_samples)
+    eta_t_samples = eta_t.sample(num_samples)
+
+    # Field quantities
+    v1 = Variable('v1', units='m/s', description='Inlet velocity', compression=SVD(rank=4, coords=inlet_grid))
+    v2 = Variable('v2', units='m/s', description='Compressor outlet velocity',
+                  compression=SVD(rank=3, coords=inlet_grid))
+    v3 = Variable('v3', units='m/s', description='Combuster outlet velocity',
+                  compression=SVD(rank=2, coords=inlet_grid))
+    v4 = Variable('v4', units='m/s', description='Turbine exit velocity',
+                  compression=SVD(rank=4, coords=inlet_grid))
+    p1 = Variable('p1', units='kPa', description='Compressor outlet pressure',
+                  compression=SVD(rank=2, coords=inlet_grid))
+
+    # Define components
+    comp1 = Component(compressor, [Ta, v1], [v2, p1], name='Compressor')
+    comp2 = Component(combuster, [Ta, v2], [v3], max_beta_train=(2, 2), max_alpha=(3, 3), name='Combuster')
+    comp3 = Component(turbine, [eta_t, v3, p1], [v4], max_beta_train=(2, 2, 2), max_alpha=(3,), name='Turbine')
+    system = System(comp1, comp2, comp3, root_dir=tmp_path)
+
+    # Generate compression data
+    xtest = {'Ta': Ta_samples, 'v1': v1_samples.T, 'eta_t': eta_t_samples}
+    ytest = system.predict(xtest, use_model='best', normalized_inputs=False)
+    v1.compression.compute_map(data_matrix=v1_samples)
+    v2.compression.compute_map(data_matrix=ytest['v2'].T)
+    v3.compression.compute_map(data_matrix=ytest['v3'].T)
+    v4.compression.compute_map(data_matrix=ytest['v4'].T)
+    p1.compression.compute_map(data_matrix=ytest['p1'].T)
+
+    # Set domain estimate for v1 latent coefficients
+    v1_latent = v1.compression.compress(v1_samples.T)
+    v1.update_domain(list(zip(np.min(v1_latent, axis=0), np.max(v1_latent, axis=0))), override=True)
+
+    system.fit(max_iter=15, test_set=(xtest, ytest), estimate_bounds=True)
+
+    # Check error
+    ysurr_norm = system.predict(xtest, normalized_inputs=False)
+    ysurr = to_model_dataset(ysurr_norm, system.outputs())[0]
+    for var in ysurr:
+        assert relative_error(ysurr[var], ytest[var]) < 0.15

@@ -15,7 +15,7 @@ from amisc.training import SparseGrid
 def test_tensor_product_1d(plots=False):
     """Test 1D tensor product Lagrange interpolation."""
     interp = Lagrange()
-    x = Variable(dist='U(0, 1)')
+    x = Variable(distribution='U(0, 1)')
     alpha = ()          # no model fidelity for simple examples
     beta_interp = ()    # no beta for Lagrange interpolator
     domain = {'x': x.get_domain()}
@@ -70,8 +70,8 @@ def test_tensor_product_2d(plots=False):
     """Test 2D tensor product Lagrange interpolation."""
     bb_2d_func = lambda x: nonlinear_wave(x, env_var=0.2**2, wave_amp=0.3)
     interp = Lagrange()
-    d = Variable(dist='U(0, 1)')
-    theta = Variable(dist='U(0, 1)')
+    d = Variable(distribution='U(0, 1)')
+    theta = Variable(distribution='U(0, 1)')
     alpha = ()          # no model fidelity for simple examples
     beta_interp = ()    # no beta for Lagrange interpolator
     domains = {'d': d.get_domain(), 'theta': theta.get_domain()}
@@ -164,7 +164,7 @@ def test_interp_jacobian_and_hessian():
                         np.sin(theta['x3']) * theta['x1'])
     fun = lambda theta: {'y1': f1(theta), 'y2': f2(theta)}
 
-    x1, x2, x3 = Variable('x1', dist='U(-2, 1)'), Variable('x2', dist='U(-1, 2)'), Variable('x3', dist='U(-3.14, 3.14)')
+    x1, x2, x3 = Variable('x1', distribution='U(-2, 1)'), Variable('x2', distribution='U(-1, 2)'), Variable('x3', distribution='U(-3.14, 3.14)')
     interp = Lagrange()
     domains = {'x1': x1.get_domain(), 'x2': x2.get_domain(), 'x3': x3.get_domain()}
     alpha = ()

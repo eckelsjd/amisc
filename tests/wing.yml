@@ -1,26 +1,30 @@
-exo:
-  !Variable
+!System
+name: Wing weight system
+components: !Component
+- name: Wing
+  model: !!python/name:amisc.examples.models.wing_weight_func
+  vectorized: True
+  max_beta_train: (2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
+  inputs: !VariableList
   - name: Sw
-    dist: U(150, 250)
+    distribution: U(150, 250)
   - name: Wfw
-    dist: U(220, 300)
+    distribution: U(220, 300)
   - name: A
-    dist: U(6, 10)
+    distribution: U(6, 10)
   - name: Lambda
-    dist: U(-10, 10)
+    distribution: U(-10, 10)
   - name: q
-    dist: U(16, 45)
+    distribution: U(16, 45)
   - name: lambda
-    dist: U(0.5, 1)
+    distribution: U(0.5, 1)
   - name: tc
-    dist: U(0.08, 0.18)
+    distribution: U(0.08, 0.18)
   - name: Nz
-    dist: U(2.5, 6)
+    distribution: U(2.5, 6)
   - name: Wdg
-    dist: U(1700, 2500)
+    distribution: U(1700, 2500)
   - name: Wp
-    dist: U(0.025, 0.08)
-coupling:
-  !Variable
+    distribution: U(0.025, 0.08)
+  outputs: !VariableList
   - name: Wwing
-    dist: U(0, 10000)

@@ -10,8 +10,8 @@ from amisc.compression import SVD
 
 def test_load_and_dump_variables(tmp_path):
     """Make sure yaml serialization works for variables."""
-    variables = [Variable('a', description='Altitude', units='m', dist='U(0, 1)'),
-                 Variable(u'Φ', description='Base width', units='m', dist='N(0, 1)'),
+    variables = [Variable('a', description='Altitude', units='m', distribution='U(0, 1)'),
+                 Variable(u'Φ', description='Base width', units='m', distribution='N(0, 1)'),
                  Variable('p', description='Pressure', units='Pa', domain=(1e6, 2e6),
                           compression={'method': 'svd', 'interpolate_opts': {'kernel': 'gaussian', 'neighbors': 10},
                                        'rank': 10, 'energy_tol': 0.95})
@@ -27,7 +27,7 @@ def test_load_and_dump_variables(tmp_path):
 
     x = Variable()
     y1, y2 = [Variable(), Variable()]
-    x_vars = [Variable(dist='U(0, 1)') for i in range(5)]
+    x_vars = [Variable(distribution='U(0, 1)') for i in range(5)]
     assert x.name == 'x'
     assert y1.name.startswith('X_')
     assert y2.name.startswith('X_')
@@ -40,12 +40,12 @@ def test_single_norm():
 
     for norm_method in norms:
         for dist_method in dists:
-            variable = Variable(norm=norm_method, dist=dist_method)
+            variable = Variable(norm=norm_method, distribution=dist_method)
             x = variable.sample_domain(10)
             xnorm = variable.normalize(x)
             xtilde = variable.normalize(xnorm, denorm=True)
             assert np.allclose(x, xtilde), (f'Failed single normalization test for '
-                                            f'dist: {dist_method}, norm: {norm_method}')
+                                            f'distribution: {dist_method}, norm: {norm_method}')
 
 
 def test_two_norms():
@@ -55,15 +55,15 @@ def test_two_norms():
 
     for dist_method in dists:
         for case in cases:
-            var1 = Variable(dist=dist_method, norm=case)
-            var2 = Variable(dist=dist_method, norm=list(reversed(case)))
+            var1 = Variable(distribution=dist_method, norm=case)
+            var2 = Variable(distribution=dist_method, norm=list(reversed(case)))
             x = var1.sample_domain(10)
             xnorm1 = var1.normalize(x)
             xnorm2 = var2.normalize(x)
             xtilde1 = var1.normalize(xnorm1, denorm=True)
             xtilde2 = var2.normalize(xnorm2, denorm=True)
-            assert np.allclose(x, xtilde1), f'Failed the two-normalization test for dist: {dist_method}, norm: {case}'
-            assert np.allclose(x, xtilde2), (f'Failed the two-normalization test for dist: '
+            assert np.allclose(x, xtilde1), f'Failed the two-normalization test for distribution: {dist_method}, norm: {case}'
+            assert np.allclose(x, xtilde2), (f'Failed the two-normalization test for distribution: '
                                              f'{dist_method}, norm: {var2.norm}')
 
 
@@ -72,21 +72,21 @@ def test_many_norms():
              ['log10(offset=11)', 'minmax', 'linear(-2, 1e-6)']]
     dist = 'U(-10, -5)'
     for case in cases:
-        variable = Variable(dist=dist, norm=case)
+        variable = Variable(distribution=dist, norm=case)
         x = variable.sample_domain(50)
         xnorm = variable.normalize(x)
         xtilde = variable.normalize(xnorm, denorm=True)
-        assert np.allclose(x, xtilde), f'Failed the many-normalization test for dist: {dist}, norm: {case}'
+        assert np.allclose(x, xtilde), f'Failed the many-normalization test for distribution: {dist}, norm: {case}'
 
 
 def test_nominal_and_domain():
-    variable = Variable(dist='U(1, 10)', norm='log10')
+    variable = Variable(distribution='U(1, 10)', norm='log10')
     nominal = variable.get_nominal()
     bds = variable.get_domain()
     assert nominal == (10 + 1)/2
     assert bds == (1, 10)
 
-    variable = Variable(dist='N(5, 1)', norm='minmax')
+    variable = Variable(distribution='N(5, 1)', norm='minmax')
     nominal= variable.get_nominal()
     bds = variable.get_domain()
     assert nominal == 5
@@ -95,7 +95,7 @@ def test_nominal_and_domain():
 
 def test_compression_1d():
     """Test svd compression for a single-input, single-output, 1d field quantity."""
-    A = Variable('A', dist='U(-5, 5)')
+    A = Variable('A', distribution='U(-5, 5)')
     p = Variable('p')
     def model(inputs, coords):
         amp = inputs['A']
@@ -125,9 +125,10 @@ def test_compression_1d():
     # Test sampling latent coefficients
     latent_min = np.min(outputs_reduced['latent'], axis=(0, 1))
     latent_max = np.max(outputs_reduced['latent'], axis=(0, 1))
-    p.update(domain=(-1, 1))
+    p.domain = (-1, 1)
     assert len(p.get_domain()) == rank  # inferred from compression rank
-    p.update(domain=[(lmin, lmax) for lmin, lmax in zip(latent_min, latent_max)], norm='linear(0.5)')
+    p.domain = [(lmin, lmax) for lmin, lmax in zip(latent_min, latent_max)]
+    p.norm = 'linear(0.5)'
     domain = p.get_domain()
     samples = p.sample_domain(num_test)
     nominal = p.sample(num_test)
@@ -144,8 +145,8 @@ def test_compression_fields():
     """Test compression for a multi-field quantity."""
     num_grid = 200
     num_samples = 50
-    delta = Variable(dist='U(0, 1)')
-    gamma = Variable(dist='U(1, 2)')
+    delta = Variable(distribution='U(0, 1)')
+    gamma = Variable(distribution='U(1, 2)')
     grid = np.linspace(-1, 1, num_grid)
     delta_samples = delta.sample(num_samples)
     gamma_samples = gamma.sample(num_samples)
@@ -188,7 +189,7 @@ def test_uniform_dist():
     true_lb = [-2, 1.1, 11.3]
     true_ub = [-1, 1.2, 94]
     for i in range(len(true_lb)):
-        v = Variable(dist=f'Uniform({true_lb[i]}, {true_ub[i]})')
+        v = Variable(distribution=f'Uniform({true_lb[i]}, {true_ub[i]})')
         samples = v.sample(shape)
         pdf = v.pdf(samples)
         assert np.all(np.logical_and(true_lb[i] < samples, samples < true_ub[i]))
@@ -196,7 +197,7 @@ def test_uniform_dist():
         assert np.allclose(v.pdf(samples + true_ub[i]), 0)
 
     # Loguniform distribution
-    v = Variable(dist='LogUniform(1e-8, 1e-2)', norm='log10')
+    v = Variable(distribution='LogUniform(1e-8, 1e-2)', norm='log10')
     norm_bds = v.normalize(v.get_domain())
     unnorm_bds = v.denormalize(norm_bds)
     samples = v.sample(shape)
@@ -211,7 +212,7 @@ def test_normal_dist():
     shape = (10, 20, 50)
     true_means = [-5.2, 1, 2.7, 14.73, 100]
     true_stds = (np.random.rand(len(true_means)) * 0.1 + 0.05) * np.abs(true_means)
-    variables = [Variable(dist=f'Normal({true_means[i]}, {true_stds[i]})') for i in range(len(true_means))]
+    variables = [Variable(distribution=f'Normal({true_means[i]}, {true_stds[i]})') for i in range(len(true_means))]
     for i, v in enumerate(variables):
         # Plain normal distribution
         samples = v.sample(shape)
@@ -221,7 +222,7 @@ def test_normal_dist():
         assert relative_error(x[np.argmax(pdf)], true_means[i]) < 0.05
 
     # Log normal distribution
-    v = Variable(dist='LogNormal(-2, 1, 2.718)', norm='log')
+    v = Variable(distribution='LogNormal(-2, 1, 2.718)', norm='log')
     samples = v.sample(shape)
     x = np.logspace(*v.normalize(v.get_domain()), 1000)
     pdf = v.pdf(x)
@@ -239,7 +240,8 @@ def test_relative_and_tolerance_dist():
     for nominal in nominals:
         for dist in dists:
             for tol in tols:
-                v.update(nominal=nominal, dist=f'{dist}({tol})')
+                v.nominal = nominal
+                v.distribution = f'{dist}({tol})'
                 samples = v.sample(shape)
                 tol = tol if dist == 'tol' else (tol/100) * abs(nominal)
                 bds = (nominal - tol, nominal + tol)
@@ -251,7 +253,7 @@ def test_no_dist():
     nominals = [-5.2, 1, 2.7, 14.73, 100]
     v = Variable(domain=(0, 1))
     for i, nominal in enumerate(nominals):
-        v.update(nominal=nominal)
+        v.nominal = nominal
         samples = v.sample(shape)
         x = np.linspace(*v.get_domain(), 100)
         pdf = v.pdf(x)
@@ -264,7 +266,7 @@ def test_variable_list(tmp_path):
     letters = 'abcdefgh'
     means = np.random.rand(len(letters)) * 10 - 5
     std = np.random.rand(len(letters)) * 3
-    variables = [Variable(letter, tex=f'${letter}_{i}$', dist=f'N({means[i]}, {std[i]})', norm='zscore')
+    variables = [Variable(letter, tex=f'${letter}_{i}$', distribution=f'N({means[i]}, {std[i]})', norm='zscore')
                  for i, letter in enumerate(letters)]
 
     # Init from var, dict, list, or varlist

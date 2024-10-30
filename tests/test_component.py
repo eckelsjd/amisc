@@ -99,7 +99,7 @@ def test_component_validation(tmp_path):
         assert isinstance(getattr(comp, attribute), Serializable)
 
     # Test partial validation
-    variables = [Variable(dist=f'U(0, {np.random.rand()})') for i in range(10)]
+    variables = [Variable(distribution=f'U(0, {np.random.rand()})') for i in range(10)]
     alphas = [(), (0,), (1,)]
     betas = [(0, 0), (0., 1.1), (1, 0)]
 
@@ -181,7 +181,7 @@ class CustomDataStorage(TrainingData, StringSerializable):
 
 def test_custom_data_classes():
     # Test custom args/kwargs, states, interpolator, etc.
-    c = Component(simple_model, Variable(), Variable(), interpolator=CustomInterpolator(),
+    c = Component(simple_model, Variable(), Variable(), interpolator=CustomInterpolator(), max_beta_train=(2,),
                   training_data=CustomDataStorage(), model_kwargs=CustomKwargs(100, hello=2),
                   misc_states={(): {(): CustomInterpolatorState()}})
     c2 = c.serialize()
@@ -353,7 +353,7 @@ def test_sparse_grid(plots=False):
     # Construct MISC surrogate from an index set
     Ik = [((0,), (0,)), ((0,), (1,)), ((1,), (0,)), ((2,), (0,)), ((1,), (1,)), ((0,), (2,)), ((1,), (2,)),
           ((2,), (1,)), ((2,), (2,))]
-    x = Variable(dist='U(-1, 1)')
+    x = Variable(distribution='U(-1, 1)')
     y = Variable()
     truth_alpha = (15,)
     comp = Component(model, x, y, max_alpha=(2,), max_beta_train=(2,), vectorized=True)
@@ -412,8 +412,8 @@ def test_field_quantity():
 
     dof = 200
     num_samples = 50
-    delta = Variable(dist='U(0, 1)')
-    gamma = Variable(dist='U(1, 2)')
+    delta = Variable(distribution='U(0, 1)')
+    gamma = Variable(distribution='U(1, 2)')
 
     # Compute compression maps from field quantity data
     grid = np.linspace(-1, 1, dof)
@@ -453,7 +453,7 @@ def test_comp_jacobian_and_hessian():
     f2 = lambda theta: np.exp(theta['x2']) * theta['x1'] + np.sin(theta['x3']) * theta['x2']
     fun = lambda theta: {'y1': f1(theta), 'y2': f2(theta)}
 
-    x1, x2, x3 = Variable('x1', dist='U(0, 2)'), Variable('x2', dist='U(-1, 1)'), Variable('x3', dist='U(-3.14, 3.14)')
+    x1, x2, x3 = Variable('x1', distribution='U(0, 2)'), Variable('x2', distribution='U(-1, 1)'), Variable('x3', distribution='U(-3.14, 3.14)')
     y1, y2 = Variable('y1'), Variable('y2')
     max_beta = (4, 4, 5)
 

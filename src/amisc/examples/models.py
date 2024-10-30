@@ -31,42 +31,46 @@ def tanh_func(inputs, A=2, L=1, frac=4):
     return {'y': A * np.tanh(2 / (L/frac) * (inputs['x'] - L/2)) + A + 1}
 
 
-def borehole_func(x, *args, **kwargs):
+def borehole_func(inputs):
     """Model found at https://www.sfu.ca/~ssurjano/borehole.html
+
+    :param inputs: `dict` of input variables `rw`, `r`, `Tu`, `Hu`, `Tl`, `Hl`, `L`, and `Kw`
     :returns vdot: Water flow rate in m^3/yr
     """
-    rw = x[..., 0]      # Radius of borehole (m)
-    r = x[..., 1]       # Radius of influence (m)
-    Tu = x[..., 2]      # Transmissivity (m^2/yr)
-    Hu = x[..., 3]      # Potentiometric head (m)
-    Tl = x[..., 4]      # Transmissivity (m^2/yr)
-    Hl = x[..., 5]      # Potentiometric head (m)
-    L = x[..., 6]       # Length of borehole (m)
-    Kw = x[..., 7]      # Hydraulic conductivity (m/yr)
+    rw = inputs['rw']   # Radius of borehole (m)
+    r = inputs['r']     # Radius of influence (m)
+    Tu = inputs['Tu']   # Transmissivity (m^2/yr)
+    Hu = inputs['Hu']   # Potentiometric head (m)
+    Tl = inputs['Tl']   # Transmissivity (m^2/yr)
+    Hl = inputs['Hl']   # Potentiometric head (m)
+    L = inputs['L']     # Length of borehole (m)
+    Kw = inputs['Kw']   # Hydraulic conductivity (m/yr)
     vdot = 2*np.pi*Tu*(Hu-Hl) / (np.log(r/rw) * (1 + (2*L*Tu/(np.log(r/rw)*Kw*rw**2)) + (Tu/Tl)))
 
-    return {'y': vdot[..., np.newaxis]}
+    return {'vdot': vdot}
 
 
-def wing_weight_func(x, *args, **kwargs):
+def wing_weight_func(inputs):
     """Model found at https://www.sfu.ca/~ssurjano/wingweight.html
+
+    :param inputs: `dict` of input variables `Sw`, `Wfw`, `A`, `Lambda`, `q`, `lamb`, `tc`, `Nz`, `Wdg`, and `Wp`
     :returns Wwing: the weight of the airplane wing (lb)
     """
-    Sw = x[..., 0]      # Wing area (ft^2)
-    Wfw = x[..., 1]     # Weight of fuel (lb)
-    A = x[..., 2]       # Aspect ratio
-    Lambda = x[..., 3]  # Quarter-chord sweep (deg)
-    q = x[..., 4]       # Dynamic pressure (lb/ft^2)
-    lamb = x[..., 5]    # taper ratio
-    tc = x[..., 6]      # Aerofoil thickness to chord ratio
-    Nz = x[..., 7]      # Ultimate load factor
-    Wdg = x[..., 8]     # Design gross weight (lb)
-    Wp = x[..., 9]      # Paint weight (lb/ft^2)
+    Sw = inputs['Sw']           # Wing area (ft^2)
+    Wfw = inputs['Wfw']         # Weight of fuel (lb)
+    A = inputs['A']             # Aspect ratio
+    Lambda = inputs['Lambda']   # Quarter-chord sweep (deg)
+    q = inputs['q']             # Dynamic pressure (lb/ft^2)
+    lamb = inputs['lambda']     # taper ratio
+    tc = inputs['tc']           # Aerofoil thickness to chord ratio
+    Nz = inputs['Nz']           # Ultimate load factor
+    Wdg = inputs['Wdg']         # Design gross weight (lb)
+    Wp = inputs['Wp']           # Paint weight (lb/ft^2)
     Lambda = Lambda*(np.pi/180)
     Wwing = 0.036*(Sw**0.758)*(Wfw**0.0035)*((A/(np.cos(Lambda))**2)**0.6)*(q**0.006)*(lamb**0.04)*\
             (100*tc/np.cos(Lambda))**(-0.3)*((Nz*Wdg)**0.49) + Sw*Wp
 
-    return {'y': Wwing[..., np.newaxis]}
+    return {'Wwing': Wwing}
 
 
 def nonlinear_wave(inputs, env_var=0.1**2, wavelength=0.5, wave_amp=0.1, tanh_amp=0.5, L=1, t=0.25):

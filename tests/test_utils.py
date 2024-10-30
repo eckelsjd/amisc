@@ -139,8 +139,8 @@ def test_dataset_conversion():
     domain = list(zip(np.min(latent, axis=0), np.max(latent, axis=0)))
 
     # Scalar, normalized, and field quantity variables
-    scalar = Variable('scalar', dist='U(0, 1)')
-    norm = Variable('norm', dist='LN(0, 1)', norm='log10')
+    scalar = Variable('scalar', distribution='U(0, 1)')
+    norm = Variable('norm', distribution='LN(0, 1)', norm='log10')
     field = Variable('f', domain=domain, compression=compression)
     vlist = VariableList([scalar, norm, field])
 
