@@ -369,7 +369,6 @@ class Component(BaseModel, Serializable):
                        `Component` attributes -- these should be the _types_ of the serializer objects, which will
                        be inferred from the data passed in if not explicitly set
     :ivar _logger: the logger for the `Component`
-    :ivar _executor: the executor for parallel execution calls
     """
     yaml_tag: ClassVar[str] = u'!Component'
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True,
@@ -401,9 +400,8 @@ class Component(BaseModel, Serializable):
 
     # Internal
     _logger: Optional[logging.Logger] = None
-    _executor: Optional[Executor] = None
 
-    def __init__(self, /, model, *args, inputs=None, outputs=None, executor=None, name=None, **kwargs):
+    def __init__(self, /, model, *args, inputs=None, outputs=None, name=None, **kwargs):
         if name is None:
             name = _inspect_assignment('Component')  # try to assign the name from inspection
         name = name or model.__name__ or "Component_" + "".join(random.choices(string.digits, k=3))
@@ -438,7 +436,6 @@ class Component(BaseModel, Serializable):
 
         # Set internal properties
         assert self.is_downward_closed(self.active_set.union(self.candidate_set))
-        self.executor = executor
         self.set_logger()
 
     @classmethod
@@ -624,15 +621,6 @@ class Component(BaseModel, Serializable):
     def has_surrogate(self) -> bool:
         """The component has no surrogate model if there are no active or candidate indices."""
         return (len(self.max_alpha) + len(self.max_beta)) > 0
-
-    @property
-    def executor(self) -> Executor:
-        """For parallel execution calls."""
-        return self._executor
-
-    @executor.setter
-    def executor(self, executor: Executor):
-        self._executor = executor
 
     @property
     def logger(self) -> logging.Logger:
@@ -859,7 +847,6 @@ class Component(BaseModel, Serializable):
                 output_dict = (output_dict,) if not isinstance(output_dict, tuple) else output_dict
                 output_dict = {out_var.name: output_dict[i] for i, out_var in enumerate(self.outputs)}
         else:
-            executor = executor or self.executor
             if executor is None:  # Serial
                 results = deque(maxlen=N)
                 for i in range(N):
@@ -972,6 +959,7 @@ class Component(BaseModel, Serializable):
                 index_set: Literal['train', 'test'] | IndexSet = 'test',
                 misc_coeff: MiscTree = None,
                 incremental: bool = False,
+                executor: Executor = None,
                 **kwds) -> Dataset:
         """Evaluate the MISC surrogate approximation at new inputs `x`.
 
@@ -992,12 +980,14 @@ class Component(BaseModel, Serializable):
         :param incremental: a special flag to use if the provided `index_set` is an incremental update to the active
                             index set. A temporary copy of the internal `misc_coeff` data structure will be updated
                             and used to incorporate the new indices.
+        :param executor: executor for parallel execution if the model is not vectorized (optional), will use the
+                         executor for looping over MISC coefficients if evaluating the surrogate rather than the model
         :param kwds: additional keyword arguments to pass to the model (if using the underlying model)
         :returns: the surrogate approximation of the model (or the model return itself if `use_model`)
         """
         # Use raw model inputs/outputs
         if use_model is not None:
-            outputs = self.call_model(inputs, alpha=use_model, output_path=model_dir, **kwds)
+            outputs = self.call_model(inputs, alpha=use_model, output_path=model_dir, executor=executor, **kwds)
             ret = {}
             for var in self.outputs:
                 if var in outputs:
@@ -1013,7 +1003,8 @@ class Component(BaseModel, Serializable):
                             for var in self.inputs}
             inputs, field_coords = to_model_dataset(inputs, self.inputs, del_latent=True, **field_coords)
             field_coords.update(kwds)
-            outputs = self.call_model(inputs, alpha=use_model or 'best', output_path=model_dir, **field_coords)
+            outputs = self.call_model(inputs, alpha=use_model or 'best', output_path=model_dir, executor=executor,
+                                      **field_coords)
             outputs, surr_vars = to_surrogate_dataset(outputs, self.outputs, del_fields=True, **field_coords)
             return {str(var): outputs[var] for var in surr_vars}
 
@@ -1038,17 +1029,28 @@ class Component(BaseModel, Serializable):
         y_vars = self._surrogate_outputs()  # Only request this component's specified outputs (ignore all extras)
 
         # Combination technique MISC surrogate prediction
+        results = []
+        coeffs = []
         for alpha, beta in index_set:
             comb_coeff = misc_coeff[alpha, beta]
             if np.abs(comb_coeff) > 0:
-                y = self.interpolator.predict(inputs, self.misc_states.get((alpha, beta)),
-                                              self.training_data.get(alpha, beta[:len(self.max_beta_train)],
-                                                                     skip_nan=True, y_vars=y_vars))
-                for var, arr in y.items():
-                    if outputs.get(var) is None:
-                        outputs[str(var)] = comb_coeff * arr
-                    else:
-                        outputs[str(var)] += comb_coeff * arr
+                coeffs.append(comb_coeff)
+                args = (self.misc_states.get((alpha, beta)),
+                        self.training_data.get(alpha, beta[:len(self.max_beta_train)], skip_nan=True, y_vars=y_vars))
+
+                results.append(self.interpolator.predict(inputs, *args) if executor is None else
+                               executor.submit(self.interpolator.predict, inputs, *args))
+
+        if executor is not None:
+            wait(results, timeout=None, return_when=ALL_COMPLETED)
+            results = [future.result() for future in results]
+
+        for coeff, interp_pred in zip(coeffs, results):
+            for var, arr in interp_pred.items():
+                if outputs.get(var) is None:
+                    outputs[str(var)] = coeff * arr
+                else:
+                    outputs[str(var)] += coeff * arr
 
         return format_outputs(outputs, loop_shape)
 
@@ -1108,7 +1110,6 @@ class Component(BaseModel, Serializable):
             return
 
         # Collect all neighbor candidate indices
-        executor = executor or self.executor
         neighbors = self._neighbors(alpha, beta, forward=True)
         indices = list(itertools.chain([(alpha, beta)] if (alpha, beta) not in self.candidate_set else [], neighbors))
 
@@ -1204,7 +1205,8 @@ class Component(BaseModel, Serializable):
     def gradient(self, inputs: dict | Dataset,
                  index_set: Literal['train', 'test'] | IndexSet = 'test',
                  misc_coeff: MiscTree = None,
-                 derivative: Literal['first', 'second'] = 'first') -> Dataset:
+                 derivative: Literal['first', 'second'] = 'first',
+                 executor: Executor = None) -> Dataset:
         """Evaluate the Jacobian or Hessian of the MISC surrogate approximation at new `inputs`, i.e.
         the first or second derivatives, respectively.
 
@@ -1214,6 +1216,7 @@ class Component(BaseModel, Serializable):
         :param misc_coeff: the data structure holding the MISC coefficients to use, which defaults to the
                            training or testing coefficients depending on the `index_set` parameter.
         :param derivative: whether to compute the first or second derivative (i.e. Jacobian or Hessian)
+        :param executor: executor for looping over MISC coefficients (optional)
         :returns: a `dict` of the Jacobian or Hessian of the surrogate approximation for each output variable
         """
         if not self.has_surrogate:
@@ -1231,17 +1234,28 @@ class Component(BaseModel, Serializable):
         y_vars = self._surrogate_outputs()
 
         # Combination technique MISC gradient prediction
+        results = []
+        coeffs = []
         for alpha, beta in index_set:
             comb_coeff = misc_coeff[alpha, beta]
             if np.abs(comb_coeff) > 0:
+                coeffs.append(comb_coeff)
                 func = self.interpolator.gradient if derivative == 'first' else self.interpolator.hessian
-                out = func(inputs, self.misc_states.get((alpha, beta)),
-                           self.training_data.get(alpha, beta[:len(self.max_beta_train)], skip_nan=True, y_vars=y_vars))
-                for var, arr in out.items():
-                    if outputs.get(var) is None:
-                        outputs[var] = comb_coeff * arr
-                    else:
-                        outputs[var] += comb_coeff * arr
+                args = (self.misc_states.get((alpha, beta)),
+                        self.training_data.get(alpha, beta[:len(self.max_beta_train)], skip_nan=True, y_vars=y_vars))
+
+                results.append(func(inputs, *args) if executor is None else executor.submit(func, inputs, *args))
+
+        if executor is not None:
+            wait(results, timeout=None, return_when=ALL_COMPLETED)
+            results = [future.result() for future in results]
+
+        for coeff, interp_pred in zip(coeffs, results):
+            for var, arr in interp_pred.items():
+                if outputs.get(var) is None:
+                    outputs[str(var)] = coeff * arr
+                else:
+                    outputs[str(var)] += coeff * arr
 
         return format_outputs(outputs, loop_shape)
 

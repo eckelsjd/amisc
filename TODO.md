@@ -8,6 +8,4 @@
 
 - system retroactively add outputs (load training data from saved files)
 
-- profile memory/time of predict for various executors and input sizes
 - profile fit for varying input dimension
-- optimize predict() mainly (fit is overwhelmed by model costs)

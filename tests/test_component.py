@@ -286,10 +286,10 @@ def test_model_wrapper(tmp_path):
 
     # Extra features (alpha, output_path, vars, exceptions, etc.)
     with ProcessPoolExecutor(max_workers=4) as executor:
-        comp = Component(special_model, inputs, outputs, max_alpha=(2,), executor=executor)
+        comp = Component(special_model, inputs, outputs, max_alpha=(2,))
         shape = (5, 2, 2)
         case = {'x1': np.random.rand(*shape), 'x2': np.random.rand(*shape), 'x3': np.random.rand(*shape)}
-        ret = comp.call_model(case, alpha='best', output_path=tmp_path)
+        ret = comp.call_model(case, alpha='best', output_path=tmp_path, executor=executor)
     assert ret['y3'].shape == shape + (15, 2)
     for key in ['y1', 'y2', 'extra_ret', 'model_cost', 'output_path']:
         assert ret[key].shape == shape

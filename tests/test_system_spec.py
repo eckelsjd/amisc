@@ -26,20 +26,18 @@ def test_basic_init(tmp_path):
     comp2 = Component(simple_model, [Variable(l) for l in 'dghi'], [Variable(l) for l in 'jkl'], name='comp2')
     comp3 = Component(simple_model, [Variable(l) for l in 'lmno'], [Variable(l) for l in 'pqra'], name='comp3')
     system = System(comp1, [comp2], comp3)
-    assert list(system.graph.edges()) == [('comp1', 'comp2'), ('comp2', 'comp3'), ('comp3', 'comp1')]
+    assert list(system.graph().edges()) == [('comp1', 'comp2'), ('comp2', 'comp3'), ('comp3', 'comp1')]
     assert system.inputs().keys() == {'b', 'c', 'g', 'h', 'i', 'm', 'n', 'o'}
     assert system.outputs().keys() == {'d', 'e', 'f', 'j', 'k', 'l', 'p', 'q', 'r', 'a'}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        paths = [tmp_path, tmp_path / 'amisc_test']
-        for p in paths:
-            s1 = System(comp1, comp2, comp3, root_dir=p, executor=executor)
-            assert s1.root_dir.name.startswith('amisc_')
-            assert (s1.root_dir / 'surrogates').is_dir()
-            for comp in s1.components:
-                assert (s1.root_dir / 'components' / comp.name).is_dir()
-                assert comp.executor == s1.executor
-                assert comp.logger.handlers[0].baseFilename == s1.logger.handlers[0].baseFilename
+    paths = [tmp_path, tmp_path / 'amisc_test']
+    for p in paths:
+        s1 = System(comp1, comp2, comp3, root_dir=p)
+        assert s1.root_dir.name.startswith('amisc_')
+        assert (s1.root_dir / 'surrogates').is_dir()
+        for comp in s1.components:
+            assert (s1.root_dir / 'components' / comp.name).is_dir()
+            assert comp.logger.handlers[0].baseFilename == s1.logger.handlers[0].baseFilename
 
     serialize_kwargs = {comp.name: {'training_data': {'save_path': tmp_path / f'{comp.name}_training_data.pkl'}}
                         for comp in s1.components}

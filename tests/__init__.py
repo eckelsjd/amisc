@@ -19,4 +19,5 @@ Testing modules:
 Profiling modules:
 
 - `profile_fit` - profile the performance of `System.fit` for various configurations.
+- `profile_predict` - profile the performance of `System.predict` using `py-spy`.
 """
