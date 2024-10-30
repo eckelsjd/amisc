@@ -194,10 +194,8 @@ class System(BaseModel, Serializable):
     :ivar components: list of `Component` models that make up the MD system
     :ivar train_history: history of training iterations for the system surrogate (filled in during training)
 
-    :ivar _graph: internal graph data structure of the MD system
     :ivar _root_dir: root directory where all surrogate build products are saved to file
     :ivar _logger: logger object for the system
-    :ivar _executor: manages parallel execution for the system
     """
     yaml_tag: ClassVar[str] = u'!System'
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True, validate_default=True,
@@ -208,12 +206,10 @@ class System(BaseModel, Serializable):
     train_history: list[dict] | TrainHistory = TrainHistory()
     amisc_version: str = None
 
-    _graph: nx.DiGraph
     _root_dir: Optional[str]
     _logger: Optional[logging.Logger] = None
-    _executor: Optional[Executor]
 
-    def __init__(self, /, *args, components=None, executor=None, root_dir=None, **kwargs):
+    def __init__(self, /, *args, components=None, root_dir=None, **kwargs):
         """Construct a `System` object from a list of `Component` models in `*args` or `components`. If
         a `root_dir` is provided, then a new directory will be created under `root_dir` with the name
         `amisc_{timestamp}`. This directory will be used to save all build products and log files.
@@ -237,8 +233,6 @@ class System(BaseModel, Serializable):
         amisc_version = kwargs.pop('amisc_version', amisc.__version__)
         super().__init__(components=components, amisc_version=amisc_version, **kwargs)
         self.root_dir = root_dir
-        self.executor = executor
-        self.build_graph()
 
     def __repr__(self):
         s = f'---- {self.name} ----\n'
@@ -275,22 +269,20 @@ class System(BaseModel, Serializable):
         else:
             return TrainHistory.deserialize(history)
 
-    def build_graph(self):
+    def graph(self) -> nx.DiGraph:
         """Build a directed graph of the system components based on their input-output relationships."""
-        self._graph = nx.DiGraph()
+        graph = nx.DiGraph()
         model_deps = {}
         for comp in self.components:
-            self._graph.add_node(comp.name, component=comp)
+            graph.add_node(comp.name)
             for output in comp.outputs:
                 model_deps[output] = comp.name
         for comp in self.components:
             for in_var in comp.inputs:
                 if in_var in model_deps:
-                    self._graph.add_edge(model_deps[in_var], comp.name)
+                    graph.add_edge(model_deps[in_var], comp.name)
 
-    @property
-    def graph(self) -> nx.DiGraph:
-        return self._graph
+        return graph
 
     def _save_on_error(func):
         """Gracefully exit and save the `System` object on any errors."""
@@ -312,20 +304,17 @@ class System(BaseModel, Serializable):
         """Insert new components into the system."""
         components = components if isinstance(components, list) else [components]
         self.components = self.components + components
-        self.build_graph()
 
     def swap_component(self, old_component: str | Component, new_component: Callable | Component):
         """Replace an old component with a new component."""
         old_name = old_component if isinstance(old_component, str) else old_component.name
         comps = [comp if comp.name != old_name else new_component for comp in self.components]
         self.components = comps
-        self.build_graph()
 
     def remove_component(self, component: str | Component):
         """Remove a component from the system."""
         comp_name = component if isinstance(component, str) else component.name
         self.components = [comp for comp in self.components if comp.name != comp_name]
-        self.build_graph()
 
     def inputs(self) -> VariableList:
         """Collect all inputs from each component in the `System` and combine them into a
@@ -363,17 +352,6 @@ class System(BaseModel, Serializable):
     def refine_level(self) -> int:
         """The total number of training iterations."""
         return len(self.train_history)
-
-    @property
-    def executor(self) -> Executor:
-        """An instance of `concurrent.futures.Executor` to manage parallel execution of the system."""
-        return self._executor
-
-    @executor.setter
-    def executor(self, executor: Executor):
-        self._executor = executor
-        for comp in self.components:
-            comp.executor = executor
 
     @property
     def logger(self) -> logging.Logger:
@@ -645,8 +623,8 @@ class System(BaseModel, Serializable):
                                  should at least allow one iteration per component before checking test set error
         :param plot_interval: how often to plot the error indicator and test set error (defaults to every iteration);
                               will only plot and save to file if a root directory is set
-        :param executor: a `concurrent.futures.Executor` object to parallelize the refinement process (defaults to
-                         `system.executor` if available)
+        :param executor: a `concurrent.futures.Executor` object to parallelize model evaluations (optional, but
+                         recommended for expensive models)
         """
         start_test_check = start_test_check or 2 * len(self.components)
         targets = targets or self.outputs()
@@ -780,13 +758,11 @@ class System(BaseModel, Serializable):
         :param targets: list of system output variables to focus refinement on, use all outputs if not specified
         :param num_refine: number of input samples to compute error indicators on
         :param update_bounds: whether to continuously update coupling variable bounds during refinement
-        :param executor: a `concurrent.futures.Executor` object to parallelize the refinement process (defaults to
-                         `system.executor` if available)
+        :param executor: a `concurrent.futures.Executor` object to parallelize model evaluations
         :returns: `dict` of the refinement results indicating the chosen component and candidate index
         """
         self._print_title_str(f'Refining system surrogate: iteration {self.refine_level + 1}')
         targets = targets or self.outputs()
-        executor = executor or self.executor
 
         # Check for uninitialized components and refine those first
         for comp in self.components:
@@ -901,6 +877,7 @@ class System(BaseModel, Serializable):
                 normalized_inputs: bool = True,
                 incremental: dict[str, bool] = False,
                 targets: list[str] = None,
+                executor: Executor = None,
                 var_shape: dict[str, tuple] = None) -> Dataset:
         """Evaluate the system surrogate at inputs `x`. Return `y = system(x)`.
 
@@ -931,6 +908,7 @@ class System(BaseModel, Serializable):
                             this will set `index_set='train'` for all other components (since incremental will
                             augment the "training" active sets, not the "testing" candidate sets)
         :param targets: list of output variables to return, defaults to returning all system outputs
+        :param executor: a `concurrent.futures.Executor` object to parallelize model evaluations
         :param var_shape: (Optional) `dict` of shapes for field quantity inputs in `x` -- you would only specify this
                           if passing field qtys directly to the models (i.e. not using `sample_inputs`)
         :returns: `dict` of output variables - the surrogate approximation of the system outputs (or the true model)
@@ -944,6 +922,7 @@ class System(BaseModel, Serializable):
         t1 = 0
         output_dir = None
         norm_status = {var: normalized_inputs for var in x}  # keep track of whether inputs are normalized or not
+        graph = self.graph()
 
         # Keep track of what outputs are computed
         is_computed = {}
@@ -959,16 +938,15 @@ class System(BaseModel, Serializable):
             """Helper to set a default value for each component key in a `dict`. Ensures all components have a value."""
             if struct is not None:
                 if not isinstance(struct, dict):
-                    struct = {node: struct for node in self.graph.nodes}  # use same for each component
+                    struct = {node: struct for node in graph.nodes}  # use same for each component
             else:
-                struct = {node: default for node in self.graph.nodes}
-            return {node: struct.get(node, default) for node in self.graph.nodes}
+                struct = {node: default for node in graph.nodes}
+            return {node: struct.get(node, default) for node in graph.nodes}
 
         # Ensure use_model, index_set, and incremental are specified for each component model
         use_model = _set_default(use_model, None)
-        incremental = _set_default(incremental, False)
-        index_set = _set_default(index_set, 'train' if any([incremental[node] for node in self.graph.nodes
-                                                            ]) else 'test')  # default to train if incremental anywhere
+        incremental = _set_default(incremental, False)  # default to train if incremental anywhere
+        index_set = _set_default(index_set, 'train' if any([incremental[node] for node in graph.nodes]) else 'test')
         misc_coeff = _set_default(misc_coeff, None)
 
         samples = _Converged(N)  # track convergence of samples
@@ -1025,7 +1003,7 @@ class System(BaseModel, Serializable):
             return comp_input, kwds, call_model
 
         # Convert system into DAG by grouping strongly-connected-components
-        dag = nx.condensation(self.graph)
+        dag = nx.condensation(graph)
 
         # Compute component models in topological order
         for supernode in nx.topological_sort(dag):
@@ -1052,7 +1030,7 @@ class System(BaseModel, Serializable):
                         os.mkdir(output_dir)
                 comp_output = comp.predict(comp_input, use_model=use_model.get(scc[0]), model_dir=output_dir,
                                            index_set=index_set.get(scc[0]), incremental=incremental.get(scc[0]),
-                                           misc_coeff=misc_coeff.get(scc[0]), **kwds)
+                                           misc_coeff=misc_coeff.get(scc[0]), executor=executor, **kwds)
                 for var, arr in comp_output.items():
                     output_shape = arr.shape[1:]
                     if y.get(var) is None:
@@ -1139,7 +1117,7 @@ class System(BaseModel, Serializable):
                         # Compute outputs (just don't do this FPI with expensive real models, please..)
                         comp_output = comp.predict(comp_input, use_model=use_model.get(node), model_dir=None,
                                                    index_set=index_set.get(node), incremental=incremental.get(node),
-                                                   misc_coeff=misc_coeff.get(node), **kwds)
+                                                   misc_coeff=misc_coeff.get(node), executor=executor, **kwds)
                         for var, arr in comp_output.items():
                             output_shape = arr.shape[1:]
                             if y.get(var) is not None:
@@ -1217,17 +1195,23 @@ class System(BaseModel, Serializable):
         """Return the `Component` object for this component.
 
         :param comp_name: name of the component to return
+        :raises: `KeyError` if the component does not exist
         :returns: the `Component` object
         """
-        comp = self if comp_name.lower() == 'system' else self.graph.nodes[comp_name]['component']
-        return comp
+        if comp_name.lower() == 'system':
+            return self
+        else:
+            for comp in self.components:
+                if comp.name == comp_name:
+                    return comp
+            raise KeyError(f"Component '{comp_name}' not found in system.")
 
     def _print_title_str(self, title_str: str):
         """Log an important message."""
         self.logger.info('-' * int(len(title_str)/2) + title_str + '-' * int(len(title_str)/2))
 
     def _remove_unpickleable(self) -> dict:
-        """Remove and return unpickleable attributes before pickling (just the executor and logger)."""
+        """Remove and return unpickleable attributes before pickling (just the logger)."""
         stdout = False
         log_file = None
         if self._logger is not None:
@@ -1240,14 +1224,12 @@ class System(BaseModel, Serializable):
                     log_file = handler.baseFilename
                     break
 
-        buffer = {'executor': self.executor, 'log_stdout': stdout, 'log_file': log_file}
-        self.executor = None
+        buffer = {'log_stdout': stdout, 'log_file': log_file}
         self.logger = None
         return buffer
 
     def _restore_unpickleable(self, buffer: dict):
         """Restore the unpickleable attributes from `buffer` after unpickling."""
-        self.executor = buffer.get('executor', None)
         self.set_logger(log_file=buffer.get('log_file', None), stdout=buffer.get('log_stdout', None))
 
     def _get_test_set(self, test_set: str | Path | tuple = None) -> tuple:
@@ -1328,6 +1310,7 @@ class System(BaseModel, Serializable):
                    show_surr: bool = True,
                    show_model: list = None,
                    model_dir: str | Path = None,
+                   executor: Executor = None,
                    nominal: dict[str: float] = None,
                    random_walk: bool = False,
                    from_file: str | Path = None,
@@ -1345,6 +1328,7 @@ class System(BaseModel, Serializable):
         :param show_surr: whether to show the surrogate prediction
         :param show_model: also plot model predictions, `list` of ['best', 'worst', tuple(alpha), etc.]
         :param model_dir: base directory to save model outputs (if specified)
+        :param executor: a `concurrent.futures.Executor` object to parallelize model or surrogate evaluations
         :param nominal: `dict` of `var->nominal` to use as constant values for all non-sliced variables (use
                         unnormalized values only; use `var_LATENT0` to specify nominal latent values)
         :param random_walk: whether to slice in a random d-dimensional direction instead of holding all non-slice
@@ -1436,9 +1420,11 @@ class System(BaseModel, Serializable):
                         output_dir = (Path(model_dir) / f'sweep_{rand_id}' /
                                       str(model).replace('{', '').replace('}', '').replace(':', '=').replace("'", ''))
                         os.mkdir(output_dir)
-                    output_slices_model.append(self.predict(input_slices, use_model=model, model_dir=output_dir))
+                    output_slices_model.append(self.predict(input_slices, use_model=model, model_dir=output_dir,
+                                                            executor=executor))
         if show_surr:
-            output_slices_surr = self.predict(input_slices) if from_file is None else slice_data['output_slices_surr']
+            output_slices_surr = self.predict(input_slices, executor=executor) \
+                if from_file is None else slice_data['output_slices_surr']
 
         # Make len(outputs) by len(inputs) grid of subplots
         fig, axs = plt.subplots(len(outputs), len(inputs), sharex='col', sharey='row', squeeze=False)

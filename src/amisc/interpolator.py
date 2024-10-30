@@ -15,6 +15,7 @@ import copy
 import itertools
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from tabnanny import check
 
 import numpy as np
 
@@ -232,6 +233,7 @@ class Lagrange(Interpolator, StringSerializable):
 
         diff = x_arr[..., np.newaxis] - x_j
         div_zero_idx = np.isclose(diff, 0, rtol=1e-4, atol=1e-8)
+        check_interp_pts = np.sum(div_zero_idx) > 0     # whether we are evaluating directly on some interp pts
         diff[div_zero_idx] = 1
         quotient = w_j / diff                           # (..., xdim, Nx)
         qsum = np.nansum(quotient, axis=-1)             # (..., xdim)
@@ -241,16 +243,16 @@ class Lagrange(Interpolator, StringSerializable):
         indices = [range(s) for s in grid_sizes.values()]
         for i, j in enumerate(itertools.product(*indices)):
             L_j = quotient[..., dims, j] / qsum         # (..., xdim)
-            other_pts = np.copy(div_zero_idx)
-            other_pts[div_zero_idx[..., dims, j]] = False
 
             # Set L_j(x==x_j)=1 for the current j and set L_j(x==x_j)=0 for x_j = x_i, i != j
-            L_j[div_zero_idx[..., dims, j]] = 1
-            L_j[np.any(other_pts, axis=-1)] = 0
+            if check_interp_pts:
+                other_pts = np.copy(div_zero_idx)
+                other_pts[div_zero_idx[..., dims, j]] = False
+                L_j[div_zero_idx[..., dims, j]] = 1
+                L_j[np.any(other_pts, axis=-1)] = 0
 
             # Add multivariate basis polynomial contribution to interpolation output
-            L_j = np.prod(L_j, axis=-1, keepdims=True)  # (..., 1)
-            y += L_j * yi_arr[i, :]
+            y += np.prod(L_j, axis=-1, keepdims=True) * yi_arr[i, :]
 
         # Unpack the outputs back into a Dataset
         y_ret = {}
@@ -286,6 +288,7 @@ class Lagrange(Interpolator, StringSerializable):
         # Compute values ahead of time that will be needed for the gradient
         diff = x_arr[..., np.newaxis] - x_j
         div_zero_idx = np.isclose(diff, 0, rtol=1e-4, atol=1e-8)
+        check_interp_pts = np.sum(div_zero_idx) > 0
         diff[div_zero_idx] = 1
         quotient = w_j / diff                               # (..., xdim, Nx)
         qsum = np.nansum(quotient, axis=-1)                 # (..., xdim)
@@ -299,26 +302,27 @@ class Lagrange(Interpolator, StringSerializable):
             for i, j in enumerate(itertools.product(*indices)):
                 j_dims = [j[idx] for idx in dims]
                 L_j = quotient[..., dims, j_dims] / qsum[..., dims]  # (..., xdim-1)
-                other_pts = np.copy(div_zero_idx)
-                other_pts[div_zero_idx[..., list(range(xdim)), j]] = False
-
-                # Set L_j(x==x_j)=1 for the current j and set L_j(x==x_j)=0 for x_j = x_i, i != j
-                L_j[div_zero_idx[..., dims, j_dims]] = 1
-                L_j[np.any(other_pts[..., dims, :], axis=-1)] = 0
 
                 # Partial derivative of L_j with respect to x_k
                 dLJ_dx = ((w_j[k, j[k]] / (qsum[..., k] * diff[..., k, j[k]])) *
                           (sqsum[..., k] / qsum[..., k] - 1 / diff[..., k, j[k]]))
 
-                # Set derivatives when x is at the interpolation points (i.e. x==x_j)
-                p_idx = [idx for idx in range(grid_sizes[var]) if idx != j[k]]
-                w_j_large = np.broadcast_to(w_j[k, :], x_arr.shape[:-1] + w_j.shape[-1:]).copy()
-                curr_j_idx = div_zero_idx[..., k, j[k]]
-                other_j_idx = np.any(other_pts[..., k, :], axis=-1)
-                dLJ_dx[curr_j_idx] = -np.nansum((w_j[k, p_idx] / w_j[k, j[k]]) /
-                                                (x_arr[curr_j_idx, k, np.newaxis] - x_j[k, p_idx]), axis=-1)
-                dLJ_dx[other_j_idx] = ((w_j[k, j[k]] / w_j_large[other_pts[..., k, :]]) /
-                                       (x_arr[other_j_idx, k] - x_j[k, j[k]]))
+                # Set L_j(x==x_j)=1 for the current j and set L_j(x==x_j)=0 for x_j = x_i, i != j
+                if check_interp_pts:
+                    other_pts = np.copy(div_zero_idx)
+                    other_pts[div_zero_idx[..., list(range(xdim)), j]] = False
+                    L_j[div_zero_idx[..., dims, j_dims]] = 1
+                    L_j[np.any(other_pts[..., dims, :], axis=-1)] = 0
+
+                    # Set derivatives when x is at the interpolation points (i.e. x==x_j)
+                    p_idx = [idx for idx in range(grid_sizes[var]) if idx != j[k]]
+                    w_j_large = np.broadcast_to(w_j[k, :], x_arr.shape[:-1] + w_j.shape[-1:]).copy()
+                    curr_j_idx = div_zero_idx[..., k, j[k]]
+                    other_j_idx = np.any(other_pts[..., k, :], axis=-1)
+                    dLJ_dx[curr_j_idx] = -np.nansum((w_j[k, p_idx] / w_j[k, j[k]]) /
+                                                    (x_arr[curr_j_idx, k, np.newaxis] - x_j[k, p_idx]), axis=-1)
+                    dLJ_dx[other_j_idx] = ((w_j[k, j[k]] / w_j_large[other_pts[..., k, :]]) /
+                                           (x_arr[other_j_idx, k] - x_j[k, j[k]]))
 
                 dLJ_dx = np.expand_dims(dLJ_dx, axis=-1) * np.prod(L_j, axis=-1, keepdims=True)  # (..., 1)
 
@@ -360,6 +364,7 @@ class Lagrange(Interpolator, StringSerializable):
         # Compute values ahead of time that will be needed for the gradient
         diff = x_arr[..., np.newaxis] - x_j
         div_zero_idx = np.isclose(diff, 0, rtol=1e-4, atol=1e-8)
+        check_interp_pts = np.sum(div_zero_idx) > 0
         diff[div_zero_idx] = 1
         quotient = w_j / diff                                       # (..., xdim, Nx)
         qsum = np.nansum(quotient, axis=-1)                         # (..., xdim)
@@ -375,12 +380,13 @@ class Lagrange(Interpolator, StringSerializable):
                 for i, j in enumerate(itertools.product(*indices)):
                     j_dims = [j[idx] for idx in dims]
                     L_j = quotient[..., dims, j_dims] / qsum[..., dims]  # (..., xdim-2)
-                    other_pts = np.copy(div_zero_idx)
-                    other_pts[div_zero_idx[..., list(range(xdim)), j]] = False
 
                     # Set L_j(x==x_j)=1 for the current j and set L_j(x==x_j)=0 for x_j = x_i, i != j
-                    L_j[div_zero_idx[..., dims, j_dims]] = 1
-                    L_j[np.any(other_pts[..., dims, :], axis=-1)] = 0
+                    if check_interp_pts:
+                        other_pts = np.copy(div_zero_idx)
+                        other_pts[div_zero_idx[..., list(range(xdim)), j]] = False
+                        L_j[div_zero_idx[..., dims, j_dims]] = 1
+                        L_j[np.any(other_pts[..., dims, :], axis=-1)] = 0
 
                     # Cross-terms in Hessian
                     if m != n:
@@ -391,14 +397,15 @@ class Lagrange(Interpolator, StringSerializable):
                                       (-qsum_p[..., k] / qsum[..., k] - 1 / diff[..., k, j[k]]))
 
                             # Set derivatives when x is at the interpolation points (i.e. x==x_j)
-                            p_idx = [idx for idx in range(grid_size_list[k]) if idx != j[k]]
-                            w_j_large = np.broadcast_to(w_j[k, :], x_arr.shape[:-1] + w_j.shape[-1:]).copy()
-                            curr_j_idx = div_zero_idx[..., k, j[k]]
-                            other_j_idx = np.any(other_pts[..., k, :], axis=-1)
-                            dLJ_dx[curr_j_idx] = -np.nansum((w_j[k, p_idx] / w_j[k, j[k]]) /
-                                                            (x_arr[curr_j_idx, k, np.newaxis] - x_j[k, p_idx]), axis=-1)
-                            dLJ_dx[other_j_idx] = ((w_j[k, j[k]] / w_j_large[other_pts[..., k, :]]) /
-                                                   (x_arr[other_j_idx, k] - x_j[k, j[k]]))
+                            if check_interp_pts:
+                                p_idx = [idx for idx in range(grid_size_list[k]) if idx != j[k]]
+                                w_j_large = np.broadcast_to(w_j[k, :], x_arr.shape[:-1] + w_j.shape[-1:]).copy()
+                                curr_j_idx = div_zero_idx[..., k, j[k]]
+                                other_j_idx = np.any(other_pts[..., k, :], axis=-1)
+                                dLJ_dx[curr_j_idx] = -np.nansum((w_j[k, p_idx] / w_j[k, j[k]]) /
+                                                                (x_arr[curr_j_idx, k, np.newaxis] - x_j[k, p_idx]), axis=-1)
+                                dLJ_dx[other_j_idx] = ((w_j[k, j[k]] / w_j_large[other_pts[..., k, :]]) /
+                                                       (x_arr[other_j_idx, k] - x_j[k, j[k]]))
 
                             d2LJ_dx2 *= dLJ_dx
 
@@ -415,33 +422,34 @@ class Lagrange(Interpolator, StringSerializable):
                         d2LJ_dx2 = front_term * (first_term + second_term)
 
                         # Set derivatives when x is at the interpolation points (i.e. x==x_j)
-                        curr_j_idx = div_zero_idx[..., m, j[m]]
-                        other_j_idx = np.any(other_pts[..., m, :], axis=-1)
-                        if np.any(curr_j_idx) or np.any(other_j_idx):
-                            p_idx = [idx for idx in range(grid_size_list[m]) if idx != j[m]]
-                            w_j_large = np.broadcast_to(w_j[m, :], x_arr.shape[:-1] + w_j.shape[-1:]).copy()
-                            x_j_large = np.broadcast_to(x_j[m, :], x_arr.shape[:-1] + x_j.shape[-1:]).copy()
+                        if check_interp_pts:
+                            curr_j_idx = div_zero_idx[..., m, j[m]]
+                            other_j_idx = np.any(other_pts[..., m, :], axis=-1)
+                            if np.any(curr_j_idx) or np.any(other_j_idx):
+                                p_idx = [idx for idx in range(grid_size_list[m]) if idx != j[m]]
+                                w_j_large = np.broadcast_to(w_j[m, :], x_arr.shape[:-1] + w_j.shape[-1:]).copy()
+                                x_j_large = np.broadcast_to(x_j[m, :], x_arr.shape[:-1] + x_j.shape[-1:]).copy()
 
-                            # if these points are at the current j interpolation point
-                            d2LJ_dx2[curr_j_idx] = (2 * np.nansum((w_j[m, p_idx] / w_j[m, j[m]]) /
-                                                                  (x_arr[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]),
-                                                                  axis=-1) ** 2 +  # noqa: E501
-                                                    2 * np.nansum((w_j[m, p_idx] / w_j[m, j[m]]) /
-                                                                  (x_arr[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]) ** 2,
-                                                                  axis=-1))  # noqa: E501
+                                # if these points are at the current j interpolation point
+                                d2LJ_dx2[curr_j_idx] = (2 * np.nansum((w_j[m, p_idx] / w_j[m, j[m]]) /
+                                                                      (x_arr[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]),
+                                                                      axis=-1) ** 2 +  # noqa: E501
+                                                        2 * np.nansum((w_j[m, p_idx] / w_j[m, j[m]]) /
+                                                                      (x_arr[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]) ** 2,
+                                                                      axis=-1))  # noqa: E501
 
-                            # if these points are at any other interpolation point
-                            other_pts_inv = other_pts.copy()
-                            other_pts_inv[other_j_idx, m, :grid_size_list[m]] = np.invert(
-                                other_pts[other_j_idx, m, :grid_size_list[m]])  # noqa: E501
-                            curr_x_j = x_j_large[other_pts[..., m, :]].reshape((-1, 1))
-                            other_x_j = x_j_large[other_pts_inv[..., m, :]].reshape((-1, len(p_idx)))
-                            curr_w_j = w_j_large[other_pts[..., m, :]].reshape((-1, 1))
-                            other_w_j = w_j_large[other_pts_inv[..., m, :]].reshape((-1, len(p_idx)))
-                            curr_div = w_j[m, j[m]] / np.squeeze(curr_w_j, axis=-1)
-                            curr_diff = np.squeeze(curr_x_j, axis=-1) - x_j[m, j[m]]
-                            d2LJ_dx2[other_j_idx] = ((-2 * curr_div / curr_diff) * (np.nansum(
-                                (other_w_j / curr_w_j) / (curr_x_j - other_x_j), axis=-1) + 1 / curr_diff))
+                                # if these points are at any other interpolation point
+                                other_pts_inv = other_pts.copy()
+                                other_pts_inv[other_j_idx, m, :grid_size_list[m]] = np.invert(
+                                    other_pts[other_j_idx, m, :grid_size_list[m]])  # noqa: E501
+                                curr_x_j = x_j_large[other_pts[..., m, :]].reshape((-1, 1))
+                                other_x_j = x_j_large[other_pts_inv[..., m, :]].reshape((-1, len(p_idx)))
+                                curr_w_j = w_j_large[other_pts[..., m, :]].reshape((-1, 1))
+                                other_w_j = w_j_large[other_pts_inv[..., m, :]].reshape((-1, len(p_idx)))
+                                curr_div = w_j[m, j[m]] / np.squeeze(curr_w_j, axis=-1)
+                                curr_diff = np.squeeze(curr_x_j, axis=-1) - x_j[m, j[m]]
+                                d2LJ_dx2[other_j_idx] = ((-2 * curr_div / curr_diff) * (np.nansum(
+                                    (other_w_j / curr_w_j) / (curr_x_j - other_x_j), axis=-1) + 1 / curr_diff))
 
                         d2LJ_dx2 = np.expand_dims(d2LJ_dx2, axis=-1) * np.prod(L_j, axis=-1, keepdims=True)  # (..., 1)
                         hess[..., m, n] += d2LJ_dx2 * yi_arr[i, :]
