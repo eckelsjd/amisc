@@ -287,7 +287,7 @@ class SparseGrid(TrainingData, PickleSerializable):
                     yi = np.atleast_1d(y_interp[0, start_idx:end_idx]).reshape(var_shape)
                     nan_idx = np.isnan(np.atleast_1d(yi_dict[var]))
                     yi[~nan_idx] = np.atleast_1d(yi_dict[var])[~nan_idx]  # Only keep imputed values where yi is nan
-                    y_impute[var] = float(yi) if self._is_singleton(yi) else yi.tolist()
+                    y_impute[var] = float(yi[0]) if self._is_singleton(yi) else yi.tolist()
                     start_idx = end_idx
 
                 self.yi_nan_map[alpha][coord] = copy.deepcopy(y_impute)

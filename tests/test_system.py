@@ -44,10 +44,10 @@ def test_feedforward_three(plots=False):
     """Test the MD system in Figure 6 in Jakeman 2022."""
     def coupled_system(D1, D2, Q1, Q2):
         """Scalable number of inputs (D1, D2) and outputs (Q1, Q2)."""
-        def f1(inputs, alpha=None):
-            if alpha is None:
-                alpha = np.ones((1, 1)) * 15
-            eps = 10. ** (-alpha[..., 0])
+        def f1(inputs, model_fidelity=None):
+            if model_fidelity is None:
+                model_fidelity = np.ones((1, 1)) * 15
+            eps = 10. ** (-model_fidelity[..., 0])
             outputs = {}
             for q in range(1, Q1+1):
                 sum = np.sum(np.concatenate([inputs[f'z1_{i}'][np.newaxis, ...] for i in range(1, D1+1)],
@@ -55,7 +55,8 @@ def test_feedforward_three(plots=False):
                 outputs[f'y1_{q}'] = inputs['z1_1'] ** q * np.sin(sum + eps)
             return outputs
 
-        def f2(inputs, alpha=None):
+        def f2(inputs, model_fidelity=None):
+            alpha = model_fidelity
             if alpha is None:
                 alpha = np.ones((1, 1)) * 15
             eps = 10. ** (-alpha[..., 0])
@@ -68,7 +69,8 @@ def test_feedforward_three(plots=False):
                 outputs[f'y2_{q}'] = prod1 * prod2
             return outputs
 
-        def f3(inputs, alpha=None, D3=D1):
+        def f3(inputs, model_fidelity=None, D3=D1):
+            alpha = model_fidelity
             if alpha is None:
                 alpha = np.ones((1, 1)) * 15
             eps = 10. ** (-alpha[..., 0])
@@ -91,9 +93,9 @@ def test_feedforward_three(plots=False):
     outputs = ([Variable(f'y1_{i}') for i in range(1, Q1+1)] + [Variable(f'y2_{i}') for i in range(1, Q2+1)] +
                [Variable('y3_1')])
     f1, f2, f3 = coupled_system(D1, D2, Q1, Q2)
-    comp1 = Component(f1, inputs[:D1], outputs[:Q1], vectorized=True, max_alpha=alpha)
-    comp2 = Component(f2, inputs[D1:] + outputs[:Q1], outputs[Q1:Q1+Q2], vectorized=True, max_alpha=alpha)
-    comp3 = Component(f3, inputs[:D1] + outputs[Q1:Q1+Q2], outputs[Q1+Q2:], vectorized=True, max_alpha=alpha)
+    comp1 = Component(f1, inputs[:D1], outputs[:Q1], vectorized=True, model_fidelity=alpha)
+    comp2 = Component(f2, inputs[D1:] + outputs[:Q1], outputs[Q1:Q1+Q2], vectorized=True, model_fidelity=alpha)
+    comp3 = Component(f3, inputs[:D1] + outputs[Q1:Q1+Q2], outputs[Q1+Q2:], vectorized=True, model_fidelity=alpha)
     surr = System(comp1, comp2, comp3)
 
     # Test example
@@ -179,8 +181,8 @@ def test_system_refine(plots=False):
     from amisc.examples.models import f1, f2
 
     beta_max = (4,)
-    surr = System(Component(f1, name='f1', vectorized=True, max_beta_train=beta_max),
-                  Component(f2, name='f2', vectorized=True, max_beta_train=beta_max))
+    surr = System(Component(f1, name='f1', vectorized=True, data_fidelity=beta_max),
+                  Component(f2, name='f2', vectorized=True, data_fidelity=beta_max))
 
     for var in surr.variables():
         var.domain = (0, 1)
@@ -263,8 +265,8 @@ def test_simulate_fit():
     from amisc.examples.models import f1, f2
 
     beta_max = (4,)
-    surr = System(Component(f1, name='f1', vectorized=True, max_beta_train=beta_max),
-                  Component(f2, name='f2', vectorized=True, max_beta_train=beta_max))
+    surr = System(Component(f1, name='f1', vectorized=True, data_fidelity=beta_max),
+                  Component(f2, name='f2', vectorized=True, data_fidelity=beta_max))
 
     for var in surr.variables():
         var.domain = (0, 1)
@@ -309,7 +311,7 @@ def test_fit_with_executor(model_cost=1, max_iter=5, max_workers=8):
     inputs = [Variable('x1', distribution='U(0, 1)'), Variable('x2', distribution='U(0, 1)'),
               Variable('x3', distribution='U(0, 1)')]
     outputs = Variable('y')
-    comp = Component(expensive_model, inputs, outputs, max_beta_train=(3, 3, 3), model_cost=model_cost)
+    comp = Component(expensive_model, inputs, outputs, data_fidelity=(3, 3, 3), model_cost=model_cost)
     surr = System(comp)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -388,15 +390,15 @@ def test_turbojet_cycle(tmp_path):
         pressure_distribution = base_pressure + (modified_velocity * pressure_boost_factor)
         return {'v2': modified_velocity, 'p1': pressure_distribution}
 
-    def combuster(inputs, alpha=None):
+    def combuster(inputs, model_fidelity=None):
         """Simple combuster model.
 
         :param inputs: `dict` of `v2` and `Ta` for compressor outlet velocity and ambient temperature.
-        :param alpha: `tuple` of fidelity levels for combustion factor and temperature effect
+        :param model_fidelity: `tuple` of fidelity levels for combustion factor and temperature effect
         :returns: `dict` of outlet velocity `v3`
         """
         # Fidelity levels for combustion factor and external input effect
-        alpha = alpha or (3, 3)
+        alpha = model_fidelity or (3, 3)
         combustion_factor = 1.5 + 0.5 * alpha[0]
         temperature_factor = 0.05 + 0.03 * alpha[1]
 
@@ -405,15 +407,15 @@ def test_turbojet_cycle(tmp_path):
 
         return {'v3': outlet_velocity}
 
-    def turbine(inputs, alpha=None):
+    def turbine(inputs, model_fidelity=None):
         """Simple turbine model.
 
         :param inputs: `dict` of `v3` and `eta_t` for combuster outlet velocity and blade efficiency.
-        :param alpha: `tuple` of fidelity levels for turbine efficiency and other effects.
+        :param model_fidelity: `tuple` of fidelity levels for turbine efficiency and other effects.
         :returns: `dict` of exit velocity `v4`
         """
         # Fidelity levels for turbine efficiency and other effects
-        alpha = alpha or (3,)
+        alpha = model_fidelity or (3,)
         turbine_efficiency = 0.7 + 0.1 * alpha[0]
         pressure_effect = 0.01 + 0.005 * alpha[0]
         efficiency_effect = 0.01 + 0.005 * alpha[0]
@@ -457,8 +459,8 @@ def test_turbojet_cycle(tmp_path):
 
     # Define components
     comp1 = Component(compressor, [Ta, v1], [v2, p1], name='Compressor')
-    comp2 = Component(combuster, [Ta, v2], [v3], max_beta_train=(2, 2), max_alpha=(3, 3), name='Combuster')
-    comp3 = Component(turbine, [eta_t, v3, p1], [v4], max_beta_train=(2, 2, 2), max_alpha=(3,), name='Turbine')
+    comp2 = Component(combuster, [Ta, v2], [v3], data_fidelity=(2, 2), model_fidelity=(3, 3), name='Combuster')
+    comp3 = Component(turbine, [eta_t, v3, p1], [v4], data_fidelity=(2, 2, 2), model_fidelity=(3,), name='Turbine')
     system = System(comp1, comp2, comp3, root_dir=tmp_path)
 
     # Generate compression data

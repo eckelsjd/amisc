@@ -3,7 +3,7 @@ name: FireSat
 components: !Component
   - name: 'Orbit'
     model: !!python/name:amisc.examples.models.orbit_fun
-    max_beta_train: (2, 2)
+    data_fidelity: (2, 2)
     inputs: !VariableList
       - name: H
         distribution: N(18e6, 1e6)
@@ -21,8 +21,8 @@ components: !Component
         units: rad
   - name: 'Power'
     model: !!python/name:amisc.examples.models.power_fun
-    max_alpha: (2,)
-    max_beta_train: (2, 2, 2, 2, 2)
+    model_fidelity: (2,)
+    data_fidelity: (2, 2, 2, 2, 2)
     inputs: !VariableList
       - name: Po
         distribution: N(1000, 50)
@@ -45,8 +45,8 @@ components: !Component
         domain: (5, 15)
   - name: 'Attitude'
     model: !!python/name:amisc.examples.models.attitude_fun
-    max_alpha: (2,)
-    max_beta_train: (2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
+    model_fidelity: (2,)
+    data_fidelity: (2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
     inputs: !VariableList
       - name: H
       - name: Fs

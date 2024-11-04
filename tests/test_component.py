@@ -81,8 +81,8 @@ def test_misctree():
     assert MiscTree.deserialize(tree.serialize()) == tree
 
 
-def simple_model(x, alpha=(1,), error=0.1, output_path='.'):
-    return alpha * error + x ** 2
+def simple_model(x, model_fidelity=(1,), error=0.1, output_path='.'):
+    return model_fidelity[0] * error + x ** 2
 
 
 def test_component_validation(tmp_path):
@@ -115,7 +115,7 @@ def test_component_validation(tmp_path):
             misc_states[alpha][beta] = LagrangeState(weights={'x': np.random.rand(3)}, x_grids={'x': np.random.rand(3)})
 
     c = Component(simple_model, variables[:5], outputs=variables[5:],
-                  model_kwargs={'error': 0.2}, max_alpha=(2,), max_beta_train=(3, 2), max_beta_interpolator=(3, 3),
+                  model_kwargs={'error': 0.2}, model_fidelity=(2,), data_fidelity=(3, 2), surrogate_fidelity=(3, 3),
                   active_set=active_set, misc_states=misc_states, misc_costs=misc_costs)
     serialize_kwargs = {'training_data': {'save_path': tmp_path / 'training_data.pkl'}}
     c2 = c.serialize(serialize_kwargs=serialize_kwargs)
@@ -181,7 +181,7 @@ class CustomDataStorage(TrainingData, StringSerializable):
 
 def test_custom_data_classes():
     # Test custom args/kwargs, states, interpolator, etc.
-    c = Component(simple_model, Variable(), Variable(), interpolator=CustomInterpolator(), max_beta_train=(2,),
+    c = Component(simple_model, Variable(), Variable(), interpolator=CustomInterpolator(), data_fidelity=(2,),
                   training_data=CustomDataStorage(), model_kwargs=CustomKwargs(100, hello=2),
                   misc_states={(): {(): CustomInterpolatorState()}})
     c2 = c.serialize()
@@ -206,7 +206,7 @@ def test_save_and_load(tmp_path):
             misc_states[alpha][beta] = LagrangeState(weights={'x': np.random.rand(5)}, x_grids={'x': np.random.rand(5)})
     c = Component(simple_model, [Variable() for i in range(3)], [Variable() for i in range(3)],
                   active_set=active_set, misc_costs=misc_costs, misc_states=misc_states,
-                  model_kwargs={'output_path': '.', 'opts': {'max_iter': 1000}}, max_alpha=(3,))
+                  model_kwargs={'output_path': '.', 'opts': {'max_iter': 1000}}, model_fidelity=(3,))
 
     savepath = tmp_path / 'component.yml'
     YamlLoader.dump(c, savepath)
@@ -219,13 +219,13 @@ class Extra:
     x1: float
 
 
-def special_model(x, name='hello', frac=0.2, alpha=(1,), output_path='.', output_vars=None):
+def special_model(x, name='hello', frac=0.2, model_fidelity=(1,), output_path='.', output_vars=None):
     t1 = time.time()
     ret_dict = {'y1': x['x1'] + x['x2'], 'y2': x['x2'] * x['x3']}
     if np.random.rand() < frac:
         raise ValueError(f'Random error: {uuid.uuid4().hex}')
     mult = 1 if name == 'hello' else 2.5
-    err = mult * (1 / alpha[0])
+    err = mult * (1 / model_fidelity[0])
     if output_vars is not None:
         err += output_vars['y1'].get_nominal()
     ret_dict['y3'] = np.ones((15, 2)) + err
@@ -286,10 +286,10 @@ def test_model_wrapper(tmp_path):
 
     # Extra features (alpha, output_path, vars, exceptions, etc.)
     with ProcessPoolExecutor(max_workers=4) as executor:
-        comp = Component(special_model, inputs, outputs, max_alpha=(2,))
+        comp = Component(special_model, inputs, outputs, model_fidelity=(2,))
         shape = (5, 2, 2)
         case = {'x1': np.random.rand(*shape), 'x2': np.random.rand(*shape), 'x3': np.random.rand(*shape)}
-        ret = comp.call_model(case, alpha='best', output_path=tmp_path, executor=executor)
+        ret = comp.call_model(case, model_fidelity='best', output_path=tmp_path, executor=executor)
     assert ret['y3'].shape == shape + (15, 2)
     for key in ['y1', 'y2', 'extra_ret', 'model_cost', 'output_path']:
         assert ret[key].shape == shape
@@ -306,15 +306,15 @@ def test_model_wrapper(tmp_path):
 
 def test_misc_coeff():
     """Test the iterative calculation of MISC coefficients"""
-    def model(x, alpha=(0, 0)):
+    def model(x, model_fidelity=(0, 0)):
         y = x
         return y
-    comp = Component(model, max_alpha=(2, 3), max_beta_train=(2, 1), max_beta_interpolator=(1,))
-    max_ind = comp.max_alpha + comp.max_beta
+    comp = Component(model, model_fidelity=(2, 3), data_fidelity=(2, 1), surrogate_fidelity=(1,))
+    max_ind = comp.model_fidelity + comp.max_beta
 
     for idx in itertools.product(*[range(m) for m in max_ind]):
         # Activate the next index
-        alpha, beta = idx[:len(comp.max_alpha)], idx[len(comp.max_alpha):]
+        alpha, beta = idx[:len(comp.model_fidelity)], idx[len(comp.model_fidelity):]
         neighbors = comp._neighbors(alpha, beta, forward=True)
         s = {(alpha, beta)}
         comp.update_misc_coeff(IndexSet(s), index_set='train')
@@ -344,10 +344,10 @@ def test_misc_coeff():
 
 def test_sparse_grid(plots=False):
     """Simple cos test from Jakeman (2022)"""
-    def model(x, alpha=(0,)):
-        alpha = np.atleast_1d(alpha)
+    def model(inputs, model_fidelity=(0,)):
+        alpha = np.atleast_1d(model_fidelity)
         eps = (1/5) * 2.0**(-alpha[..., 0])
-        y = np.cos(np.pi/2 * (x['x'] + 4/5 + eps))
+        y = np.cos(np.pi/2 * (inputs['x'] + 4/5 + eps))
         return {'y': y}
 
     # Construct MISC surrogate from an index set
@@ -356,7 +356,7 @@ def test_sparse_grid(plots=False):
     x = Variable(distribution='U(-1, 1)')
     y = Variable()
     truth_alpha = (15,)
-    comp = Component(model, x, y, max_alpha=(2,), max_beta_train=(2,), vectorized=True)
+    comp = Component(model, x, y, model_fidelity=(2,), data_fidelity=(2,), vectorized=True)
     for alpha, beta in Ik:
         comp.activate_index(alpha, beta)
     N = 100
@@ -432,7 +432,7 @@ def test_field_quantity():
     amp = Variable()
 
     max_beta = (3, 3)
-    comp = Component(model, [delta, pressure], [amp, vel], max_beta_train=max_beta, vectorized=True)
+    comp = Component(model, [delta, pressure], [amp, vel], data_fidelity=max_beta, vectorized=True)
     for idx in itertools.product(*[range(beta+1) for beta in max_beta]):
         comp.activate_index((), idx)
 
@@ -457,7 +457,7 @@ def test_comp_jacobian_and_hessian():
     y1, y2 = Variable('y1'), Variable('y2')
     max_beta = (4, 4, 5)
 
-    surr = Component(fun, [x1, x2, x3], [y1, y2], max_beta_train=max_beta, vectorized=True)
+    surr = Component(fun, [x1, x2, x3], [y1, y2], data_fidelity=max_beta, vectorized=True)
     for idx in itertools.product(*[range(beta) for beta in max_beta]):
         surr.activate_index((), idx)
 
@@ -484,19 +484,19 @@ def test_comp_jacobian_and_hessian():
 
 
 def test_get_training_data():
-    def model(inputs, alpha=(0,)):
-        return {'y': inputs['x'] ** 2 + alpha[0]}
+    def model(inputs, model_fidelity=(0,)):
+        return {'y': inputs['x'] ** 2 + model_fidelity[0]}
 
     x = Variable(domain=(0, 3))
     y = Variable()
-    comp = Component(model, x, y, max_alpha=(3,), max_beta_train=(3,))
-    for idx in itertools.product(*[range(alpha+1) for alpha in comp.max_alpha],
-                                 *[range(beta+1) for beta in comp.max_beta_train]):
-        a = idx[:len(comp.max_alpha)]
-        b = idx[len(comp.max_alpha):]
+    comp = Component(model, x, y, model_fidelity=(3,), data_fidelity=(3,))
+    for idx in itertools.product(*[range(alpha+1) for alpha in comp.model_fidelity],
+                                 *[range(beta+1) for beta in comp.data_fidelity]):
+        a = idx[:len(comp.model_fidelity)]
+        b = idx[len(comp.model_fidelity):]
         comp.activate_index(a, b)
 
     xtrain, ytrain = comp.get_training_data()
-    xtrue, ytrue = comp.training_data.get(comp.max_alpha, comp.max_beta)
+    xtrue, ytrue = comp.training_data.get(comp.model_fidelity, comp.max_beta)
     assert all([np.allclose(xtrain[var], xtrue[var]) for var in xtrue])
     assert all([np.allclose(ytrain[var], ytrue[var]) for var in ytrue])

@@ -4,9 +4,9 @@ Includes:
 
 - `Transform` — an abstract interface for specifying a transformation.
 - `Linear` — a linear transformation $y=mx+b$.
-- `Log` — a logarithmic transformation $y=\log_b(x + offset)$.
-- `Minmax` — a min-max scaling transformation $x: (lb, ub) \mapsto (lb_{norm}, ub_{norm})$.
-- `Zscore` — a z-score normalization transformation $y=(x-\mu)/\sigma$.
+- `Log` — a logarithmic transformation $y=\\log_b(x + \\mathrm{offset})$.
+- `Minmax` — a min-max scaling transformation $x: (lb, ub) \\mapsto (lb_{norm}, ub_{norm})$.
+- `Zscore` — a z-score normalization transformation $y=(x-\\mu)/\\sigma$.
 
 Transform objects can be converted easily to/from strings for serialization.
 """
@@ -160,7 +160,7 @@ class Linear(Transform):
 
 
 class Log(Transform):
-    """A Log transform: $y=\\log_b{x + offset}$.
+    """A Log transform: $y=\\log_b(x + \\mathrm{offset})$.
 
     :ivar transform_args: `(base, offset)` the log base and offset
     """

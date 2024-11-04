@@ -6,15 +6,13 @@
 ![build](https://img.shields.io/github/actions/workflow/status/eckelsjd/amisc/deploy.yml?logo=github)
 ![docs](https://img.shields.io/github/actions/workflow/status/eckelsjd/amisc/docs.yml?logo=materialformkdocs&logoColor=%2523cccccc&label=docs)
 ![tests](https://img.shields.io/github/actions/workflow/status/eckelsjd/amisc/tests.yml?logo=github&logoColor=%2523cccccc&label=tests)
-![Code Coverage](https://img.shields.io/badge/coverage-47%25-orange?logo=codecov)
+![Code Coverage](https://img.shields.io/badge/coverage-89%25-yellowgreen?logo=codecov)
 [![Algorithm description](https://img.shields.io/badge/DOI-10.1002/nme.6958-blue)](https://doi.org/10.1002/nme.6958)
 
 Efficient framework for building surrogates of multidisciplinary systems using the adaptive multi-index stochastic collocation ([AMISC](https://onlinelibrary.wiley.com/doi/full/10.1002/nme.6958))  technique.
 
-## NOTICE: this branch is still undergoing major changes
-Expect most things to not be working yet (documentation is also not up-to-date everywhere)
-
 ## ⚙️ Installation
+Ensure you are using Python 3.11 or later. You can install the package from PyPI using pip:
 ```shell
 pip install amisc
 ```
@@ -33,14 +31,18 @@ import numpy as np
 from amisc import System
 
 def fun1(x):
-    y1 = x * np.sin(np.pi * x)
-    return y1
+    y = x * np.sin(np.pi * x)
+    return y
 
-def fun2(y1):
-    y2 = 1 / (1 + 25 * y1 ** 2)
-    return y2
+def fun2(y):
+    z = 1 / (1 + 25 * y ** 2)
+    return z
 
 system = System(fun1, fun2)
+
+system.inputs()['x'].domain = (0, 1)   # set domain of surrogate for `x`
+system.outputs()['y'].domain = (0, 1)  # set domain of surrogate for `y`
+
 system.fit()
 
 x_test = system.sample_inputs(10)

@@ -50,7 +50,7 @@ def compute_output(inputs):
 def generate_surrogate():
     inputs = [Variable(f'x{i+1}', distribution='U(0, 1)') for i in range(10)]
     outputs = [Variable('y')]
-    comp = Component(compute_output, inputs, outputs, name='my_model', max_beta_train=(2,)*len(inputs),
+    comp = Component(compute_output, inputs, outputs, name='my_model', data_fidelity=(2,)*len(inputs),
                      vectorized=True)
     system = System(comp, root_dir='.', name='my_system')
     system.set_logger(stdout=True)

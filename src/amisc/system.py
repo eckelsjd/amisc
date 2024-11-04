@@ -215,7 +215,6 @@ class System(BaseModel, Serializable):
         `amisc_{timestamp}`. This directory will be used to save all build products and log files.
 
         :param components: list of `Component` models that make up the MD system
-        :param executor: manages parallel execution for the system (optional)
         :param root_dir: root directory where all surrogate build products are saved to file (optional)
         """
         if components is None:
@@ -458,7 +457,7 @@ class System(BaseModel, Serializable):
     def sample_inputs(self, size: tuple | int, comp: str = 'System', use_pdf: bool = False,
                       nominal: dict[str: float] = None, constants: set[str] = None) -> Dataset:
         """Return samples of the inputs according to provided options. Will return samples in the
-        normalized/compressed space of the surrogate. See [`to_model_dataset`][`amisc.utils.to_model_dataset`] to
+        normalized/compressed space of the surrogate. See [`to_model_dataset`][amisc.utils.to_model_dataset] to
         convert the samples to be usable by the true model directly.
 
         :param size: tuple or integer specifying shape or number of samples to obtain
@@ -535,8 +534,8 @@ class System(BaseModel, Serializable):
                 train_error = relative_error(new_ysurr, new_ytest)
             ```
 
-        :yields: the active index sets, candidate index sets, and MISC coefficients of each component model at each
-                 iteration of the training history
+        :return: a generator of the active index sets, candidate index sets, and MISC coefficients
+                 of each component model at each iteration of the training history
         """
         # "Simulated" data structures for each component
         active_sets = {comp.name: IndexSet() for comp in self.components}       # active index sets for each component
@@ -767,7 +766,7 @@ class System(BaseModel, Serializable):
         # Check for uninitialized components and refine those first
         for comp in self.components:
             if len(comp.active_set) == 0 and comp.has_surrogate:
-                alpha_star = (0,) * len(comp.max_alpha)
+                alpha_star = (0,) * len(comp.model_fidelity)
                 beta_star = (0,) * len(comp.max_beta)
                 self.logger.info(f"Initializing component {comp.name}: adding {(alpha_star, beta_star)} to active set")
                 model_dir = (pth / 'components' / comp.name) if (pth := self.root_dir) is not None else None
@@ -848,7 +847,7 @@ class System(BaseModel, Serializable):
                                               np.squeeze(y_max[var], axis=0).tolist()))
                         var.update_domain(new_domain)
                     else:
-                        new_domain = (float(y_min[var]), float(y_max[var]))
+                        new_domain = (y_min[var][0], y_max[var][0])
                         var.update_domain(var.denormalize(new_domain))  # bds will be in norm space from predict() call
 
         # Add the chosen multi-index to the chosen component
@@ -1173,7 +1172,7 @@ class System(BaseModel, Serializable):
         return format_outputs(y, loop_shape)
 
     def __call__(self, *args, **kwargs):
-        """Convenience wrapper to allow calling as `ret = SystemSurrogate(x)`."""
+        """Convenience wrapper to allow calling as `ret = System(x)`."""
         return self.predict(*args, **kwargs)
 
     def __eq__(self, other):
@@ -1184,7 +1183,7 @@ class System(BaseModel, Serializable):
                 self.train_history == other.train_history)
 
     def __getitem__(self, component: str) -> Component:
-        """Convenience method to get the `Component` object from the `SystemSurrogate`.
+        """Convenience method to get a `Component` object from the `System`.
 
         :param component: the name of the component to get
         :returns: the `Component` object
@@ -1195,7 +1194,7 @@ class System(BaseModel, Serializable):
         """Return the `Component` object for this component.
 
         :param comp_name: name of the component to return
-        :raises: `KeyError` if the component does not exist
+        :raises KeyError: if the component does not exist
         :returns: the `Component` object
         """
         if comp_name.lower() == 'system':

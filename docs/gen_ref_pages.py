@@ -56,21 +56,21 @@ for path in sorted(src.rglob("*.py")):
         fd = mkdocs_gen_files.open(full_doc_path, "w")
 
     if doc_path.name == index_file_name:
-        # Change md header for packages
+        # Change md header for the top-level init file
         fd.write(f'# {pack_symbol_head} `{python_name}`\n')
         fd.write(f'::: {python_name}\n')
         fd.write(f'    options:\n')
         fd.write(f'      show_root_heading: false\n')
         fd.write(f'      show_root_toc_entry: false\n')
         fd.write(f'      heading_level: 2\n')
+        fd.write(f'      members:\n')
+        fd.write(f'      - FileLoader\n')
+        fd.write(f'      - YamlLoader\n')
     else:
         # Change md header for modules
         fd.write(f'---\ntitle: {python_parts[-1]}\n---\n\n::: {python_name}\n')
 
-        if python_parts[-1] == 'interpolator':
-            fd.write(f'    options:\n')
-            fd.write(f'      filters: [""]\n')
-        if python_parts[-1] in ['component', 'variable']:
+        if python_parts[-1] in ['variable']:
             fd.write(f'    options:\n')
             fd.write(f'      members_order: source\n')
     fd.close()

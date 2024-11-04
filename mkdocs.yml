@@ -80,20 +80,33 @@ plugins:
   - redirects:
       redirect_maps:
         index.md: start.md  # Force index page to be the "getting started" page, which is actually the README
+  - mkdocs-jupyter:
+      execute: true
+      include_source: true
 
 nav:
   - Home:
       - Getting started: start.md
-      - Tutorials: tutorials.md
-      - How-to Guides: how-to-guides.md
+      - Tutorial: tutorial.ipynb
+      - Examples: examples.md
       - Contributing: contributing.md
       - Coverage report: coverage.md
       - Changelog: changelog.md
+  - How-to Guides:
+      - Use variables: guides/variables.md
+      - Interface external models: guides/interface_models.md
+      - Train a surrogate: guides/train_surrogate.md
+      - Write a config file: guides/config_file.md
+      - Extend amisc: guides/extend.md
   - API reference: reference/  # literate-nav + gen-files
   - Theory:
-      - Overview: theory.md
+      - Overview: theory/overview.md
+      - Lagrange polynomials: theory/polynomials.md
+      - Feedback cycles: theory/feedback_cycles.md
 
-exclude_docs: abbreviations.md
+exclude_docs: |
+  abbreviations.md
+  gen_ref_pages.py
 
 extra:
   social:
@@ -105,7 +118,8 @@ extra:
 extra_javascript:
   - javascript/mathjax.js     # For displaying latex equations with $$ notation
   - https://polyfill.io/v3/polyfill.min.js?features=es6
-  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+#  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
 extra_css:
   - styles/extra.css

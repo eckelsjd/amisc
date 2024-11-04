@@ -4,7 +4,7 @@ components: !Component
 - name: Borehole
   model: !!python/name:amisc.examples.models.borehole_func
   vectorized: True
-  max_beta_train: (2, 2, 2, 2, 2, 2, 2, 2)
+  data_fidelity: (2, 2, 2, 2, 2, 2, 2, 2)
   inputs: !VariableList
   - name: rw
     distribution: U(0.05, 0.15)

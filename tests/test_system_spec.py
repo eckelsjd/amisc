@@ -1,5 +1,4 @@
 """Test that the [`SystemSurrogate`][amisc.system.SystemSurrogate] class validation works."""
-import concurrent.futures
 import os
 import shutil
 import warnings
@@ -12,11 +11,7 @@ from amisc import Variable, Component, System, YamlLoader
 from amisc.system import TrainHistory
 
 
-def simple_model(x, output_path='.'):
-    return x
-
-
-def simple_model_dict(inputs, output_path='.'):
+def simple_model(inputs, output_path='.'):
     return {'y': inputs['x'] ** 2}
 
 
@@ -47,7 +42,7 @@ def test_basic_init(tmp_path):
 def test_init_methods():
     """Test convenience methods for specifying a model."""
     # Call/return unpacked
-    def my_model(x1, x2, alpha=(1,)):
+    def my_model(x1, x2, model_fidelity=(1,)):
         y1 = x1 ** 2
         y2 = x2 ** 3
         return y1, y2
@@ -208,7 +203,7 @@ def test_train_history():
 
 def test_save_dir(tmp_path):
     """Test saving and loading from `amisc_timestamp` directory"""
-    comp = Component(simple_model_dict, Variable('x', domain=(0, 1)), Variable('y'), name='comp1', max_beta_train=(4,))
+    comp = Component(simple_model, Variable('x', domain=(0, 1)), Variable('y'), name='comp1', data_fidelity=(4,))
     surr = System(comp, root_dir=tmp_path, name='test_system')
     surr.fit(max_iter=3, save_interval=1)
     surr.save_to_file('test_surrogate.yml')

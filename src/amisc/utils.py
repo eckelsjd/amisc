@@ -117,7 +117,7 @@ def constrained_lls(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray) 
     """Minimize $||Ax-b||_2$, subject to $Cx=d$, i.e. constrained linear least squares.
 
     !!! Note
-        See http://www.seas.ucla.edu/~vandenbe/133A/lectures/cls.pdf for more detail.
+        See [these lecture notes](http://www.seas.ucla.edu/~vandenbe/133A/lectures/cls.pdf) for more detail.
 
     :param A: `(..., M, N)`, vandermonde matrix
     :param b: `(..., M, 1)`, data
@@ -244,6 +244,7 @@ def search_for_file(filename: str | Path, search_paths=None):
 
     :param filename: the filename to search for
     :param search_paths: paths to try and find the file in
+    :returns: the full path to the file if found, otherwise the original `filename`
     """
     if not isinstance(filename, str | Path):
         return filename

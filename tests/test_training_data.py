@@ -49,8 +49,8 @@ def test_sparse_grid():
 
 def test_imputer():
     """Test that imputation works for fixing missing data."""
-    def simple_model(inputs, alpha=(0,), frac1=0.03, frac2=0.03):
-        err = 4 ** (-alpha[0])
+    def simple_model(inputs, model_fidelity=(0,), frac1=0.03, frac2=0.03):
+        err = 4 ** (-model_fidelity[0])
         y1 = inputs['x1'] * inputs['x3'] + err
         y2 = inputs['x2'] ** 2
         if np.random.rand() < frac1:
@@ -101,7 +101,8 @@ def test_field_quantity():
                            Variable('a', distribution='N(0, 1)')])
     weight_fcns = inputs.get_pdfs()
     domains = inputs.get_domains()
-    def model(inputs, alpha=(0,), frac=0.05):
+    def model(inputs, model_fidelity=(0,), frac=0.05):
+        alpha = model_fidelity
         x = inputs['x']
         p = inputs['p']  # (N, dof)
         a = inputs['a']
@@ -117,7 +118,7 @@ def test_field_quantity():
     for idx in itertools.product(range(2), *[range(3) for _ in range(len(inputs))]):
         alpha, beta = idx[:1], idx[1:]
         new_idx, new_pts = grid.refine(alpha, beta, domains, weight_fcns)
-        new_y = model(to_model_dataset(new_pts, inputs)[0], alpha=alpha)
+        new_y = model(to_model_dataset(new_pts, inputs)[0], model_fidelity=alpha)
         grid.set(alpha, beta, new_idx, new_y)
         grid.impute_missing_data(alpha, beta)
 

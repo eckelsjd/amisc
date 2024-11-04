@@ -50,6 +50,9 @@ ignore = ['E731']  # allow lambda definitions
 line-length = 120
 extend-exclude = ["*.ipynb"]
 
+[tool.coverage.run]
+omit = ["src/amisc/examples/tutorial.py"]
+
 [tool.commitizen]
 version_scheme = "pep440"
 version_provider = "pep621"
@@ -93,6 +96,7 @@ doc = [
     "mkdocs-git-committers-plugin-2>=2.3",
     "mkdocs-git-revision-date-localized-plugin>=1.2",
     "mkdocs-coverage>=1.0",
+    "mkdocs-jupyter>=0.25.1",
 ]
 jupyter = [
     "jupyterlab>=4.2.5",
