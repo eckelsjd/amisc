@@ -6,7 +6,8 @@ a hierarchy of modeling fidelities.
     multi-indices: `alpha` and `beta`. The `alpha` (or $\\alpha$) indices specify physical model fidelity and get
     passed to the model as an additional argument (e.g. things like discretization level, time step size, etc.).
     The `beta` (or $\\beta$) indices specify surrogate refinement level, so typically an indication of the amount of
-    training data used.
+    training data used or the complexity of the surrogate model. We divide $\\beta$ into `data_fidelity` and
+    `surrogate_fidelity` for specifying training data and surrogate model complexity, respectively.
 
 Includes:
 
@@ -96,7 +97,7 @@ class StringKwargs(StringSerializable, ModelKwargs):
 class IndexSet(set, Serializable):
     """Dataclass that maintains a list of multi-indices. Overrides basic `set` functionality to ensure
     elements are formatted correctly as `(alpha, beta)`; that is, as a tuple of `alpha` and
-    `beta`, which are themselves instances of a [`MultiIndex`][`amisc.typing.MultiIndex`] tuple.
+    `beta`, which are themselves instances of a [`MultiIndex`][amisc.typing.MultiIndex] tuple.
 
     !!! Example "An example index set"
         $\\mathcal{I} = [(\\alpha, \\beta)_1 , (\\alpha, \\beta)_2, (\\alpha, \\beta)_3 , ...]$ would be specified
@@ -190,7 +191,7 @@ class MiscTree(UserDict, Serializable):
 
     @classmethod
     def deserialize(cls, serialized_data: dict) -> MiscTree:
-        """"Deserialize a `dict` to a `MiscTree`.
+        """Deserialize a `dict` to a `MiscTree`.
 
         :param serialized_data: the data to deserialize to a `MiscTree` object
         """
@@ -324,9 +325,10 @@ class Component(BaseModel, Serializable):
     modeling fidelities.
 
     A `Component` can be constructed by specifying a model, input and output variables, and additional configurations
-    such as the maximum fidelity levels, the interpolator type, and the training data type. If `max_alpha` and
-    `max_beta` are both left empty, then the `Component` will not use a surrogate model, instead calling the underlying
-    model directly. The `Component` can be serialized to a YAML file and deserialized back into a Python object.
+    such as the maximum fidelity levels, the interpolator type, and the training data type. If `model_fidelity`,
+    `data_fidelity`, and `surrogate_fidelity` are all left empty, then the `Component` will not use a surrogate model,
+    instead calling the underlying model directly. The `Component` can be serialized to a YAML file and deserialized
+    back into a Python object.
 
     !!! Example "A simple `Component`"
         ```python
@@ -338,19 +340,19 @@ class Component(BaseModel, Serializable):
         comp = Component(model=model, inputs=[x], outputs=[y])
         ```
 
-    Each fidelity index in $\\alpha$ and $\\beta$ increase in refinement from $0$ up to
-    `max_alpha` and `max_beta`. From the surrogate's perspective, the concatenation of $(\\alpha, \\beta)$ fully
-    specifies a single fidelity "level". The `Component` forms an approximation of the model by summing
-    up over many of these concatenated sets of $(\\alpha, \\beta)$.
+    Each fidelity index in $\\alpha$ increases in refinement from $0$ up to `model_fidelity`. Each fidelity index
+    in $\\beta$ increases from $0$ up to `(data_fidelity, surrogate_fidelity)`. From the `Component's` perspective,
+    the concatenation of $(\\alpha, \\beta)$ fully specifies a single fidelity "level". The `Component`
+    forms an approximation of the model by summing up over many of these concatenated sets of $(\\alpha, \\beta)$.
 
     :ivar name: the name of the `Component`
     :ivar model: the model or function that is to be approximated, callable as `y = f(x)`
     :ivar inputs: the input variables to the model
     :ivar outputs: the output variables from the model
     :ivar model_kwargs: extra keyword arguments to pass to the model
-    :ivar max_alpha: the maximum level of refinement for each fidelity index in $\\alpha$
-    :ivar max_beta_train: the maximum level of refinement for each fidelity index in $\\beta$ for training data
-    :ivar max_beta_interpolator: the max level of refinement for each fidelity index in $\\beta$ for the interpolator
+    :ivar model_fidelity: the maximum level of refinement for each fidelity index in $\\alpha$ for model fidelity
+    :ivar data_fidelity: the maximum level of refinement for each fidelity index in $\\beta$ for training data
+    :ivar surrogate_fidelity: the max level of refinement for each fidelity index in $\\beta$ for the surrogate
     :ivar interpolator: the interpolator to use as the underlying surrogate model
     :ivar vectorized: whether the model supports vectorized input/output (i.e. datasets with arbitrary shape `(...,)`)
     :ivar call_unpacked: whether the model expects unpacked input arguments (i.e. `func(x1, x2, ...)`)
@@ -380,9 +382,9 @@ class Component(BaseModel, Serializable):
     model_kwargs: str | dict | ModelKwargs = {}
     inputs: _VariableLike
     outputs: _VariableLike
-    max_alpha: str | tuple = MultiIndex()
-    max_beta_train: str | tuple = MultiIndex()
-    max_beta_interpolator: str | tuple = MultiIndex()
+    model_fidelity: str | tuple = MultiIndex()
+    data_fidelity: str | tuple = MultiIndex()
+    surrogate_fidelity: str | tuple = MultiIndex()
     interpolator: Any | Interpolator = Lagrange()
     vectorized: bool = False
     call_unpacked: Optional[bool] = None  # If the model expects inputs/outputs like `func(x1, x2, ...)->(y1, y2, ...)
@@ -574,7 +576,7 @@ class Component(BaseModel, Serializable):
         else:
             return VariableList.deserialize(variables)
 
-    @field_validator('max_alpha', 'max_beta_train', 'max_beta_interpolator')
+    @field_validator('model_fidelity', 'data_fidelity', 'surrogate_fidelity')
     @classmethod
     def _validate_indices(cls, multi_index) -> MultiIndex:
         return MultiIndex(multi_index)
@@ -613,13 +615,18 @@ class Component(BaseModel, Serializable):
         return len(self.outputs)
 
     @property
+    def max_alpha(self) -> MultiIndex:
+        """The maximum model fidelity multi-index (alias for `model_fidelity`)."""
+        return self.model_fidelity
+
+    @property
     def max_beta(self) -> MultiIndex:
         """The maximum surrogate fidelity multi-index is a combination of training and interpolator indices."""
-        return self.max_beta_train + self.max_beta_interpolator
+        return self.data_fidelity + self.surrogate_fidelity
 
     @property
     def has_surrogate(self) -> bool:
-        """The component has no surrogate model if there are no active or candidate indices."""
+        """The component has no surrogate model if there are no fidelity indices."""
         return (len(self.max_alpha) + len(self.max_beta)) > 0
 
     @property
@@ -635,7 +642,7 @@ class Component(BaseModel, Serializable):
             return (self.model.__code__.co_code == other.model.__code__.co_code and self.inputs == other.inputs
                     and self.outputs == other.outputs and self.name == other.name
                     and self.model_kwargs.data == other.model_kwargs.data
-                    and self.max_alpha == other.max_alpha and self.max_beta == other.max_beta and
+                    and self.model_fidelity == other.model_fidelity and self.max_beta == other.max_beta and
                     self.interpolator == other.interpolator
                     and self.active_set == other.active_set and self.candidate_set == other.candidate_set
                     and self.misc_states == other.misc_states and self.misc_costs == other.misc_costs
@@ -748,7 +755,7 @@ class Component(BaseModel, Serializable):
             raise e
 
     def call_model(self, inputs: dict | Dataset,
-                   alpha: Literal['best', 'worst'] | tuple | list = None,
+                   model_fidelity: Literal['best', 'worst'] | tuple | list = None,
                    output_path: str | Path = None,
                    executor: Executor = None,
                    **kwds) -> Dataset:
@@ -778,7 +785,8 @@ class Component(BaseModel, Serializable):
         :param inputs: The input data for the model, formatted as a `dict` with a key for each input variable and
                        a corresponding value that is an array of the input data. If specified as a plain list, then the
                        order is assumed the same as `Component.inputs`.
-        :param alpha: Fidelity indices to tune the model fidelity (model must request this in its keyword arguments).
+        :param model_fidelity: Fidelity indices to tune the model fidelity (model must request this
+                               in its keyword arguments).
         :param output_path: Directory to save model output files (model must request this in its keyword arguments).
         :param executor: Executor for parallel execution if the model is not vectorized (optional).
         :param kwds: Additional keyword arguments to pass to the model (model must request these in its keyword args).
@@ -805,8 +813,8 @@ class Component(BaseModel, Serializable):
         inputs, loop_shape = format_inputs(inputs, var_shape=var_shape)
 
         N = int(np.prod(loop_shape))
-        list_alpha = isinstance(alpha, list | np.ndarray)
-        alpha_requested = self.model_kwarg_requested('alpha')
+        list_alpha = isinstance(model_fidelity, list | np.ndarray)
+        alpha_requested = self.model_kwarg_requested('model_fidelity')
         for var in self.inputs:
             if var.compression is not None:
                 for field in var.compression.fields:
@@ -825,12 +833,12 @@ class Component(BaseModel, Serializable):
             kwargs['output_vars'] = self.outputs
         if alpha_requested:
             if not list_alpha:
-                alpha = [alpha] * N
+                model_fidelity = [model_fidelity] * N
             for i in range(N):
-                if alpha[i] == 'best':
-                    alpha[i] = self.max_alpha
-                elif alpha[i] == 'worst':
-                    alpha[i] = (0,) * len(self.max_alpha)
+                if model_fidelity[i] == 'best':
+                    model_fidelity[i] = self.max_alpha
+                elif model_fidelity[i] == 'worst':
+                    model_fidelity[i] = (0,) * len(self.model_fidelity)
 
         for k, v in kwds.items():
             if self.model_kwarg_requested(k):
@@ -840,7 +848,7 @@ class Component(BaseModel, Serializable):
         errors = {}
         if self.vectorized:
             if alpha_requested:
-                kwargs['alpha'] = np.atleast_1d(alpha).reshape((N, -1))
+                kwargs['model_fidelity'] = np.atleast_1d(model_fidelity).reshape((N, -1))
             output_dict = self.model(*[inputs[var.name] for var in self.inputs], **kwargs) if self.call_unpacked \
                 else self.model(inputs, **kwargs)
             if self.ret_unpacked:
@@ -852,7 +860,7 @@ class Component(BaseModel, Serializable):
                 for i in range(N):
                     try:
                         if alpha_requested:
-                            kwargs['alpha'] = alpha[i]
+                            kwargs['model_fidelity'] = model_fidelity[i]
                         ret = self.model(*[{k: v[i] for k, v in inputs.items()}[var.name] for var in self.inputs],
                                          **kwargs) if self.call_unpacked else (
                             self.model({k: v[i] for k, v in inputs.items()}, **kwargs))
@@ -868,7 +876,7 @@ class Component(BaseModel, Serializable):
                 futures = []
                 for i in range(N):
                     if alpha_requested:
-                        kwargs['alpha'] = alpha[i]
+                        kwargs['model_fidelity'] = model_fidelity[i]
                     fs = executor.submit(self.model,
                                          *[{k: v[i] for k, v in inputs.items()}[var.name] for var in self.inputs],
                                          **kwargs) if self.call_unpacked else (
@@ -879,7 +887,7 @@ class Component(BaseModel, Serializable):
                 for i, fs in enumerate(futures):
                     try:
                         if alpha_requested:
-                            kwargs['alpha'] = alpha[i]
+                            kwargs['model_fidelity'] = model_fidelity[i]
                         ret = fs.result()
                         if self.ret_unpacked:
                             ret = (ret,) if not isinstance(ret, tuple) else ret
@@ -925,11 +933,11 @@ class Component(BaseModel, Serializable):
                                 output_dict[key][i] = val
 
         # Save average model costs for each alpha fidelity
-        if alpha is not None and output_dict.get('model_cost') is not None:
+        if model_fidelity is not None and output_dict.get('model_cost') is not None:
             alpha_costs = {}
             for i, cost in enumerate(output_dict['model_cost']):
-                alpha_costs.setdefault(MultiIndex(alpha[i]), [])
-                alpha_costs[MultiIndex(alpha[i])].append(cost)
+                alpha_costs.setdefault(MultiIndex(model_fidelity[i]), [])
+                alpha_costs[MultiIndex(model_fidelity[i])].append(cost)
             for a, costs in alpha_costs.items():
                 self.model_costs.setdefault(a, np.empty(0))
                 self.model_costs[a] = np.nanmean(np.hstack((costs, self.model_costs[a])))
@@ -987,7 +995,7 @@ class Component(BaseModel, Serializable):
         """
         # Use raw model inputs/outputs
         if use_model is not None:
-            outputs = self.call_model(inputs, alpha=use_model, output_path=model_dir, executor=executor, **kwds)
+            outputs = self.call_model(inputs, model_fidelity=use_model, output_path=model_dir, executor=executor,**kwds)
             ret = {}
             for var in self.outputs:
                 if var in outputs:
@@ -1003,8 +1011,8 @@ class Component(BaseModel, Serializable):
                             for var in self.inputs}
             inputs, field_coords = to_model_dataset(inputs, self.inputs, del_latent=True, **field_coords)
             field_coords.update(kwds)
-            outputs = self.call_model(inputs, alpha=use_model or 'best', output_path=model_dir, executor=executor,
-                                      **field_coords)
+            outputs = self.call_model(inputs, model_fidelity=use_model or 'best', output_path=model_dir,
+                                      executor=executor, **field_coords)
             outputs, surr_vars = to_surrogate_dataset(outputs, self.outputs, del_fields=True, **field_coords)
             return {str(var): outputs[var] for var in surr_vars}
 
@@ -1036,7 +1044,7 @@ class Component(BaseModel, Serializable):
             if np.abs(comb_coeff) > 0:
                 coeffs.append(comb_coeff)
                 args = (self.misc_states.get((alpha, beta)),
-                        self.training_data.get(alpha, beta[:len(self.max_beta_train)], skip_nan=True, y_vars=y_vars))
+                        self.training_data.get(alpha, beta[:len(self.data_fidelity)], skip_nan=True, y_vars=y_vars))
 
                 results.append(self.interpolator.predict(inputs, *args) if executor is None else
                                executor.submit(self.interpolator.predict, inputs, *args))
@@ -1121,7 +1129,7 @@ class Component(BaseModel, Serializable):
         domains = self.inputs.get_domains()
         weight_fcns = self.inputs.get_pdfs()
         for a, b in indices:
-            design_coords, design_pts = self.training_data.refine(a, b[:len(self.max_beta_train)],
+            design_coords, design_pts = self.training_data.refine(a, b[:len(self.data_fidelity)],
                                                                   domains, weight_fcns)
             design_pts, fc = to_model_dataset(design_pts, self.inputs, del_latent=True, **field_coords)
 
@@ -1148,8 +1156,8 @@ class Component(BaseModel, Serializable):
         if len(alpha_list) > 0:
             self.logger.info(f"Running {len(alpha_list)} total model evaluations for component "
                              f"'{self.name}' new candidate indices: {indices}...")
-            model_outputs = self.call_model(model_inputs, alpha=alpha_list, output_path=model_dir, executor=executor,
-                                            **field_coords)
+            model_outputs = self.call_model(model_inputs, model_fidelity=alpha_list, output_path=model_dir,
+                                            executor=executor, **field_coords)
             errors = model_outputs.pop('errors', {})
 
         # Unpack model outputs and update states
@@ -1172,17 +1180,17 @@ class Component(BaseModel, Serializable):
             if len(err_list) > 0:
                 self.logger.warning(f"Model errors occurred while adding candidate ({a}, {b}) for component "
                                     f"{self.name}. Leaving NaN values in training data...")
-                self.training_data.set_errors(a, b[:len(self.max_beta_train)], err_coords, err_list)
+                self.training_data.set_errors(a, b[:len(self.data_fidelity)], err_coords, err_list)
 
             # Compress field quantities and normalize
             yi_dict, y_vars = to_surrogate_dataset(yi_dict, self.outputs, del_fields=False, **field_coords)
 
             # Store training data, computational cost, and new interpolator state
-            self.training_data.set(a, b[:len(self.max_beta_train)], design_list[i], yi_dict)
-            self.training_data.impute_missing_data(a, b[:len(self.max_beta_train)])
+            self.training_data.set(a, b[:len(self.data_fidelity)], design_list[i], yi_dict)
+            self.training_data.impute_missing_data(a, b[:len(self.data_fidelity)])
             self.misc_costs[a, b] = self.model_costs.get(a, 1.) * num_train_pts
-            self.misc_states[a, b] = self.interpolator.refine(b[len(self.max_beta_train):],
-                                                              self.training_data.get(a, b[:len(self.max_beta_train)],
+            self.misc_states[a, b] = self.interpolator.refine(b[len(self.data_fidelity):],
+                                                              self.training_data.get(a, b[:len(self.data_fidelity)],
                                                                                      y_vars=y_vars, skip_nan=True),
                                                               self.misc_states.get((alpha, beta)),
                                                               domains)
@@ -1242,7 +1250,7 @@ class Component(BaseModel, Serializable):
                 coeffs.append(comb_coeff)
                 func = self.interpolator.gradient if derivative == 'first' else self.interpolator.hessian
                 args = (self.misc_states.get((alpha, beta)),
-                        self.training_data.get(alpha, beta[:len(self.max_beta_train)], skip_nan=True, y_vars=y_vars))
+                        self.training_data.get(alpha, beta[:len(self.data_fidelity)], skip_nan=True, y_vars=y_vars))
 
                 results.append(func(inputs, *args) if executor is None else executor.submit(func, inputs, *args))
 
@@ -1381,7 +1389,7 @@ class Component(BaseModel, Serializable):
                     d[key] = value.serialize(**serialize_kwargs.get(key, {}))
                 elif key == 'model' and not keep_yaml_objects:
                     d[key] = YamlSerializable(obj=value).serialize()
-                elif key in ['max_beta_train', 'max_beta_interpolator', 'max_alpha']:
+                elif key in ['data_fidelity', 'surrogate_fidelity', 'model_fidelity']:
                     if len(value) > 0:
                         d[key] = str(value)
                 elif key in ['active_set', 'candidate_set']:
@@ -1419,7 +1427,8 @@ class Component(BaseModel, Serializable):
         if isinstance(serialized_data, Component):
             return serialized_data
         elif callable(serialized_data):
-            return cls(serialized_data)  # try to construct a component from a raw model function
+            # try to construct a component from a raw function (assume data fidelity is (2,) for each inspected input)
+            return cls(serialized_data, data_fidelity=(2,) * len(_inspect_function(serialized_data)[0]))
 
         search_paths = search_paths or []
         search_keys = search_keys or []

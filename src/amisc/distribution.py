@@ -63,7 +63,7 @@ class Distribution(ABC):
         """Convert a string to a `Distribution` object.
 
         :param dist_string: specifies a PDF or distribution. Can be `Normal(mu, std)`, `Uniform(lb, ub)`,
-                            'LogUniform(lb, ub)', 'LogNormal(mu, std)',
+                            `LogUniform(lb, ub)`, `LogNormal(mu, std)`,
                             `Relative(pct)`, or `Tolerance(tol)`. The shorthands `N(0, 1)`, `U(0, 1)`, `LU(0, 1)`,
                             `LN(0, 1)`, `rel(5)`, or `tol(1)` are also accepted.
         :return: the corresponding `Distribution` object
@@ -165,7 +165,7 @@ class Uniform(Distribution):
 
 
 class LogUniform(Distribution):
-    """A LogUniform distribution. Specify by string as "LogUniform(lb, ub)" or "LU(lb, ub)" in shorthand. Uses
+    """A LogUniform distribution. Specify by string as `LogUniform(lb, ub)` or `LU(lb, ub)` in shorthand. Uses
     base-10 by default.
 
     !!! Example
@@ -197,7 +197,7 @@ class LogUniform(Distribution):
 
 
 class Normal(Distribution):
-    """A Normal distribution. Specify by string as "Normal(mu, std)" or "N(mu, std)" in shorthand."""
+    """A Normal distribution. Specify by string as `Normal(mu, std)` or `N(mu, std)` in shorthand."""
 
     def __str__(self):
         return f'N({self.dist_args[0]}, {self.dist_args[1]})'
@@ -217,7 +217,7 @@ class Normal(Distribution):
 
 
 class LogNormal(Distribution):
-    """A LogNormal distribution. Specify by string as "LogNormal(mu, sigma)" or "LN(mu, sigma)" in shorthand.
+    """A LogNormal distribution. Specify by string as `LogNormal(mu, sigma)` or `LN(mu, sigma)` in shorthand.
     Uses base-10 by default.
 
     !!! Example
@@ -248,7 +248,7 @@ class LogNormal(Distribution):
 
 
 class Relative(Distribution):
-    """A Relative distribution. Specify by string as "Relative(pct)" or "rel(pct%)" in shorthand.
+    """A Relative distribution. Specify by string as `Relative(pct)` or `rel(pct%)` in shorthand.
     Will attempt to sample uniformly within the given percent of a nominal value.
     """
 
@@ -273,7 +273,7 @@ class Relative(Distribution):
 
 
 class Tolerance(Distribution):
-    """A Tolerance distribution. Specify by string as "Tolerance(tol)" or "tol(tol)" in shorthand.
+    """A Tolerance distribution. Specify by string as `Tolerance(tol)` or `tol(tol)` in shorthand.
     Will attempt to sample uniformly within a given absolute tolerance of a nominal value.
     """
 

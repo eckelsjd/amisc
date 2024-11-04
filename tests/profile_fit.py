@@ -35,7 +35,7 @@ def profile_iteration_number():
     num_workers = 8
     model_cost = 0.5
     iterations = [5, 10, 20, 40]
-    comp = Component(io_bound_model, inputs, outputs, max_beta_train=(3, 3, 3), model_cost=model_cost)
+    comp = Component(io_bound_model, inputs, outputs, data_fidelity=(3, 3, 3), model_cost=model_cost)
     surr = System(comp)
 
     t_serial = []
@@ -103,7 +103,7 @@ def profile_model_cost():
     num_workers = 8
     costs = [0.1, 0.5, 1, 2, 4]  # in seconds
     iteration = 10
-    comp = Component(io_bound_model, inputs, outputs, max_beta_train=(3, 3, 3))
+    comp = Component(io_bound_model, inputs, outputs, data_fidelity=(3, 3, 3))
     surr = System(comp)
 
     t_serial = []
@@ -170,7 +170,7 @@ def profile_num_workers():
     num_workers = [1, 2, 4, 8, 16]
     cost = 1
     iteration = 20
-    comp = Component(io_bound_model, inputs, outputs, max_beta_train=(3, 3, 3), model_cost=cost)
+    comp = Component(io_bound_model, inputs, outputs, data_fidelity=(3, 3, 3), model_cost=cost)
     surr = System(comp)
 
     t_parallel = []

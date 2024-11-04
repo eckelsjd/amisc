@@ -8,7 +8,7 @@ The `amisc` package takes an object-oriented approach to building a surrogate of
 bottom up, you have:
 
 - **variables** that serve as inputs and outputs for the models,
-- **interpolators** that define a specific input &rarr; output mathematical relationship to interpolate a function,
+- **interpolators** that define a specific input &rarr; output mathematical relationship to approximate a function,
 - **components** that wrap a model for a single discipline, and a
 - **system** that defines the connections between components in a multidisciplinary system.
 
@@ -80,7 +80,7 @@ classDiagram
     }
     System --o "1..n" Component
     Component --o "1..n" Variable
-    direction LR
+    direction TD
     Component --* Interpolator
     Component --* TrainingData
     Variable --o Transform
@@ -107,9 +107,11 @@ import yaml as _yaml
 from amisc.variable import Variable, VariableList
 from amisc.component import Component
 from amisc.system import System
+from amisc.utils import to_model_dataset, to_surrogate_dataset
 
 __version__ = "0.4.0"
-__all__ = ['System', 'Component', 'Variable', 'VariableList', 'FileLoader', 'YamlLoader']
+__all__ = ['System', 'Component', 'Variable', 'VariableList', 'FileLoader', 'YamlLoader',
+           'to_model_dataset', 'to_surrogate_dataset']
 
 
 class FileLoader(_ABC):

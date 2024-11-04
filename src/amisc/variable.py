@@ -78,7 +78,7 @@ class Variable(BaseModel, Serializable):
     :ivar description: a lengthier description of the variable
     :ivar units: assumed units for the variable (if applicable)
     :ivar category: an additional descriptor for how this variable is used, e.g. calibration, operating, design, etc.
-    :ivar tex: latex format for the variable, i.e. r"$x_i$"
+    :ivar tex: latex format for the variable, i.e. "$x_i$"
     :ivar compression: specifies field quantities and links to relevant compression data
     :ivar distribution: a string specifier of a probability distribution function (see the `Distribution` types)
     :ivar domain: the explicit domain bounds of the variable (limits of where you expect to use it);
@@ -583,7 +583,8 @@ class VariableList(OrderedDict, Serializable):
         raise ValueError(f"'{key}' is not in list")
 
     def get_domains(self, norm: bool = True):
-        """Get normalized variable domains (expand latent coefficient domains for field quantities)
+        """Get normalized variable domains (expand latent coefficient domains for field quantities). Assume a
+        domain of `(0, 1)` for variables if their domain is not specified.
 
         :param norm: whether to normalize the domains using `Variable.norm` (useful for getting bds for surrogate);
                      latent coefficient domains do not get normalized
@@ -596,6 +597,8 @@ class VariableList(OrderedDict, Serializable):
             if isinstance(var_domain, list):  # only field qtys return a list of domains, one for each latent coeff
                 for i, domain in enumerate(var_domain):
                     domains[f'{var.name}{LATENT_STR_ID}{i}'] = domain
+            elif var_domain is None:
+                domains[var.name] = (0, 1)
             else:
                 domains[var.name] = var.normalize(var_domain) if norm else var_domain
         return domains

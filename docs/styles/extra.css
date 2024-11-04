@@ -12,3 +12,9 @@ code.doc-symbol-package {
   color: var(--doc-symbol-package-fg-color);
   background-color: var(--doc-symbol-package-bg-color);
 }
+
+.jupyter_download_icon {
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+}

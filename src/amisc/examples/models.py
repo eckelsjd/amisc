@@ -173,15 +173,16 @@ def orbit_fun(inputs, output_path=None, pct_failure=0):
     return y
 
 
-def power_fun(inputs, alpha=(0,), *, output_path=None, pct_failure=0):
+def power_fun(inputs, model_fidelity=(0,), *, output_path=None, pct_failure=0):
     """Compute the power model for the fire satellite system.
 
     :param inputs: `dict` of input variables `Po`, `Fs`, `To`, `Te`, and `Pat`
-    :param alpha: fidelity index for the model
+    :param model_fidelity: fidelity index for the model
     :param output_path: where to save model outputs
     :param pct_failure: probability of a failure
     :returns: `dict` with model outputs `Imin`, `Imax`, `Ptot`, and `Asa`
     """
+    alpha = model_fidelity
     pct = 1 - (2 - alpha[0]) * 0.04 if len(alpha) == 1 else 1  # extra pct error term
     v = fire_sat_globals()       # Global variables
 
@@ -235,13 +236,14 @@ def power_fun(inputs, alpha=(0,), *, output_path=None, pct_failure=0):
     return y
 
 
-def attitude_fun(inputs, alpha=(0,)):
+def attitude_fun(inputs, model_fidelity=(0,)):
     """Compute the attitude model for the fire satellite system.
 
     :param inputs: `dict` of input variables `H`, `Fs`, `Lsp`, `q`, `La`, `Cd`, `Vsat`, and `Slew`
-    :param alpha: fidelity index for the model
+    :param model_fidelity: fidelity index for the model
     :returns: `dict` with model outputs `Pat` and `tau_tot`
     """
+    alpha = model_fidelity
     v = fire_sat_globals()       # Global variables
     pct = 1 - (2 - alpha[0])*0.04 if len(alpha) == 1 else 1  # extra model fidelity pct error term
 

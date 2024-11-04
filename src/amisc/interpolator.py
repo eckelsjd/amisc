@@ -15,7 +15,6 @@ import copy
 import itertools
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from tabnanny import check
 
 import numpy as np
 
@@ -131,7 +130,6 @@ class Lagrange(Interpolator, StringSerializable):
     of 1d Lagrange polynomials to approximate a multi-variate function.
 
     :ivar interval_capacity: tuning knob for Lagrange interpolation (see Berrut and Trefethen 2004)
-    :vartype interval_capacity: float
     """
     interval_capacity: float = 4.0
 
