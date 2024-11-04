@@ -1,4 +1,5 @@
 """Test the package utilities."""
+# ruff: noqa: E741
 import time
 
 import numpy as np
@@ -6,8 +7,15 @@ from scipy.linalg import lapack
 
 from amisc.compression import SVD
 from amisc.typing import LATENT_STR_ID
-from amisc.utils import get_logger, parse_function_string, format_inputs, _inspect_function, constrained_lls
-from amisc.utils import to_model_dataset, to_surrogate_dataset
+from amisc.utils import (
+    _inspect_function,
+    constrained_lls,
+    format_inputs,
+    get_logger,
+    parse_function_string,
+    to_model_dataset,
+    to_surrogate_dataset,
+)
 from amisc.variable import Variable, VariableList
 
 

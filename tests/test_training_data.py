@@ -5,8 +5,8 @@ import numpy as np
 
 from amisc.compression import SVD
 from amisc.training import SparseGrid
-from amisc.variable import Variable, VariableList
 from amisc.utils import to_model_dataset
+from amisc.variable import Variable, VariableList
 
 
 def test_sparse_grid():

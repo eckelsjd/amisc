@@ -12,11 +12,10 @@
 
 """
 from concurrent.futures import ProcessPoolExecutor
-from pathlib import Path
 
 import numpy as np
 
-from amisc import Variable, Component, System
+from amisc import Component, System, Variable
 
 
 def compute_output(inputs):
@@ -68,7 +67,7 @@ def predict_surrogate(save_file):
 
     for num_samples in sample_nums:
         inputs = surr.sample_inputs(num_samples)
-        outputs = surr.predict(inputs)
+        outputs = surr.predict(inputs)  # noqa: F841
 
 
 if __name__ == '__main__':

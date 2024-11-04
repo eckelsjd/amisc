@@ -39,13 +39,21 @@ import yaml
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 from typing_extensions import TypedDict
 
-from amisc.interpolator import InterpolatorState, Interpolator, Lagrange
-from amisc.serialize import YamlSerializable, PickleSerializable, Serializable, StringSerializable
-from amisc.training import TrainingData, SparseGrid
-from amisc.typing import MultiIndex, Dataset, LATENT_STR_ID
-from amisc.utils import get_logger, format_inputs, format_outputs, search_for_file, to_model_dataset, \
-    to_surrogate_dataset
-from amisc.utils import _get_yaml_path, _inspect_assignment, _inspect_function
+from amisc.interpolator import Interpolator, InterpolatorState, Lagrange
+from amisc.serialize import PickleSerializable, Serializable, StringSerializable, YamlSerializable
+from amisc.training import SparseGrid, TrainingData
+from amisc.typing import LATENT_STR_ID, Dataset, MultiIndex
+from amisc.utils import (
+    _get_yaml_path,
+    _inspect_assignment,
+    _inspect_function,
+    format_inputs,
+    format_outputs,
+    get_logger,
+    search_for_file,
+    to_model_dataset,
+    to_surrogate_dataset,
+)
 from amisc.variable import Variable, VariableList
 
 __all__ = ["ModelKwargs", "StringKwargs", "IndexSet", "MiscTree", "Component"]
@@ -706,7 +714,8 @@ class Component(BaseModel, Serializable):
                 case 'test':
                     misc_coeff = self.misc_coeff_test
                 case other:
-                    raise ValueError(f"Index set must be 'train' or 'test' if you do not provide `misc_coeff`.")
+                    raise ValueError(f"Index set must be 'train' or 'test' if you do not provide `misc_coeff`. "
+                                     f"{other} not recognized.")
         if isinstance(index_set, str):
             match index_set:
                 case 'train':
@@ -714,7 +723,7 @@ class Component(BaseModel, Serializable):
                 case 'test':
                     index_set = self.active_set.union(self.candidate_set)
                 case other:
-                    raise ValueError(f"Index set must be 'train' or 'test'.")
+                    raise ValueError(f"Index set must be 'train' or 'test'. {other} not recognized.")
 
         return index_set, misc_coeff
 
@@ -868,7 +877,7 @@ class Component(BaseModel, Serializable):
                             ret = (ret,) if not isinstance(ret, tuple) else ret
                             ret = {out_var.name: ret[i] for i, out_var in enumerate(self.outputs)}
                         results.append(ret)
-                    except Exception as e:
+                    except Exception:
                         results.append({'inputs': {k: v[i] for k, v in inputs.items()}, 'index': i,
                                         'model_kwargs': kwargs.copy(), 'error': traceback.format_exc()})
             else:  # Parallel
@@ -893,7 +902,7 @@ class Component(BaseModel, Serializable):
                             ret = (ret,) if not isinstance(ret, tuple) else ret
                             ret = {out_var.name: ret[i] for i, out_var in enumerate(self.outputs)}
                         results.append(ret)
-                    except Exception as e:
+                    except Exception:
                         results.append({'inputs': {k: v[i] for k, v in inputs.items()}, 'index': i,
                                         'model_kwargs': kwargs.copy(), 'error': traceback.format_exc()})
 

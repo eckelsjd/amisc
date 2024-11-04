@@ -49,7 +49,8 @@ class Transform(ABC):
                        default, `(a, b)` is the Variable's domain and `(l, u)` is `(0, 1)`. Use simply as `minmax`
                        to use all defaults.
         - **zscore** — $x_{norm} = \\frac{x - m}{s}$ specified as `zscore(m, s)` or `zscore(mu=m, std=s)`. If the
-                       Variable is specified as `distribution=normal`, then `zscore` defaults to the Variable's own `mu, std`.
+                       Variable is specified as `distribution=normal`, then `zscore` defaults to the Variable's
+                       own `mu, std`.
 
         !!! Example
             ```python

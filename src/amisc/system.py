@@ -31,11 +31,11 @@ import pickle
 import random
 import string
 import time
-from collections import ChainMap, deque, UserList
-from concurrent.futures import Executor, wait, ALL_COMPLETED
+from collections import ChainMap, UserList, deque
+from concurrent.futures import ALL_COMPLETED, Executor, wait
 from datetime import timezone
 from pathlib import Path
-from typing import ClassVar, Annotated, Optional, Callable, Literal
+from typing import Annotated, Callable, ClassVar, Literal, Optional
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -46,10 +46,18 @@ from uqtils import ax_default
 
 from amisc.component import Component, IndexSet, MiscTree
 from amisc.serialize import Serializable, _builtin
-from amisc.utils import get_logger, format_inputs, format_outputs, constrained_lls, relative_error, to_model_dataset, \
-    to_surrogate_dataset, _combine_latent_arrays
+from amisc.typing import LATENT_STR_ID, Dataset, MultiIndex, TrainIteration
+from amisc.utils import (
+    _combine_latent_arrays,
+    constrained_lls,
+    format_inputs,
+    format_outputs,
+    get_logger,
+    relative_error,
+    to_model_dataset,
+    to_surrogate_dataset,
+)
 from amisc.variable import VariableList
-from amisc.typing import Dataset, TrainIteration, MultiIndex, LATENT_STR_ID
 
 __all__ = ['TrainHistory', 'System']
 
@@ -650,8 +658,8 @@ class System(BaseModel, Serializable):
                         var.update_domain(var.denormalize(new_domain), override=True)
                 del y_samples
             else:
-                self.logger.warning(f'Could not estimate bounds for coupling variables: no test set provided. '
-                                    f'Make sure you manually provide (good) coupling variable domains.')
+                self.logger.warning('Could not estimate bounds for coupling variables: no test set provided. '
+                                    'Make sure you manually provide (good) coupling variable domains.')
 
         # Track convergence progress on the error indicator and test set (plot to file)
         if self.root_dir is not None:
@@ -1153,8 +1161,8 @@ class System(BaseModel, Serializable):
                         start_idx = 0
                         for j, var in enumerate(coupling_prev):
                             end_idx = start_idx + xdims[j]
-                            coupling_snap[:, start_idx:end_idx, i] = coupling_iter[var][samples.curr_idx, ...].reshape((N_curr, -1))
-                            res_snap[:, start_idx:end_idx, i] = residual_iter[var][samples.curr_idx, ...].reshape((N_curr, -1))
+                            coupling_snap[:, start_idx:end_idx, i] = coupling_iter[var][samples.curr_idx, ...].reshape((N_curr, -1))  # noqa: E501
+                            res_snap[:, start_idx:end_idx, i] = residual_iter[var][samples.curr_idx, ...].reshape((N_curr, -1))  # noqa: E501
                             start_idx = end_idx
                     C = np.ones((N_curr, 1, mk))
                     b = np.zeros((N_curr, N_couple, 1))
@@ -1164,7 +1172,7 @@ class System(BaseModel, Serializable):
                     start_idx = 0
                     for j, var in enumerate(coupling_prev):
                         end_idx = start_idx + xdims[j]
-                        coupling_prev[var][samples.curr_idx, ...] = coupling_new[:, start_idx:end_idx].reshape((N_curr, *var_shapes[j]))
+                        coupling_prev[var][samples.curr_idx, ...] = coupling_new[:, start_idx:end_idx].reshape((N_curr, *var_shapes[j]))  # noqa: E501
                         start_idx = end_idx
                     k += 1
 

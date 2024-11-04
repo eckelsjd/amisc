@@ -7,9 +7,9 @@ from uqtils import approx_hess, approx_jac, ax_default
 
 from amisc.examples.models import nonlinear_wave, tanh_func
 from amisc.interpolator import Lagrange
+from amisc.training import SparseGrid
 from amisc.utils import relative_error
 from amisc.variable import Variable
-from amisc.training import SparseGrid
 
 
 def test_tensor_product_1d(plots=False):
@@ -164,7 +164,8 @@ def test_interp_jacobian_and_hessian():
                         np.sin(theta['x3']) * theta['x1'])
     fun = lambda theta: {'y1': f1(theta), 'y2': f2(theta)}
 
-    x1, x2, x3 = Variable('x1', distribution='U(-2, 1)'), Variable('x2', distribution='U(-1, 2)'), Variable('x3', distribution='U(-3.14, 3.14)')
+    x1, x2, x3 = (Variable('x1', distribution='U(-2, 1)'), Variable('x2', distribution='U(-1, 2)'),
+                  Variable('x3', distribution='U(-3.14, 3.14)'))
     interp = Lagrange()
     domains = {'x1': x1.get_domain(), 'x2': x2.get_domain(), 'x3': x3.get_domain()}
     alpha = ()

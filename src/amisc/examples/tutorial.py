@@ -28,7 +28,7 @@ def simple():
 
 def single_component():
     # --8<-- [start:single]
-    from amisc import Variable, Component, System
+    from amisc import Component, System, Variable
 
     def fun(inputs):
         return {'y': inputs['x'] ** 2}
@@ -69,7 +69,7 @@ def field_quantity():
     # --8<-- [start:field_qty]
     import numpy as np
 
-    from amisc import Variable, Component, System, to_model_dataset
+    from amisc import Component, System, Variable, to_model_dataset
     from amisc.compression import SVD
 
     def my_model(inputs):
