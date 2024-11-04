@@ -10,12 +10,12 @@ from pathlib import Path
 import numpy as np
 from matplotlib import pyplot as plt
 from numpy.typing import ArrayLike
-from uqtils import ax_default, approx_hess, approx_jac
+from uqtils import approx_hess, approx_jac, ax_default
 
 from amisc import YamlLoader
 from amisc.component import Component, IndexSet, MiscTree, ModelKwargs, StringKwargs
 from amisc.compression import SVD
-from amisc.interpolator import LagrangeState, Interpolator, InterpolatorState
+from amisc.interpolator import Interpolator, InterpolatorState, LagrangeState
 from amisc.serialize import Base64Serializable, Serializable, StringSerializable
 from amisc.training import TrainingData
 from amisc.typing import LATENT_STR_ID
@@ -453,7 +453,8 @@ def test_comp_jacobian_and_hessian():
     f2 = lambda theta: np.exp(theta['x2']) * theta['x1'] + np.sin(theta['x3']) * theta['x2']
     fun = lambda theta: {'y1': f1(theta), 'y2': f2(theta)}
 
-    x1, x2, x3 = Variable('x1', distribution='U(0, 2)'), Variable('x2', distribution='U(-1, 1)'), Variable('x3', distribution='U(-3.14, 3.14)')
+    x1, x2, x3 = (Variable('x1', distribution='U(0, 2)'), Variable('x2', distribution='U(-1, 1)'),
+                  Variable('x3', distribution='U(-3.14, 3.14)'))
     y1, y2 = Variable('y1'), Variable('y2')
     max_beta = (4, 4, 5)
 

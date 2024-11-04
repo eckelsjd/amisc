@@ -98,16 +98,17 @@ The `amisc` package also includes a `FileLoader` interface for loading and dumpi
 We recommend using the built-in `YamlLoader` for this purpose, as it includes custom YAML tags for reading/writing
 `amisc` objects from file.
 """
-from abc import ABC as _ABC, abstractmethod as _abstractmethod
+from abc import ABC as _ABC
+from abc import abstractmethod as _abstractmethod
 from pathlib import Path as _Path
 from typing import Any as _Any
 
 import yaml as _yaml
 
-from amisc.variable import Variable, VariableList
 from amisc.component import Component
 from amisc.system import System
 from amisc.utils import to_model_dataset, to_surrogate_dataset
+from amisc.variable import Variable, VariableList
 
 __version__ = "0.4.0"
 __all__ = ['System', 'Component', 'Variable', 'VariableList', 'FileLoader', 'YamlLoader',

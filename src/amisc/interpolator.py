@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from amisc.serialize import Serializable, Base64Serializable, StringSerializable
-from amisc.typing import MultiIndex, Dataset
+from amisc.serialize import Base64Serializable, Serializable, StringSerializable
+from amisc.typing import Dataset, MultiIndex
 
 __all__ = ["InterpolatorState", "LagrangeState", "Interpolator", "Lagrange"]
 
@@ -120,7 +120,7 @@ class Interpolator(Serializable, ABC):
             case 'lagrange':
                 return Lagrange(**config)
             case other:
-                raise NotImplementedError(f"Unknown interpolator method: {method}")
+                raise NotImplementedError(f"Unknown interpolator method: {other}")
 
 
 @dataclass
@@ -401,7 +401,8 @@ class Lagrange(Interpolator, StringSerializable):
                                 curr_j_idx = div_zero_idx[..., k, j[k]]
                                 other_j_idx = np.any(other_pts[..., k, :], axis=-1)
                                 dLJ_dx[curr_j_idx] = -np.nansum((w_j[k, p_idx] / w_j[k, j[k]]) /
-                                                                (x_arr[curr_j_idx, k, np.newaxis] - x_j[k, p_idx]), axis=-1)
+                                                                (x_arr[curr_j_idx, k, np.newaxis] - x_j[k, p_idx]),
+                                                                axis=-1)
                                 dLJ_dx[other_j_idx] = ((w_j[k, j[k]] / w_j_large[other_pts[..., k, :]]) /
                                                        (x_arr[other_j_idx, k] - x_j[k, j[k]]))
 
@@ -430,11 +431,11 @@ class Lagrange(Interpolator, StringSerializable):
 
                                 # if these points are at the current j interpolation point
                                 d2LJ_dx2[curr_j_idx] = (2 * np.nansum((w_j[m, p_idx] / w_j[m, j[m]]) /
-                                                                      (x_arr[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]),
-                                                                      axis=-1) ** 2 +  # noqa: E501
+                                                                      (x_arr[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]), # noqa: E501
+                                                                      axis=-1) ** 2 +
                                                         2 * np.nansum((w_j[m, p_idx] / w_j[m, j[m]]) /
-                                                                      (x_arr[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]) ** 2,
-                                                                      axis=-1))  # noqa: E501
+                                                                      (x_arr[curr_j_idx, m, np.newaxis] - x_j[m, p_idx]) ** 2, # noqa: E501
+                                                                      axis=-1))
 
                                 # if these points are at any other interpolation point
                                 other_pts_inv = other_pts.copy()

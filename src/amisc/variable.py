@@ -26,11 +26,11 @@ from numpy.typing import ArrayLike
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 
 from amisc.compression import Compression
-from amisc.distribution import Distribution, Normal, Uniform, LogUniform
+from amisc.distribution import Distribution, LogUniform, Normal, Uniform
 from amisc.serialize import Serializable
-from amisc.transform import Transform, Minmax, Zscore
-from amisc.utils import search_for_file, _get_yaml_path, _inspect_assignment
-from amisc.typing import CompressionData, LATENT_STR_ID
+from amisc.transform import Minmax, Transform, Zscore
+from amisc.typing import LATENT_STR_ID, CompressionData
+from amisc.utils import _get_yaml_path, _inspect_assignment, search_for_file
 
 __all__ = ['Variable', 'VariableList']
 _TransformLike = Union[str, Transform, list[str | Transform]]  # something that can be converted to a Transform

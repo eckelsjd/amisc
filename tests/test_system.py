@@ -10,7 +10,7 @@ from scipy.optimize import fsolve
 from scipy.stats import gaussian_kde
 from uqtils import ax_default
 
-from amisc import Variable, Component, System
+from amisc import Component, System, Variable
 from amisc.compression import SVD
 from amisc.utils import relative_error, to_model_dataset
 

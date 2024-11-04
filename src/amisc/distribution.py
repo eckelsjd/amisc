@@ -14,7 +14,7 @@ Distribution objects can be converted easily to/from strings for serialization.
 """
 from __future__ import annotations
 
-from abc import abstractmethod, ABC
+from abc import ABC, abstractmethod
 
 import numpy as np
 

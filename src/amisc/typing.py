@@ -12,11 +12,9 @@ import ast as _ast
 from pathlib import Path as _Path
 from typing import Optional as _Optional
 
-from typing_extensions import TypedDict as _TypedDict
-
 import numpy as _np
 from numpy.typing import ArrayLike as _ArrayLike
-
+from typing_extensions import TypedDict as _TypedDict
 
 __all__ = ["MultiIndex", "Dataset", "TrainIteration", "CompressionData", "LATENT_STR_ID"]
 

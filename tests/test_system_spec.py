@@ -1,4 +1,5 @@
 """Test that the [`SystemSurrogate`][amisc.system.SystemSurrogate] class validation works."""
+# ruff: noqa: E741
 import os
 import shutil
 import warnings
@@ -7,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from amisc import Variable, Component, System, YamlLoader
+from amisc import Component, System, Variable, YamlLoader
 from amisc.system import TrainHistory
 
 
@@ -110,7 +111,7 @@ def test_init_methods():
     with pytest.raises(ValueError):
         s = System(Component(my_model, inputs=None, outputs=None))
     with pytest.raises(ValueError):
-        s2 = System(lambda: None)
+        s2 = System(lambda: None)  # noqa: F841
 
 
 def test_save_and_load(tmp_path):

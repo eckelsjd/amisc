@@ -11,18 +11,18 @@ from __future__ import annotations
 import copy
 import itertools
 from abc import ABC, abstractmethod
-from dataclasses import field, dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import numpy as np
+from numpy.typing import ArrayLike
 from scipy.optimize import direct
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MaxAbsScaler
-from numpy.typing import ArrayLike
 
 from amisc.serialize import PickleSerializable, Serializable
-from amisc.typing import MultiIndex, Dataset, LATENT_STR_ID
+from amisc.typing import LATENT_STR_ID, Dataset, MultiIndex
 
 __all__ = ['TrainingData', 'SparseGrid']
 
@@ -124,7 +124,7 @@ class TrainingData(Serializable, ABC):
             case 'sparse-grid':
                 return SparseGrid(**config)
             case other:
-                raise NotImplementedError(f"Unknown training data method: {method}")
+                raise NotImplementedError(f"Unknown training data method: {other}")
 
 
 @dataclass
@@ -245,7 +245,7 @@ class SparseGrid(TrainingData, PickleSerializable):
             new_yi = {}
             for var, yi in yi_dict.items():
                 yi = np.atleast_1d(yi[i])
-                new_yi[var] = (float(yi[0]) if self._is_numeric(yi) else yi[0]) if self._is_singleton(yi) else yi.tolist()
+                new_yi[var] = (float(yi[0]) if self._is_numeric(yi) else yi[0]) if self._is_singleton(yi) else yi.tolist()  # noqa: E501
             self.yi_map[alpha][coord] = copy.deepcopy(new_yi)
 
     def impute_missing_data(self, alpha: MultiIndex, beta: MultiIndex):
@@ -419,7 +419,7 @@ class SparseGrid(TrainingData, PickleSerializable):
             try:
                 if cls._is_numeric(np.atleast_1d(yi_dict[var])):
                     output_vars.append(var)
-            except:
+            except Exception:
                 continue
         return output_vars
 
@@ -507,6 +507,6 @@ class SparseGrid(TrainingData, PickleSerializable):
                     z_star = res.x
                     z_pts = np.concatenate((z_pts, z_star))
             case other:
-                raise NotImplementedError(f"Unknown collocation method: {method}")
+                raise NotImplementedError(f"Unknown collocation method: {other}")
 
         return z_pts

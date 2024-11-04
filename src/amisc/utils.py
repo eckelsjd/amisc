@@ -21,6 +21,7 @@ import logging
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import yaml
@@ -28,8 +29,10 @@ import yaml
 __all__ = ['parse_function_string', 'relative_error', 'get_logger', 'format_inputs', 'format_outputs',
            'search_for_file', 'constrained_lls', 'to_surrogate_dataset', 'to_model_dataset']
 
-import amisc.variable
-from amisc.typing import Dataset, LATENT_STR_ID
+from amisc.typing import LATENT_STR_ID, Dataset
+
+if TYPE_CHECKING:
+    import amisc.variable
 
 LOG_FORMATTER = logging.Formatter(u"%(asctime)s — [%(levelname)s] — %(name)-15s — %(message)s")
 
@@ -44,7 +47,7 @@ def _combine_latent_arrays(arr):
             del arr[var]
 
 
-def to_surrogate_dataset(dataset: Dataset, variables: amisc.variable.VariableList, del_fields: bool = True,
+def to_surrogate_dataset(dataset: Dataset, variables: 'amisc.variable.VariableList', del_fields: bool = True,
                          **field_coords) -> tuple[Dataset, list[str]]:
     """Convert true model input/output dataset to a form usable by the surrogate. Primarily, compress field
     quantities and normalize.
@@ -80,7 +83,7 @@ def to_surrogate_dataset(dataset: Dataset, variables: amisc.variable.VariableLis
     return dataset, surr_vars
 
 
-def to_model_dataset(dataset: Dataset, variables: amisc.variable.VariableList, del_latent: bool = True,
+def to_model_dataset(dataset: Dataset, variables: 'amisc.variable.VariableList', del_latent: bool = True,
                      **field_coords) -> tuple[Dataset, Dataset]:
     """Convert surrogate input/output dataset to a form usable by the true model. Primarily, reconstruct
     field quantities and denormalize.
@@ -181,7 +184,7 @@ def _inspect_function(func):
         return_visitor.visit(tree)
 
         return pos_args, return_visitor.return_values
-    except:
+    except Exception:
         return [], []
 
 
@@ -221,7 +224,7 @@ def _inspect_assignment(class_name: str, stack_idx: int = 2) -> str | None:
                 if isinstance(assignment.value, ast.Call) and isinstance(assignment.value.func, ast.Name):
                     if assignment.value.func.id == class_name:
                         variable_name = target_name
-    except:
+    except Exception:
         variable_name = None
     finally:
         # del current_frame, caller_frame

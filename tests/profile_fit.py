@@ -5,7 +5,7 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 from matplotlib import pyplot as plt
 
-from amisc import Variable, Component, System
+from amisc import Component, System, Variable
 
 
 def io_bound_model(inputs, model_cost=1):

@@ -3,9 +3,9 @@ import numpy as np
 import pytest
 
 from amisc import YamlLoader
+from amisc.compression import SVD
 from amisc.utils import relative_error
 from amisc.variable import Variable, VariableList
-from amisc.compression import SVD
 
 
 def test_load_and_dump_variables(tmp_path):
@@ -62,7 +62,8 @@ def test_two_norms():
             xnorm2 = var2.normalize(x)
             xtilde1 = var1.normalize(xnorm1, denorm=True)
             xtilde2 = var2.normalize(xnorm2, denorm=True)
-            assert np.allclose(x, xtilde1), f'Failed the two-normalization test for distribution: {dist_method}, norm: {case}'
+            assert np.allclose(x, xtilde1), (f'Failed the two-normalization test for distribution: {dist_method}, '
+                                             f'norm: {case}')
             assert np.allclose(x, xtilde2), (f'Failed the two-normalization test for distribution: '
                                              f'{dist_method}, norm: {var2.norm}')
 
