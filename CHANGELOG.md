@@ -1,3 +1,9 @@
+## v0.5.2 (2024-11-05)
+
+### Fix
+
+- fixes interactive function inspection and cleans dependencies
+
 ## v0.5.1 (2024-11-04)
 
 ### Fix
