@@ -1,3 +1,9 @@
+## v0.5.1 (2024-11-04)
+
+### Fix
+
+- init versioning and gh release
+
 ## v0.5.0 (2024-11-04)
 
 ### BREAKING CHANGE
