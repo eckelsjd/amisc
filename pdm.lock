@@ -5,7 +5,7 @@
 groups = ["default", "dev", "doc", "jupyter", "test"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:0e03311e81b404be60bdca2b8ea92ebfdb4792a1123aa099e657190e74023de1"
+content_hash = "sha256:ffdfc4808a715b5be40ebda027693a7acffc6a25c4796a79fb1cd1f69811b8eb"
 
 [[metadata.targets]]
 requires_python = ">=3.11"
@@ -332,7 +332,7 @@ name = "colorama"
 version = "0.4.6"
 requires_python = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7"
 summary = "Cross-platform colored terminal text."
-groups = ["default", "dev", "doc", "jupyter", "test"]
+groups = ["dev", "doc", "jupyter", "test"]
 files = [
     {file = "colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"},
     {file = "colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44"},
@@ -382,7 +382,7 @@ name = "contourpy"
 version = "1.3.0"
 requires_python = ">=3.9"
 summary = "Python library for calculating contours of 2D quadrilateral grids"
-groups = ["default"]
+groups = ["default", "test"]
 dependencies = [
     "numpy>=1.23",
 ]
@@ -579,7 +579,7 @@ name = "cycler"
 version = "0.12.1"
 requires_python = ">=3.8"
 summary = "Composable style cycles"
-groups = ["default"]
+groups = ["default", "test"]
 files = [
     {file = "cycler-0.12.1-py3-none-any.whl", hash = "sha256:85cef7cff222d8644161529808465972e51340599459b8ac3ccbac5a854e0d30"},
     {file = "cycler-0.12.1.tar.gz", hash = "sha256:88bb128f02ba341da8ef447245a9e138fae777f6a23943da4540077d3601eb1c"},
@@ -635,6 +635,17 @@ groups = ["doc", "jupyter"]
 files = [
     {file = "defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61"},
     {file = "defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69"},
+]
+
+[[package]]
+name = "dill"
+version = "0.3.9"
+requires_python = ">=3.8"
+summary = "serialize all of Python"
+groups = ["default"]
+files = [
+    {file = "dill-0.3.9-py3-none-any.whl", hash = "sha256:468dff3b89520b474c0397703366b7b95eebe6303f108adf9b19da1f702be87a"},
+    {file = "dill-0.3.9.tar.gz", hash = "sha256:81aa267dddf68cbfe8029c42ca9ec6a4ab3b22371d1c450abc54422577b4512c"},
 ]
 
 [[package]]
@@ -699,7 +710,7 @@ name = "fonttools"
 version = "4.54.1"
 requires_python = ">=3.8"
 summary = "Tools to manipulate font files"
-groups = ["default"]
+groups = ["default", "test"]
 files = [
     {file = "fonttools-4.54.1-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:5419771b64248484299fa77689d4f3aeed643ea6630b2ea750eeab219588ba20"},
     {file = "fonttools-4.54.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:301540e89cf4ce89d462eb23a89464fef50915255ece765d10eee8b2bf9d75b2"},
@@ -827,7 +838,7 @@ name = "h5py"
 version = "3.12.1"
 requires_python = ">=3.9"
 summary = "Read and write HDF5 files from Python"
-groups = ["default"]
+groups = ["test"]
 dependencies = [
     "numpy>=1.19.3",
 ]
@@ -1020,17 +1031,6 @@ dependencies = [
 files = [
     {file = "jinja2-ansible-filters-1.3.2.tar.gz", hash = "sha256:07c10cf44d7073f4f01102ca12d9a2dc31b41d47e4c61ed92ef6a6d2669b356b"},
     {file = "jinja2_ansible_filters-1.3.2-py3-none-any.whl", hash = "sha256:e1082f5564917649c76fed239117820610516ec10f87735d0338688800a55b34"},
-]
-
-[[package]]
-name = "joblib"
-version = "1.4.2"
-requires_python = ">=3.8"
-summary = "Lightweight pipelining with Python functions"
-groups = ["default"]
-files = [
-    {file = "joblib-1.4.2-py3-none-any.whl", hash = "sha256:06d478d5674cbc267e7496a410ee875abd68e4340feff4490bcb7afb88060ae6"},
-    {file = "joblib-1.4.2.tar.gz", hash = "sha256:2382c5816b2636fbd20a09e0f4e9dad4736765fdfb7dca582943b9c1366b3f0e"},
 ]
 
 [[package]]
@@ -1314,7 +1314,7 @@ name = "kiwisolver"
 version = "1.4.7"
 requires_python = ">=3.8"
 summary = "A fast implementation of the Cassowary constraint solver"
-groups = ["default"]
+groups = ["default", "test"]
 files = [
     {file = "kiwisolver-1.4.7-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:d2b0e12a42fb4e72d509fc994713d099cbb15ebf1103545e8a45f14da2dfca54"},
     {file = "kiwisolver-1.4.7-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:2a8781ac3edc42ea4b90bc23e7d37b665d89423818e26eb6df90698aa2287c95"},
@@ -1460,7 +1460,7 @@ name = "matplotlib"
 version = "3.9.2"
 requires_python = ">=3.9"
 summary = "Python plotting package"
-groups = ["default"]
+groups = ["default", "test"]
 dependencies = [
     "contourpy>=1.0.1",
     "cycler>=0.10",
@@ -1948,7 +1948,7 @@ name = "numpy"
 version = "2.1.1"
 requires_python = ">=3.10"
 summary = "Fundamental package for array computing in Python"
-groups = ["default"]
+groups = ["default", "test"]
 files = [
     {file = "numpy-2.1.1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:0d07841fd284718feffe7dd17a63a2e6c78679b2d386d3e82f44f0108c905550"},
     {file = "numpy-2.1.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:b5613cfeb1adfe791e8e681128f5f49f22f3fcaa942255a6124d58ca59d9528f"},
@@ -2078,7 +2078,7 @@ name = "pillow"
 version = "10.4.0"
 requires_python = ">=3.8"
 summary = "Python Imaging Library (Fork)"
-groups = ["default"]
+groups = ["default", "test"]
 files = [
     {file = "pillow-10.4.0-cp311-cp311-macosx_10_10_x86_64.whl", hash = "sha256:0a9ec697746f268507404647e531e92889890a087e03681a3606d9b920fbee3c"},
     {file = "pillow-10.4.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:dfe91cb65544a1321e631e696759491ae04a2ea11d36715eca01ce07284738be"},
@@ -2355,7 +2355,7 @@ name = "pyparsing"
 version = "3.1.4"
 requires_python = ">=3.6.8"
 summary = "pyparsing module - Classes and methods to define and execute parsing grammars"
-groups = ["default"]
+groups = ["default", "test"]
 files = [
     {file = "pyparsing-3.1.4-py3-none-any.whl", hash = "sha256:a6a7ee4235a3f944aa1fa2249307708f893fe5717dc603503c6c7969c070fb7c"},
     {file = "pyparsing-3.1.4.tar.gz", hash = "sha256:f86ec8d1a83f11977c9a6ea7598e8c27fc5cddfa5b07ea2241edbbde1d7bc032"},
@@ -2400,7 +2400,7 @@ name = "python-dateutil"
 version = "2.9.0.post0"
 requires_python = "!=3.0.*,!=3.1.*,!=3.2.*,>=2.7"
 summary = "Extensions to the standard Python datetime module"
-groups = ["default", "doc", "jupyter"]
+groups = ["default", "doc", "jupyter", "test"]
 dependencies = [
     "six>=1.5",
 ]
@@ -2770,42 +2770,11 @@ files = [
 ]
 
 [[package]]
-name = "scikit-learn"
-version = "1.5.2"
-requires_python = ">=3.9"
-summary = "A set of python modules for machine learning and data mining"
-groups = ["default"]
-dependencies = [
-    "joblib>=1.2.0",
-    "numpy>=1.19.5",
-    "scipy>=1.6.0",
-    "threadpoolctl>=3.1.0",
-]
-files = [
-    {file = "scikit_learn-1.5.2-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:03b6158efa3faaf1feea3faa884c840ebd61b6484167c711548fce208ea09445"},
-    {file = "scikit_learn-1.5.2-cp311-cp311-macosx_12_0_arm64.whl", hash = "sha256:1ff45e26928d3b4eb767a8f14a9a6efbf1cbff7c05d1fb0f95f211a89fd4f5de"},
-    {file = "scikit_learn-1.5.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:f763897fe92d0e903aa4847b0aec0e68cadfff77e8a0687cabd946c89d17e675"},
-    {file = "scikit_learn-1.5.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f8b0ccd4a902836493e026c03256e8b206656f91fbcc4fde28c57a5b752561f1"},
-    {file = "scikit_learn-1.5.2-cp311-cp311-win_amd64.whl", hash = "sha256:6c16d84a0d45e4894832b3c4d0bf73050939e21b99b01b6fd59cbb0cf39163b6"},
-    {file = "scikit_learn-1.5.2-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:f932a02c3f4956dfb981391ab24bda1dbd90fe3d628e4b42caef3e041c67707a"},
-    {file = "scikit_learn-1.5.2-cp312-cp312-macosx_12_0_arm64.whl", hash = "sha256:3b923d119d65b7bd555c73be5423bf06c0105678ce7e1f558cb4b40b0a5502b1"},
-    {file = "scikit_learn-1.5.2-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:f60021ec1574e56632be2a36b946f8143bf4e5e6af4a06d85281adc22938e0dd"},
-    {file = "scikit_learn-1.5.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:394397841449853c2290a32050382edaec3da89e35b3e03d6cc966aebc6a8ae6"},
-    {file = "scikit_learn-1.5.2-cp312-cp312-win_amd64.whl", hash = "sha256:57cc1786cfd6bd118220a92ede80270132aa353647684efa385a74244a41e3b1"},
-    {file = "scikit_learn-1.5.2-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:e9a702e2de732bbb20d3bad29ebd77fc05a6b427dc49964300340e4c9328b3f5"},
-    {file = "scikit_learn-1.5.2-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:b0768ad641981f5d3a198430a1d31c3e044ed2e8a6f22166b4d546a5116d7908"},
-    {file = "scikit_learn-1.5.2-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:178ddd0a5cb0044464fc1bfc4cca5b1833bfc7bb022d70b05db8530da4bb3dd3"},
-    {file = "scikit_learn-1.5.2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f7284ade780084d94505632241bf78c44ab3b6f1e8ccab3d2af58e0e950f9c12"},
-    {file = "scikit_learn-1.5.2-cp313-cp313-win_amd64.whl", hash = "sha256:b7b0f9a0b1040830d38c39b91b3a44e1b643f4b36e36567b80b7c6bd2202a27f"},
-    {file = "scikit_learn-1.5.2.tar.gz", hash = "sha256:b4237ed7b3fdd0a4882792e68ef2545d5baa50aca3bb45aa7df468138ad8f94d"},
-]
-
-[[package]]
 name = "scipy"
 version = "1.14.1"
 requires_python = ">=3.10"
 summary = "Fundamental algorithms for scientific computing in Python"
-groups = ["default"]
+groups = ["default", "test"]
 dependencies = [
     "numpy<2.3,>=1.23.5",
 ]
@@ -2864,7 +2833,7 @@ name = "six"
 version = "1.16.0"
 requires_python = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*"
 summary = "Python 2 and 3 compatibility utilities"
-groups = ["default", "doc", "jupyter"]
+groups = ["default", "doc", "jupyter", "test"]
 files = [
     {file = "six-1.16.0-py2.py3-none-any.whl", hash = "sha256:8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254"},
     {file = "six-1.16.0.tar.gz", hash = "sha256:1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926"},
@@ -2946,17 +2915,6 @@ files = [
 ]
 
 [[package]]
-name = "threadpoolctl"
-version = "3.5.0"
-requires_python = ">=3.8"
-summary = "threadpoolctl"
-groups = ["default"]
-files = [
-    {file = "threadpoolctl-3.5.0-py3-none-any.whl", hash = "sha256:56c1e26c150397e58c4926da8eeee87533b1e32bef131bd4bf6a2f45f3185467"},
-    {file = "threadpoolctl-3.5.0.tar.gz", hash = "sha256:082433502dd922bf738de0d8bcc4fdcbf0979ff44c42bd40f5af8a282f6fa107"},
-]
-
-[[package]]
 name = "tinycss2"
 version = "1.3.0"
 requires_python = ">=3.8"
@@ -3003,16 +2961,16 @@ files = [
 
 [[package]]
 name = "tqdm"
-version = "4.66.5"
+version = "4.66.6"
 requires_python = ">=3.7"
 summary = "Fast, Extensible Progress Meter"
-groups = ["default"]
+groups = ["test"]
 dependencies = [
     "colorama; platform_system == \"Windows\"",
 ]
 files = [
-    {file = "tqdm-4.66.5-py3-none-any.whl", hash = "sha256:90279a3770753eafc9194a0364852159802111925aa30eb3f9d85b0e805ac7cd"},
-    {file = "tqdm-4.66.5.tar.gz", hash = "sha256:e1020aef2e5096702d8a025ac7d16b1577279c9d63f8375b63083e9a5f0fcbad"},
+    {file = "tqdm-4.66.6-py3-none-any.whl", hash = "sha256:223e8b5359c2efc4b30555531f09e9f2f3589bcd7fdd389271191031b49b7a63"},
+    {file = "tqdm-4.66.6.tar.gz", hash = "sha256:4bdd694238bef1485ce839d67967ab50af8f9272aab687c0d7702a01da0be090"},
 ]
 
 [[package]]
@@ -3050,20 +3008,20 @@ files = [
 
 [[package]]
 name = "uqtils"
-version = "0.4.0"
+version = "0.4.2"
 requires_python = ">=3.11"
 summary = "Assorted utilities for uncertainty quantification and scientific computing."
-groups = ["default"]
+groups = ["test"]
 dependencies = [
     "h5py>=3.10",
-    "matplotlib>=3.9",
+    "matplotlib>=3.9.2",
     "numpy>=2.0",
     "scipy>=1.14",
     "tqdm>=4.66",
 ]
 files = [
-    {file = "uqtils-0.4.0-py3-none-any.whl", hash = "sha256:1c51d47afcb0a8f3041803731e31f64ffecb5816d2d837b90bc25353b09b1c0b"},
-    {file = "uqtils-0.4.0.tar.gz", hash = "sha256:2d8ce83ca0d7837919c4061fd02b89e22a0787cbb8d650e74549c23411ad12e4"},
+    {file = "uqtils-0.4.2-py3-none-any.whl", hash = "sha256:c4884454f8a233ab38de03dc648fc4c5af32585b55069bf57085e4d4474124e8"},
+    {file = "uqtils-0.4.2.tar.gz", hash = "sha256:e79928e3fbb8be75299c12079f7fa9dd60a95122e4e36a57ebd5939094e588d3"},
 ]
 
 [[package]]

@@ -42,7 +42,6 @@ import networkx as nx
 import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from uqtils import ax_default
 
 from amisc.component import Component, IndexSet, MiscTree
 from amisc.serialize import Serializable, _builtin
@@ -1456,10 +1455,10 @@ class System(BaseModel, Serializable):
                     y_surr = output_slices_surr[output_var][:, j]
                     ax.plot(x, y_surr, '--r', label='Surrogate')
 
-                ylabel = ylabels[i] if j == 0 else ''
-                xlabel = xlabels[j] if i == len(outputs) - 1 else ''
-                legend = (i == 0 and j == len(inputs) - 1)
-                ax_default(ax, xlabel, ylabel, legend=legend)
+                ax.set_xlabel(xlabels[j] if i == len(outputs) - 1 else '')
+                ax.set_ylabel(ylabels[i] if j == 0 else '')
+                if i == 0 and j == len(inputs) - 1:
+                    ax.legend()
         fig.set_size_inches(subplot_size_in * len(inputs), subplot_size_in * len(outputs))
         fig.tight_layout()
 
@@ -1580,7 +1579,8 @@ class System(BaseModel, Serializable):
                                 arrowprops={'arrowstyle': '->', 'linewidth': 1})
                 else:
                     pass  # Don't label really small bars
-        ax_default(ax, '', "Fraction of total cost", legend=False)
+        ax.set_xlabel('')
+        ax.set_ylabel('Fraction of total cost')
         ax.set_xticks(x, xlabels)
         ax.set_xlim(left=-1, right=x[-1] + 1)
 
