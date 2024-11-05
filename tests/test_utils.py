@@ -3,16 +3,19 @@
 import time
 
 import numpy as np
+from matplotlib import pyplot as plt
 from scipy.linalg import lapack
 
 from amisc.compression import SVD
 from amisc.typing import LATENT_STR_ID
 from amisc.utils import (
     _inspect_function,
+    _RidgeRegression,
     constrained_lls,
     format_inputs,
     get_logger,
     parse_function_string,
+    relative_error,
     to_model_dataset,
     to_surrogate_dataset,
 )
@@ -174,3 +177,46 @@ def test_dataset_conversion():
     assert all([v in surr_vars for v in surr_ds.keys()])
     assert all([var not in surr_ds2 for var in ['ux', 'uy']])
     assert all([np.allclose(surr_ds[var], surr_ds2[var]) for var in surr_ds2])
+
+
+def test_ridge_regression(plots=False):
+    """Test ridge regression utility."""
+    # Test a single input -> single output regression
+    n_samples, n_features, n_targets = 100, 1, 1
+    X = np.random.randn(n_samples, n_features)
+    true_coeff = np.atleast_2d([2.0])       # (n_features, n_targets)
+    true_intercept = np.atleast_1d([1.0])   # n_targets
+    y = X @ true_coeff + true_intercept + np.random.randn(n_samples, n_targets) * 0.5
+
+    model = _RidgeRegression(alpha=1.0)
+    model.fit(X, y)
+    predicted_coeff = model.weights  # (2, 1)
+
+    # Check if the coefficients are close to the true coefficients
+    err = relative_error(predicted_coeff, np.vstack([true_intercept[np.newaxis, ...], true_coeff]))
+    assert err < 0.1, f"Relative error: {err} > 0.1 for ridge regression coefficients"
+
+    # Plot the data and the best linear fit
+    if plots:
+        fig, ax = plt.subplots()
+        ax.scatter(X[:, 0], y[:, 0], color='blue', label='Data')
+        idx = np.argsort(X[:, 0])
+        ax.plot(X[idx, 0], model.predict(X[idx, ...])[:, 0], color='red', label='Best fit')
+        ax.set_xlabel('X')
+        ax.set_ylabel('y')
+        ax.legend()
+        plt.show()
+
+    # Test higher dimensional
+    n_samples, n_features, n_targets = 200, 5, 2
+    X = np.random.randn(n_samples, n_features)
+    true_coeff = np.array([[1.5, -2.0], [0.0, 0.5], [3.0, -1.0], [2.0, -0.5], [1.0, 1.5]])
+    true_intercept = np.array([1.0, -1.0])
+    y = X @ true_coeff + true_intercept + np.random.randn(n_samples, n_targets) * 0.5
+
+    model = _RidgeRegression(alpha=0.1)
+    model.fit(X, y)
+    predicted_coeff = model.weights  # (n_features + 1, n_targets)
+
+    err = relative_error(predicted_coeff, np.vstack([true_intercept[np.newaxis, ...], true_coeff]))
+    assert err < 0.1, f"Relative error: {err} > 0.1 for ridge regression coefficients"

@@ -144,6 +144,54 @@ def constrained_lls(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray) 
     return np.linalg.pinv(R) @ (Q1_T @ b - Q2_T @ w)
 
 
+class _RidgeRegression:
+    """A simple class for ridge regression with closed-form solution."""
+
+    def __init__(self, alpha=1.0):
+        """Initialize the ridge regression model with the given regularization strength $\alpha$."""
+        self.alpha = alpha
+        self.weights = None
+
+    def fit(self, X: np.ndarray, y: np.ndarray):
+        """Fit the ridge regression model to the given data. Compute linear weights (with intercept)
+        of shape `(n_features + 1, n_targets)`.
+
+        $w = (X^T X + \alpha I)^{-1} X^T y$
+
+        :param X: the design matrix of shape `(n_samples, n_features)`
+        :param y: the target values of shape `(n_samples, n_targets)`
+        """
+        n_samples, n_features = X.shape
+
+        # Add bias term (column of ones) to the design matrix for intercept
+        X_bias = np.hstack([np.ones((n_samples, 1)), X])
+
+        # Regularization matrix (identity matrix with top-left value zero for intercept term)
+        identity = np.eye(n_features + 1)
+        identity[0, 0] = 0
+
+        # Closed-form solution (normal equation) for ridge regression
+        A = X_bias.T @ X_bias + self.alpha * identity
+        B = X_bias.T @ y
+        self.weights = np.linalg.solve(A, B)
+
+    def predict(self, X: np.ndarray):
+        """Compute the predicted target values for the given input data.
+
+        :param X: the input data of shape `(n_samples, n_features)`
+        :returns: the predicted target values of shape `(n_samples, n_targets)`
+        """
+        if self.weights is None:
+            raise ValueError("Model is not fitted yet. Call 'fit' with appropriate arguments before using this method.")
+
+        n_samples, n_features = X.shape
+
+        # Add bias term (column of ones) to the design matrix for intercept
+        X_bias = np.hstack([np.ones((n_samples, 1)), X])
+
+        return X_bias @ self.weights
+
+
 def _inspect_function(func):
     """Try to inspect the inputs and outputs of a callable function.
 
@@ -164,7 +212,13 @@ def _inspect_function(func):
         sig = inspect.signature(func)
         pos_args = [param.name for param in sig.parameters.values() if param.default == param.empty
                     and param.kind in (param.POSITIONAL_OR_KEYWORD, param.POSITIONAL_ONLY)]
-        source = inspect.getsource(func).strip()
+
+        try:
+            source = inspect.getsource(func).strip()
+        except OSError:
+            from dill.source import getsource  # inspect in IDLE using dill
+            source = getsource(func).strip()
+
         tree = ast.parse(source)
 
         # Find the return values

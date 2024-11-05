@@ -17,12 +17,10 @@ from typing import Any, ClassVar
 import numpy as np
 from numpy.typing import ArrayLike
 from scipy.optimize import direct
-from sklearn.linear_model import Ridge
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import MaxAbsScaler
 
 from amisc.serialize import PickleSerializable, Serializable
 from amisc.typing import LATENT_STR_ID, Dataset, MultiIndex
+from amisc.utils import _RidgeRegression
 
 __all__ = ['TrainingData', 'SparseGrid']
 
@@ -269,7 +267,7 @@ class SparseGrid(TrainingData, PickleSerializable):
                     yi_mat = np.concatenate([yi_all[var][:, np.newaxis] if len(yi_all[var].shape) == 1 else
                                              yi_all[var].reshape((N, -1)) for var in output_vars], axis=-1)
 
-                    imputer = Pipeline([('scaler', MaxAbsScaler()), ('model', Ridge(alpha=1))])
+                    imputer = _RidgeRegression(alpha=1.0)
                     imputer.fit(xi_mat, yi_mat)
 
                 # Run the imputer for this coordinate
