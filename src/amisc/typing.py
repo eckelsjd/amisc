@@ -7,6 +7,7 @@ Includes:
 - `TrainIteration` — the results of a single training iteration
 - `CompressionData` — a dictionary spec for passing data to/from `Variable.compress()`
 - `LATENT_STR_ID` — a string identifier for latent coefficients of field quantities
+- `COORDS_STR_ID` — a string identifier for coordinate locations of field quantities
 """
 import ast as _ast
 from pathlib import Path as _Path
@@ -16,9 +17,10 @@ import numpy as _np
 from numpy.typing import ArrayLike as _ArrayLike
 from typing_extensions import TypedDict as _TypedDict
 
-__all__ = ["MultiIndex", "Dataset", "TrainIteration", "CompressionData", "LATENT_STR_ID"]
+__all__ = ["MultiIndex", "Dataset", "TrainIteration", "CompressionData", "LATENT_STR_ID", "COORDS_STR_ID"]
 
 LATENT_STR_ID = "_LATENT"  # String identifier for latent variables
+COORDS_STR_ID = "_coords"  # String identifier for coordinate locations
 
 
 class MultiIndex(tuple):

@@ -42,7 +42,7 @@ from typing_extensions import TypedDict
 from amisc.interpolator import Interpolator, InterpolatorState, Lagrange
 from amisc.serialize import PickleSerializable, Serializable, StringSerializable, YamlSerializable
 from amisc.training import SparseGrid, TrainingData
-from amisc.typing import LATENT_STR_ID, Dataset, MultiIndex
+from amisc.typing import COORDS_STR_ID, LATENT_STR_ID, Dataset, MultiIndex
 from amisc.utils import (
     _get_yaml_path,
     _inspect_assignment,
@@ -812,8 +812,9 @@ class Component(BaseModel, Serializable):
         var_shape = {}
         for var in self.inputs:
             s = None
-            if (arr := kwds.get(f'{var.name}_coords')) is not None:
-                s = arr.shape if len(arr.shape) == 1 else arr.shape[:-1]  # skip the coordinate dim (last axis)
+            if (arr := kwds.get(f'{var.name}{COORDS_STR_ID}')) is not None:
+                if not np.issubdtype(arr.dtype, np.object_):  # if not object array, then it's a single coordinate set
+                    s = arr.shape if len(arr.shape) == 1 else arr.shape[:-1]  # skip the coordinate dim (last axis)
             if var.compression is not None:
                 for field in var.compression.fields:
                     var_shape[field] = s
@@ -917,11 +918,11 @@ class Component(BaseModel, Serializable):
                         # Save numeric outputs
                         numeric_flag = False
                         for var in self.outputs:
-                            if var.compression is not None:  # field quantity return values
-                                if key in var.compression.fields:
+                            if var.compression is not None:  # field quantity return values (save as object arrays)
+                                if key in var.compression.fields or key == f'{var}{COORDS_STR_ID}':
                                     if output_dict.get(key) is None:
-                                        output_dict.setdefault(key, np.full((N, *np.atleast_1d(val).shape), np.nan))
-                                    output_dict[key][i, ...] = np.atleast_1d(val)
+                                        output_dict.setdefault(key, np.full((N,), None, dtype=object))
+                                    output_dict[key][i] = np.atleast_1d(val)
                                     numeric_flag = True
                                     break
                             elif key == var:
@@ -930,6 +931,7 @@ class Component(BaseModel, Serializable):
                                 output_dict[key][i, ...] = np.atleast_1d(val)
                                 numeric_flag = True
                                 break
+
                         # Otherwise, save other objects
                         if not numeric_flag:
                             if key == 'model_cost':
@@ -948,8 +950,7 @@ class Component(BaseModel, Serializable):
                 alpha_costs.setdefault(MultiIndex(model_fidelity[i]), [])
                 alpha_costs[MultiIndex(model_fidelity[i])].append(cost)
             for a, costs in alpha_costs.items():
-                self.model_costs.setdefault(a, np.empty(0))
-                self.model_costs[a] = np.nanmean(np.hstack((costs, self.model_costs[a])))
+                self.model_costs[a] = float(np.nanmean(np.hstack((costs, self.model_costs.get(a, [])))))
 
         # Reshape loop dimensions to match the original input shape
         output_dict = format_outputs(output_dict, loop_shape)
@@ -1007,16 +1008,21 @@ class Component(BaseModel, Serializable):
             outputs = self.call_model(inputs, model_fidelity=use_model, output_path=model_dir, executor=executor,**kwds)
             ret = {}
             for var in self.outputs:
-                if var in outputs:
-                    ret[var.name] = outputs[var.name]
-                elif var.compression is not None:
+                if var.compression is not None:
+                    coords_str = f'{var}{COORDS_STR_ID}'
+                    if coords_str in outputs:
+                        ret[coords_str] = outputs[coords_str]
                     for field in var.compression.fields:
                         ret[field] = outputs[field]
+                elif var in outputs:
+                    ret[var.name] = outputs[var.name]
+
             return ret
 
         # Convert inputs/outputs to/from model if no surrogate (i.e. analytical models)
         if not self.has_surrogate:
-            field_coords = {f'{var}_coords': self.model_kwargs.get(f'{var}_coords', kwds.get(f'{var}_coords', None))
+            field_coords = {f'{var}{COORDS_STR_ID}':
+                            self.model_kwargs.get(f'{var}{COORDS_STR_ID}', kwds.get(f'{var}{COORDS_STR_ID}', None))
                             for var in self.inputs}
             inputs, field_coords = to_model_dataset(inputs, self.inputs, del_latent=True, **field_coords)
             field_coords.update(kwds)
@@ -1134,7 +1140,8 @@ class Component(BaseModel, Serializable):
         alpha_list = []    # keep track of model fidelities
         design_list = []   # keep track of training data coordinates/locations/indices
         model_inputs = {}  # concatenate all model inputs
-        field_coords = {f'{var}_coords': self.model_kwargs.get(f'{var}_coords', None) for var in self.inputs}
+        field_coords = {f'{var}{COORDS_STR_ID}': self.model_kwargs.get(f'{var}{COORDS_STR_ID}', None)
+                        for var in self.inputs}
         domains = self.inputs.get_domains()
         weight_fcns = self.inputs.get_pdfs()
         for a, b in indices:

@@ -12,7 +12,7 @@ from uqtils import ax_default
 
 from amisc import Component, System, Variable
 from amisc.compression import SVD
-from amisc.utils import relative_error, to_model_dataset
+from amisc.utils import relative_error
 
 
 def test_feedforward_simple(plots=False):
@@ -463,14 +463,17 @@ def test_turbojet_cycle(tmp_path):
     comp3 = Component(turbine, [eta_t, v3, p1], [v4], data_fidelity=(2, 2, 2), model_fidelity=(3,), name='Turbine')
     system = System(comp1, comp2, comp3, root_dir=tmp_path)
 
+    def _object_to_numeric(array):  # for field quantities
+        return np.concatenate([arr[np.newaxis, ...] for arr in array], axis=0)
+
     # Generate compression data
     xtest = {'Ta': Ta_samples, 'v1': v1_samples.T, 'eta_t': eta_t_samples}
     ytest = system.predict(xtest, use_model='best', normalized_inputs=False)
     v1.compression.compute_map(data_matrix=v1_samples)
-    v2.compression.compute_map(data_matrix=ytest['v2'].T)
-    v3.compression.compute_map(data_matrix=ytest['v3'].T)
-    v4.compression.compute_map(data_matrix=ytest['v4'].T)
-    p1.compression.compute_map(data_matrix=ytest['p1'].T)
+    v2.compression.compute_map(data_matrix=_object_to_numeric(ytest['v2']).T)
+    v3.compression.compute_map(data_matrix=_object_to_numeric(ytest['v3']).T)
+    v4.compression.compute_map(data_matrix=_object_to_numeric(ytest['v4']).T)
+    p1.compression.compute_map(data_matrix=_object_to_numeric(ytest['p1']).T)
 
     # Set domain estimate for v1 latent coefficients
     v1_latent = v1.compression.compress(v1_samples.T)
@@ -479,7 +482,6 @@ def test_turbojet_cycle(tmp_path):
     system.fit(max_iter=15, test_set=(xtest, ytest), estimate_bounds=True)
 
     # Check error
-    ysurr_norm = system.predict(xtest, normalized_inputs=False)
-    ysurr = to_model_dataset(ysurr_norm, system.outputs())[0]
-    for var in ysurr:
-        assert relative_error(ysurr[var], ytest[var]) < 0.15
+    final_iter = system.train_history[-1]
+    for var, perf in final_iter['test_error'].items():
+        assert perf < 0.15

@@ -88,8 +88,13 @@ class Compression(PickleSerializable, ABC):
     def _correct_coords(self, coords):
         """Correct the coordinates to be in the correct shape for compression."""
         coords = np.atleast_1d(coords)
-        if len(coords.shape) == 1:
-            coords = coords[..., np.newaxis] if self.dim == 1 else coords[np.newaxis, ...]
+        if np.issubdtype(coords.dtype, np.object_):  # must be 1d object array of np.arrays (for unique coords)
+            for i, arr in enumerate(coords):
+                if len(arr.shape) == 1:
+                    coords[i] = arr[..., np.newaxis] if self.dim == 1 else arr[np.newaxis, ...]
+        else:
+            if len(coords.shape) == 1:
+                coords = coords[..., np.newaxis] if self.dim == 1 else coords[np.newaxis, ...]
         return coords
 
     def interpolator(self):
@@ -116,55 +121,107 @@ class Compression(PickleSerializable, ABC):
         """Interpolate the states on the compression grid to new coordinates.
 
         :param states: `(*loop_shape, dof)` - the states on the compression grid
-        :param new_coords: `(*coord_shape, dim)` - the new coordinates to interpolate to
-        :return: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the interpolated states
+        :param new_coords: `(*coord_shape, dim)` - the new coordinates to interpolate to; if a 1d object array, then
+                            each element is assumed to be a unique `(*coord_shape, dim)` array with assumed
+                            same length as loop_shape of the states -- will interpolate each state to the
+                            corresponding new coordinates
+        :return: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the interpolated states; will return a
+                 single 1d object array for each qoi if new_coords is a 1d object array
         """
         new_coords = self._correct_coords(new_coords)
         grid_coords = self._correct_coords(self.coords)
-        skip_interp = (new_coords.shape == grid_coords.shape and np.allclose(new_coords, grid_coords))
 
-        ret_dict = {}
-        loop_shape = states.shape[:-1]
-        coords_shape = new_coords.shape[:-1]
-        states = states.reshape((*loop_shape, self.num_pts, self.num_qoi))
-        new_coords = new_coords.reshape((-1, self.dim))
-        for i, qoi in enumerate(self.fields):
-            if skip_interp:
-                ret_dict[qoi] = states[..., i]
+        coords_obj_array = np.issubdtype(new_coords.dtype, np.object_)
+
+        # Iterate over one set of coords and states at a time
+        def _iterate_coords_and_states():
+            if coords_obj_array:
+                for c, s in zip(new_coords, states):  # assumes same number of coords and states
+                    yield c, s
             else:
-                reshaped_states = states[..., i].reshape(-1, self.num_pts).T  # (num_pts, ...)
-                interp = self.interpolator()(grid_coords, reshaped_states, **self.interpolate_opts)
-                yp = interp(new_coords)
-                ret_dict[qoi] = yp.T.reshape(*loop_shape, *coords_shape)
+                for s in states:  # assumes same coords for all states
+                    yield new_coords, s
 
-        return ret_dict
+        # Do interpolation for each set of unique coordinates (if multiple)
+        all_qois = []
+        for j, (n_coords, state) in enumerate(_iterate_coords_and_states()):
+            skip_interp = (n_coords.shape == grid_coords.shape and np.allclose(n_coords, grid_coords))
+
+            ret_dict = {}
+            loop_shape = state.shape[:-1]
+            coords_shape = n_coords.shape[:-1]
+            state = state.reshape((*loop_shape, self.num_pts, self.num_qoi))
+            n_coords = n_coords.reshape((-1, self.dim))
+            for i, qoi in enumerate(self.fields):
+                if skip_interp:
+                    ret_dict[qoi] = state[..., i]
+                else:
+                    reshaped_states = state[..., i].reshape(-1, self.num_pts).T  # (num_pts, ...)
+                    interp = self.interpolator()(grid_coords, reshaped_states, **self.interpolate_opts)
+                    yp = interp(n_coords)
+                    ret_dict[qoi] = yp.T.reshape(*loop_shape, *coords_shape)
+
+            all_qois.append(ret_dict)
+
+        if coords_obj_array:
+            # Make a 1d object array for each qoi, where each element is a unique `(*loop_shape, *coord_shape)` array
+            ret = {qoi: np.empty(len(all_qois), dtype=object) for qoi in all_qois[0]}
+            for qoi in all_qois[0]:
+                for i, qoi_dict in enumerate(all_qois):
+                    ret[qoi][i] = qoi_dict[qoi]
+        else:
+            # Otherwise, all loop dims used the same coords, so just return the single array for each qoi
+            ret = {qoi: np.concatenate([res[qoi][np.newaxis, ...] for res in all_qois], axis=0) for qoi in all_qois[0]}
+
+        return ret
 
     def interpolate_to_grid(self, field_coords: np.ndarray, field_values):
         """Interpolate the field values at given coordinates to the compression grid.
 
-        :param field_coords: `(*coord_shape, dim)` - the coordinates of the field values
-        :param field_values: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the field values at the coordinates
+        :param field_coords: `(*coord_shape, dim)` - the coordinates of the field values; if a 1d object array, then
+                             each element is assumed to be a unique `(*coord_shape, dim)` array
+        :param field_values: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the field values at the coordinates;
+                              if each array is a 1d object array, then each element is assumed to be a unique
+                             `(*loop_shape, *coord_shape)` array corresponding to the `field_coords`
         :return: `(*loop_shape, dof)` - the interpolated values on the compression grid
         """
         field_coords = self._correct_coords(field_coords)
         grid_coords = self._correct_coords(self.coords)
-        skip_interp = (field_coords.shape == grid_coords.shape and np.allclose(field_coords, grid_coords))
+        field_values = [{qoi: field_values[qoi][i] for qoi in field_values}
+                        for i in range(len(next(iter(field_values.values()))))]  # need to loop over one field at a time
 
-        coords_shape = field_coords.shape[:-1]
-        loop_shape = next(iter(field_values.values())).shape[:-len(coords_shape)]
-        states = np.empty((*loop_shape, self.num_pts, self.num_qoi))
-        field_coords = field_coords.reshape(-1, self.dim)
-        for i, qoi in enumerate(self.fields):
-            field_vals = field_values[qoi].reshape((*loop_shape, -1))  # (..., Q)
-            if skip_interp:
-                states[..., i] = field_vals
+        # Loop over each set of coordinates and field values (multiple if they are object arrays)
+        # If only one set of coords, then they are assumed the same for each set of field values
+        coords_obj_array = np.issubdtype(field_coords.dtype, np.object_)
+        def _iterate_coords_and_fields():
+            if coords_obj_array:
+                for c, val in zip(field_coords, field_values):  # assumes same number of coords and field values
+                    yield c, val
             else:
-                field_vals = field_vals.reshape((-1, field_vals.shape[-1])).T  # (Q, ...)
-                interp = self.interpolator()(field_coords, field_vals, **self.interpolate_opts)
-                yg = interp(grid_coords)
-                states[..., i] = yg.T.reshape(*loop_shape, self.num_pts)
+                for val in field_values:  # assumes same coords for all field values
+                    yield field_coords, val
 
-        return states.reshape((*loop_shape, self.dof))
+        all_states = []
+        for j, (f_coords, f_values) in enumerate(_iterate_coords_and_fields()):
+            skip_interp = (f_coords.shape == grid_coords.shape and np.allclose(f_coords, grid_coords))
+
+            coords_shape = f_coords.shape[:-1]
+            loop_shape = next(iter(f_values.values())).shape[:-len(coords_shape)]
+            states = np.empty((*loop_shape, self.num_pts, self.num_qoi))
+            f_coords = f_coords.reshape(-1, self.dim)
+            for i, qoi in enumerate(self.fields):
+                field_vals = f_values[qoi].reshape((*loop_shape, -1))  # (..., Q)
+                if skip_interp:
+                    states[..., i] = field_vals
+                else:
+                    field_vals = field_vals.reshape((-1, field_vals.shape[-1])).T  # (Q, ...)
+                    interp = self.interpolator()(f_coords, field_vals, **self.interpolate_opts)
+                    yg = interp(grid_coords)
+                    states[..., i] = yg.T.reshape(*loop_shape, self.num_pts)
+            all_states.append(states.reshape((*loop_shape, self.dof)))
+
+        # All fields now on the same dof grid, so stack them
+        return np.concatenate([s[np.newaxis, ...] for s in all_states], axis=0)
 
     @abstractmethod
     def compute_map(self, **kwargs):
