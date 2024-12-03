@@ -1414,7 +1414,7 @@ class System(BaseModel, Serializable):
         all_outputs = self.outputs()
         rand_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
         if model_dir is not None:
-            os.mkdir(Path(model_dir) / f'sweep_{rand_id}')
+            os.mkdir(Path(model_dir) / f'slice_{rand_id}')
         if nominal is None:
             nominal = dict()
         inputs = all_inputs[:3] if inputs is None else inputs
@@ -1478,7 +1478,7 @@ class System(BaseModel, Serializable):
                 for model in show_model:
                     output_dir = None
                     if model_dir is not None:
-                        output_dir = (Path(model_dir) / f'sweep_{rand_id}' /
+                        output_dir = (Path(model_dir) / f'slice_{rand_id}' /
                                       str(model).replace('{', '').replace('}', '').replace(':', '=').replace("'", ''))
                         os.mkdir(output_dir)
                     output_slices_model.append(self.predict(input_slices, use_model=model, model_dir=output_dir,
@@ -1520,8 +1520,8 @@ class System(BaseModel, Serializable):
         # Save results (unless we were already loading from a save file)
         if from_file is None and self.root_dir is not None:
             fname = f'in={",".join([str(v) for v in inputs])}_out={",".join([str(v) for v in outputs])}'
-            fname = f'sweep_rand{rand_id}_' + fname if random_walk else f'sweep_nom{rand_id}_' + fname
-            fdir = Path(self.root_dir) if model_dir is None else Path(model_dir) / f'sweep_{rand_id}'
+            fname = f'slice_rand{rand_id}_' + fname if random_walk else f'slice_nom{rand_id}_' + fname
+            fdir = Path(self.root_dir) if model_dir is None else Path(model_dir) / f'slice_{rand_id}'
             fig.savefig(fdir / f'{fname}.pdf', bbox_inches='tight', format='pdf')
             save_dict = {'inputs': inputs, 'outputs': outputs, 'show_model': show_model, 'show_surr': show_surr,
                          'nominal': nominal, 'random_walk': random_walk, 'input_slices': input_slices,
