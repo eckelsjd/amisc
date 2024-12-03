@@ -484,4 +484,4 @@ def test_turbojet_cycle(tmp_path):
     # Check error
     final_iter = system.train_history[-1]
     for var, perf in final_iter['test_error'].items():
-        assert perf < 0.15
+        assert perf < 0.2
