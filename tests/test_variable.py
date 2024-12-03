@@ -243,22 +243,22 @@ def test_compression_interpolation():
     assert np.allclose(on_grid, from_grid['r'])
 
     # Test vectorized arrays to/from
-    vec_coords = np.empty(100, dtype=object)
-    vec_values = np.empty((100, 27))
-    for i in range(100):
+    vec_coords = np.empty((10, 5), dtype=object)
+    vec_values = np.empty((10, 5, 27))
+    for i in np.ndindex(vec_coords.shape):
         vec_coords[i] = np.sort(np.random.uniform(-1, 1, 27))
         vec_values[i] = np.tanh(vec_coords[i])
     on_grid = svd.interpolate_to_grid(vec_coords, {'r': vec_values})
     from_grid = svd.interpolate_from_grid(on_grid, vec_coords)
-    assert on_grid.shape == (100, num_features)
-    assert all([relative_error(from_grid['r'][i], vec_values[i]) < 0.001 for i in range(100)])
+    assert on_grid.shape == (10, 5, num_features)
+    assert all([relative_error(from_grid['r'][i], vec_values[i]) < 0.001 for i in np.ndindex(vec_coords.shape)])
 
     # Test vectorized arrays with object grid coord
-    test_coords = np.empty(100, dtype=object)
-    for i in range(100):
+    test_coords = np.empty((10, 5), dtype=object)
+    for i in np.ndindex(test_coords.shape):
         test_coords[i] = np.linspace(-1, 1, np.random.randint(20, 50))
     from_grid = svd.interpolate_from_grid(on_grid, test_coords)
-    for i in range(100):
+    for i in np.ndindex(test_coords.shape):
         to_grid = svd.interpolate_to_grid(test_coords[i], {'r': from_grid['r'][i][np.newaxis, ...]})
         assert relative_error(to_grid[0], on_grid[i]) < 0.001
         assert from_grid['r'][i].shape[0] == test_coords[i].shape[0]

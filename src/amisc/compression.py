@@ -88,8 +88,8 @@ class Compression(PickleSerializable, ABC):
     def _correct_coords(self, coords):
         """Correct the coordinates to be in the correct shape for compression."""
         coords = np.atleast_1d(coords)
-        if np.issubdtype(coords.dtype, np.object_):  # must be 1d object array of np.arrays (for unique coords)
-            for i, arr in enumerate(coords):
+        if np.issubdtype(coords.dtype, np.object_):  # must be object array of np.arrays (for unique coords)
+            for i, arr in np.ndenumerate(coords):
                 if len(arr.shape) == 1:
                     coords[i] = arr[..., np.newaxis] if self.dim == 1 else arr[np.newaxis, ...]
         else:
@@ -136,15 +136,15 @@ class Compression(PickleSerializable, ABC):
         # Iterate over one set of coords and states at a time
         def _iterate_coords_and_states():
             if coords_obj_array:
-                for c, s in zip(new_coords, states):  # assumes same number of coords and states
-                    yield c, s
+                for index, c in np.ndenumerate(new_coords):  # assumes same number of coords and states
+                    yield index, c, states[index]
             else:
-                for s in states:  # assumes same coords for all states
-                    yield new_coords, s
+                yield (0,), new_coords, states  # assumes same coords for all states
+
+        all_qois = np.empty(new_coords.shape if coords_obj_array else (1,), dtype=object)
 
         # Do interpolation for each set of unique coordinates (if multiple)
-        all_qois = []
-        for j, (n_coords, state) in enumerate(_iterate_coords_and_states()):
+        for j, n_coords, state in _iterate_coords_and_states():
             skip_interp = (n_coords.shape == grid_coords.shape and np.allclose(n_coords, grid_coords))
 
             ret_dict = {}
@@ -161,17 +161,18 @@ class Compression(PickleSerializable, ABC):
                     yp = interp(n_coords)
                     ret_dict[qoi] = yp.T.reshape(*loop_shape, *coords_shape)
 
-            all_qois.append(ret_dict)
+            all_qois[j] = ret_dict
 
         if coords_obj_array:
-            # Make a 1d object array for each qoi, where each element is a unique `(*loop_shape, *coord_shape)` array
-            ret = {qoi: np.empty(len(all_qois), dtype=object) for qoi in all_qois[0]}
-            for qoi in all_qois[0]:
-                for i, qoi_dict in enumerate(all_qois):
-                    ret[qoi][i] = qoi_dict[qoi]
+            # Make an object array for each qoi, where each element is a unique `(*loop_shape, *coord_shape)` array
+            _, _first_dict = next(np.ndenumerate(all_qois))
+            ret = {qoi: np.empty(all_qois.shape, dtype=object) for qoi in _first_dict}
+            for qoi in ret:
+                for index, qoi_dict in np.ndenumerate(all_qois):
+                    ret[qoi][index] = qoi_dict[qoi]
         else:
             # Otherwise, all loop dims used the same coords, so just return the single array for each qoi
-            ret = {qoi: np.concatenate([res[qoi][np.newaxis, ...] for res in all_qois], axis=0) for qoi in all_qois[0]}
+            ret = all_qois[0]
 
         return ret
 
@@ -187,22 +188,31 @@ class Compression(PickleSerializable, ABC):
         """
         field_coords = self._correct_coords(field_coords)
         grid_coords = self._correct_coords(self.coords)
-        field_values = [{qoi: field_values[qoi][i] for qoi in field_values}
-                        for i in range(len(next(iter(field_values.values()))))]  # need to loop over one field at a time
 
         # Loop over each set of coordinates and field values (multiple if they are object arrays)
         # If only one set of coords, then they are assumed the same for each set of field values
         coords_obj_array = np.issubdtype(field_coords.dtype, np.object_)
+        fields_obj_array = np.issubdtype(next(iter(field_values.values())).dtype, np.object_)
         def _iterate_coords_and_fields():
             if coords_obj_array:
-                for c, val in zip(field_coords, field_values):  # assumes same number of coords and field values
-                    yield c, val
+                for index, c in np.ndenumerate(field_coords):  # assumes same number of coords and field values
+                    yield index, c, {qoi: field_values[qoi][index] for qoi in field_values}
+            elif fields_obj_array:
+                for index in np.ndindex(next(iter(field_values.values())).shape):
+                    yield index, field_coords, {qoi: field_values[qoi][index] for qoi in field_values}
             else:
-                for val in field_values:  # assumes same coords for all field values
-                    yield field_coords, val
+                yield (0,), field_coords, field_values  # assumes same coords for all field values
 
-        all_states = []
-        for j, (f_coords, f_values) in enumerate(_iterate_coords_and_fields()):
+        if coords_obj_array:
+            shape = field_coords.shape
+        elif fields_obj_array:
+            shape = next(iter(field_values.values())).shape
+        else:
+            shape = (1,)
+
+        all_states = np.empty(shape, dtype=object)  # are you in good hands?
+
+        for j, f_coords, f_values in _iterate_coords_and_fields():
             skip_interp = (f_coords.shape == grid_coords.shape and np.allclose(f_coords, grid_coords))
 
             coords_shape = f_coords.shape[:-1]
@@ -218,10 +228,19 @@ class Compression(PickleSerializable, ABC):
                     interp = self.interpolator()(f_coords, field_vals, **self.interpolate_opts)
                     yg = interp(grid_coords)
                     states[..., i] = yg.T.reshape(*loop_shape, self.num_pts)
-            all_states.append(states.reshape((*loop_shape, self.dof)))
+            all_states[j] = states.reshape((*loop_shape, self.dof))
 
-        # All fields now on the same dof grid, so stack them
-        return np.concatenate([s[np.newaxis, ...] for s in all_states], axis=0)
+        # All fields now on the same dof grid, so stack them in same array
+        index = next(np.ndindex(all_states.shape))
+        ret_states = np.empty(shape + all_states[index].shape)
+
+        for index, arr in np.ndenumerate(all_states):
+            ret_states[index] = arr
+
+        if not (coords_obj_array or fields_obj_array):
+            ret_states = np.squeeze(ret_states, axis=0)  # artificial leading dim for non-object arrays
+
+        return ret_states
 
     @abstractmethod
     def compute_map(self, **kwargs):
