@@ -31,6 +31,7 @@ import pickle
 import random
 import string
 import time
+import warnings
 from collections import ChainMap, UserList, deque
 from concurrent.futures import ALL_COMPLETED, Executor, wait
 from datetime import timezone
@@ -41,11 +42,12 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import yaml
+from matplotlib.ticker import MaxNLocator
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from amisc.component import Component, IndexSet, MiscTree
 from amisc.serialize import Serializable, _builtin
-from amisc.typing import LATENT_STR_ID, Dataset, MultiIndex, TrainIteration
+from amisc.typing import COORDS_STR_ID, LATENT_STR_ID, Dataset, MultiIndex, TrainIteration
 from amisc.utils import (
     _combine_latent_arrays,
     constrained_lls,
@@ -582,7 +584,6 @@ class System(BaseModel, Serializable):
             # See the "index_set" and "misc_coeff" overrides for `System.predict()` for example
             yield train_result, active_sets, candidate_sets, misc_coeff_train, misc_coeff_test
 
-
     def add_output(self):
         """Add an output variable retroactively to a component surrogate. User should provide a callable that
         takes a save path and extracts the model output data for given training point/location.
@@ -691,14 +692,16 @@ class System(BaseModel, Serializable):
 
                 if plot_interval > 0 and self.refine_level % plot_interval == 0:
                     err_ax.clear(); err_ax.set_yscale('log'); err_ax.grid()
+                    err_ax.xaxis.set_major_locator(MaxNLocator(integer=True))
                     err_ax.plot(err_record, '-k')
                     err_ax.set_xlabel('Iteration'); err_ax.set_ylabel('Relative error indicator')
                     err_fig.savefig(str(Path(self.root_dir) / 'error_indicator.pdf'), format='pdf', bbox_inches='tight')
 
             # Save performance on a test set
             if xtest is not None and ytest is not None:
+                # don't compute if components are uninitialized
                 perf = self.test_set_performance(xtest, ytest) if self.refine_level >= start_test_check else (
-                    {str(var): np.nan for var in ytest})  # don't compute if components are uninitialized
+                    {str(var): np.nan for var in ytest if COORDS_STR_ID not in var})
                 train_result['test_error'] = perf.copy()
 
                 if self.root_dir is not None:
@@ -706,7 +709,10 @@ class System(BaseModel, Serializable):
 
                     if plot_interval > 0 and self.refine_level % plot_interval == 0:
                         for i in range(num_plot):
-                            t_ax[0, i].clear(); t_ax[0, i].set_yscale('log'); t_ax[0, i].grid()
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore", UserWarning)
+                                t_ax[0, i].clear(); t_ax[0, i].set_yscale('log'); t_ax[0, i].grid()
+                            t_ax[0, i].xaxis.set_major_locator(MaxNLocator(integer=True))
                             t_ax[0, i].plot(test_record[:, i], '-k')
                             t_ax[0, i].set_title(self.outputs()[targets[i]].get_tex(units=True))
                             t_ax[0, i].set_xlabel('Iteration')
@@ -752,10 +758,24 @@ class System(BaseModel, Serializable):
         :param index_set: index set to use for prediction (defaults to 'train')
         :returns: `dict` of relative L2 errors for each target output variable
         """
+        targets = [var for var in ytest.keys() if COORDS_STR_ID not in var]
+        coords = {var: ytest[var] for var in ytest if COORDS_STR_ID in var}
         xtest = to_surrogate_dataset(xtest, self.inputs(), del_fields=True)[0]
-        ysurr = self.predict(xtest, index_set=index_set, targets=list(ytest.keys()))
-        ysurr = to_model_dataset(ysurr, self.outputs(), del_latent=True)[0]
-        return {str(var): float(relative_error(ysurr[var], ytest[var])) for var in ytest}
+        ysurr = self.predict(xtest, index_set=index_set, targets=targets)
+        ysurr = to_model_dataset(ysurr, self.outputs(), del_latent=True, **coords)[0]
+        perf = {}
+        for var in targets:
+            # Handle relative error for object arrays (field qtys)
+            if np.issubdtype(ytest[var].dtype, np.object_) or np.issubdtype(ysurr[var].dtype, np.object_):
+                num, den = [], []
+                for pred, targ in zip(ysurr[var], ytest[var]):
+                    num.append((pred - targ)**2)
+                    den.append(targ ** 2)
+                perf[var] = float(np.sqrt(sum([np.sum(n) for n in num]) / sum([np.sum(d) for d in den])))
+            else:
+                perf[var] = float(relative_error(ysurr[var], ytest[var]))
+
+        return perf
 
     def refine(self, targets: list = None, num_refine: int = 100, update_bounds: bool = True,
                executor: Executor = None) -> TrainIteration:
@@ -923,7 +943,8 @@ class System(BaseModel, Serializable):
         var_shape = var_shape or {}
         x, loop_shape = format_inputs(x, var_shape=var_shape)  # {'x': (N, *var_shape)}
         y = {}
-        all_inputs = ChainMap(x, y)
+        all_inputs = ChainMap(x, y)   # track all inputs (including coupling vars in y)
+        all_coords = {}               # track field coordinates for each field quantity
         N = int(np.prod(loop_shape))
         t1 = 0
         output_dir = None
@@ -961,8 +982,8 @@ class System(BaseModel, Serializable):
             """Helper to gather inputs for a component, making sure they are normalized correctly. Any coupling
             variables passed in will be used in preference over `all_inputs`.
             """
-            # Will access but not modify: all_inputs, use_model, norm_status
-            kwds = {}
+            # Will access but not modify: all_inputs, all_coords, use_model, norm_status
+            field_coords = {}
             comp_input = {}
             coupling = coupling or {}
 
@@ -975,8 +996,15 @@ class System(BaseModel, Serializable):
                 if var_id in comp.inputs and var not in coupling:
                     comp_input[var] = np.copy(arr[samples.curr_idx, ...])
 
+            # Gather field coordinates
+            for var in comp.inputs:
+                coords_str = f'{var}{COORDS_STR_ID}'
+                if (coords := all_coords.get(coords_str)) is not None:
+                    field_coords[coords_str] = coords[samples.curr_idx, ...]
+                elif (coords := comp.model_kwargs.get(coords_str)) is not None:
+                    field_coords[coords_str] = coords
+
             # Gather extra fields (will never be in coupling since field couplings should always be latent coeff)
-            field_coords = {f'{var}_coords': comp.model_kwargs.get(f'{var}_coords', None) for var in comp.inputs}
             for var in comp.inputs:
                 if var not in comp_input and var.compression is not None:
                     for field in var.compression.fields:
@@ -989,11 +1017,10 @@ class System(BaseModel, Serializable):
             if call_model:
                 norm_inputs = {var: arr for var, arr in comp_input.items() if norm_status[var]}
                 if len(norm_inputs) > 0:
-                    denorm_inputs, field_coords = to_model_dataset(norm_inputs, comp.inputs, del_latent=True,
-                                                                   **field_coords)
+                    denorm_inputs, fc = to_model_dataset(norm_inputs, comp.inputs, del_latent=True, **field_coords)
                     for var in norm_inputs:
                         del comp_input[var]
-                    kwds.update(field_coords)
+                    field_coords.update(fc)
                     comp_input.update(denorm_inputs)
 
             # Otherwise, make sure we format inputs for surrogate evaluation (i.e. normalize)
@@ -1006,7 +1033,7 @@ class System(BaseModel, Serializable):
                         del comp_input[var]
                     comp_input.update(norm_inputs)
 
-            return comp_input, kwds, call_model
+            return comp_input, field_coords, call_model
 
         # Convert system into DAG by grouping strongly-connected-components
         dag = nx.condensation(graph)
@@ -1027,7 +1054,7 @@ class System(BaseModel, Serializable):
 
                 # Gather inputs
                 comp = self[scc[0]]
-                comp_input, kwds, call_model = _gather_comp_inputs(comp)
+                comp_input, field_coords, call_model = _gather_comp_inputs(comp)
 
                 # Compute outputs
                 if model_dir is not None:
@@ -1036,14 +1063,26 @@ class System(BaseModel, Serializable):
                         os.mkdir(output_dir)
                 comp_output = comp.predict(comp_input, use_model=use_model.get(scc[0]), model_dir=output_dir,
                                            index_set=index_set.get(scc[0]), incremental=incremental.get(scc[0]),
-                                           misc_coeff=misc_coeff.get(scc[0]), executor=executor, **kwds)
+                                           misc_coeff=misc_coeff.get(scc[0]), executor=executor, **field_coords)
+
                 for var, arr in comp_output.items():
-                    output_shape = arr.shape[1:]
-                    if y.get(var) is None:
-                        y.setdefault(var, np.full((N, *output_shape), np.nan))
-                    y[var][samples.curr_idx, ...] = arr
-                    samples.valid_idx = np.logical_and(samples.valid_idx, ~np.any(np.isnan(y[var]),
-                                                                                  axis=tuple(range(1, y[var].ndim))))
+                    if COORDS_STR_ID in var:
+                        all_coords[var] = arr
+                        continue
+
+                    if np.issubdtype(arr.dtype, np.number):  # for scalars or vectorized field quantities
+                        output_shape = arr.shape[1:]
+                        if y.get(var) is None:
+                            y.setdefault(var, np.full((N, *output_shape), np.nan))
+                        y[var][samples.curr_idx, ...] = arr
+                        samples.valid_idx = np.logical_and(samples.valid_idx,
+                                                           ~np.any(np.isnan(y[var]), axis=tuple(range(1, y[var].ndim))))
+                    else:  # for fields returned as object arrays
+                        if y.get(var) is None:
+                            y.setdefault(var, np.full((N,), None, dtype=object))
+                        y[var][samples.curr_idx] = arr
+                        samples.valid_idx = np.logical_and(samples.valid_idx,
+                                                           [~np.any(np.isnan(y[var][i])) for i in range(N)])
                     is_computed[str(var).split(LATENT_STR_ID)[0]] = True
                     norm_status[var] = not call_model
 
@@ -1125,15 +1164,25 @@ class System(BaseModel, Serializable):
                                                    index_set=index_set.get(node), incremental=incremental.get(node),
                                                    misc_coeff=misc_coeff.get(node), executor=executor, **kwds)
                         for var, arr in comp_output.items():
-                            output_shape = arr.shape[1:]
-                            if y.get(var) is not None:
-                                if output_shape != y.get(var).shape[1:]:
-                                    y[var] = _merge_shapes((N, *output_shape), y[var])
-                            else:
-                                y.setdefault(var, np.full((N, *output_shape), np.nan))
-                                norm_status[var] = not call_model
-                                is_computed[var] = True
-                            y[var][samples.curr_idx, ...] = arr
+                            if COORDS_STR_ID in var:
+                                all_coords[var] = arr
+                                continue
+
+                            if np.issubdtype(arr.dtype, np.number):  # scalars and vectorized field quantities
+                                output_shape = arr.shape[1:]
+                                if y.get(var) is not None:
+                                    if output_shape != y.get(var).shape[1:]:
+                                        y[var] = _merge_shapes((N, *output_shape), y[var])
+                                else:
+                                    y.setdefault(var, np.full((N, *output_shape), np.nan))
+                                y[var][samples.curr_idx, ...] = arr
+                            else:  # fields returned as object arrays
+                                if y.get(var) is None:
+                                    y.setdefault(var, np.full((N,), None, dtype=object))
+                                y[var][samples.curr_idx] = arr
+
+                            norm_status[var] = not call_model
+                            is_computed[var] = True
 
                     # Compute residual and check end conditions
                     if _end_conditions_met():
@@ -1176,6 +1225,7 @@ class System(BaseModel, Serializable):
                     k += 1
 
         # Return all component outputs; samples that didn't converge during FPI are left as np.nan
+        y.update(all_coords)
         return format_outputs(y, loop_shape)
 
     def __call__(self, *args, **kwargs):

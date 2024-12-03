@@ -178,6 +178,92 @@ def test_compression_fields():
     assert relative_error(pressure_reconstruct['pressure_y'], pressure_y) < 0.01
 
 
+def test_compression_coords():
+    """Test compression with different sets of coordinates in a single call."""
+    A = Variable('A', distribution='U(-5, 5)')
+    p = Variable('p')
+
+    def model(inputs, coords):
+        amp = inputs['A']
+        return {'p': amp[..., np.newaxis] * np.tanh(np.squeeze(coords))}
+
+    # Generate SVD data matrix
+    rank = 4
+    samples = A.sample(50)
+    svd_coords = np.linspace(-2, 2, 200)
+    outputs = model({str(A): samples}, svd_coords)
+    data_matrix = outputs[p].T  # (dof, num_samples)
+    p.compression = SVD(rank=rank, coords=svd_coords, data_matrix=data_matrix)
+
+    # Test compression
+    coarse_shapes = [25, 50, 75, 100, 200]
+    coarse_coords = np.array([np.linspace(-2, 2, s) for s in coarse_shapes], dtype=object)
+    num_test = (5, 20)
+    samples = A.sample(num_test)
+    outputs = [model({str(A): samples}, coords) for coords in coarse_coords]
+    outputs_obj = {var: np.empty(len(coarse_shapes), dtype=object) for var in outputs[0]}
+    for var in outputs[0]:
+        for i, out in enumerate(outputs):
+            outputs_obj[var][i] = out[var]
+    outputs_reduced = p.compress(outputs_obj, coords=coarse_coords)
+    outputs_reconstruct = p.reconstruct(outputs_reduced)
+
+    y = outputs_obj[p]
+    yhat = outputs_reconstruct[p]
+    assert all([relative_error(yhat[i], y[i]) < 0.01 for i in range(len(coarse_shapes))])
+
+
+def test_compression_interpolation():
+    """Test to_grid and from_grid interpolation for compressed data."""
+    # Generate compression data
+    num_features = 50
+    svd_coords = np.linspace(-1, 1, num_features)
+    svd = SVD(coords=svd_coords, fields=['r'])
+
+    # Test object arrays to/from
+    coarse_shapes = [5, 10, 25, 47]
+    test_coords = np.empty(len(coarse_shapes), dtype=object)
+    test_values = {'r': np.empty(len(coarse_shapes), dtype=object)}
+    for i in range(len(coarse_shapes)):
+        test_coords[i] = np.linspace(-1, 1, coarse_shapes[i])
+        test_values['r'][i] = np.tanh(test_coords[i])
+
+    on_grid = svd.interpolate_to_grid(test_coords, test_values)
+    from_grid = svd.interpolate_from_grid(on_grid, test_coords)
+    assert on_grid.shape == (len(coarse_shapes), num_features)
+    assert all([relative_error(from_grid['r'][i], test_values['r'][i]) < 0.001 for i in range(len(coarse_shapes))])
+
+    # Test object arrays with grid coords
+    test_values = {'r': np.empty(len(coarse_shapes), dtype=object)}
+    for i in range(len(coarse_shapes)):
+        test_values['r'][i] = on_grid[i]
+    on_grid = svd.interpolate_to_grid(svd_coords, test_values)
+    from_grid = svd.interpolate_from_grid(on_grid, svd_coords)
+    assert on_grid.shape == (len(coarse_shapes), num_features)
+    assert np.allclose(on_grid, from_grid['r'])
+
+    # Test vectorized arrays to/from
+    vec_coords = np.empty(100, dtype=object)
+    vec_values = np.empty((100, 27))
+    for i in range(100):
+        vec_coords[i] = np.sort(np.random.uniform(-1, 1, 27))
+        vec_values[i] = np.tanh(vec_coords[i])
+    on_grid = svd.interpolate_to_grid(vec_coords, {'r': vec_values})
+    from_grid = svd.interpolate_from_grid(on_grid, vec_coords)
+    assert on_grid.shape == (100, num_features)
+    assert all([relative_error(from_grid['r'][i], vec_values[i]) < 0.001 for i in range(100)])
+
+    # Test vectorized arrays with object grid coord
+    test_coords = np.empty(100, dtype=object)
+    for i in range(100):
+        test_coords[i] = np.linspace(-1, 1, np.random.randint(20, 50))
+    from_grid = svd.interpolate_from_grid(on_grid, test_coords)
+    for i in range(100):
+        to_grid = svd.interpolate_to_grid(test_coords[i], {'r': from_grid['r'][i][np.newaxis, ...]})
+        assert relative_error(to_grid[0], on_grid[i]) < 0.001
+        assert from_grid['r'][i].shape[0] == test_coords[i].shape[0]
+
+
 @pytest.mark.skip(reason='Not implemented')
 def test_compression_nd():
     """Test SVD compression for high-dimensional data."""

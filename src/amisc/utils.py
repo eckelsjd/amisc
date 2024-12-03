@@ -29,7 +29,7 @@ import yaml
 __all__ = ['parse_function_string', 'relative_error', 'get_logger', 'format_inputs', 'format_outputs',
            'search_for_file', 'constrained_lls', 'to_surrogate_dataset', 'to_model_dataset']
 
-from amisc.typing import LATENT_STR_ID, Dataset
+from amisc.typing import COORDS_STR_ID, LATENT_STR_ID, Dataset
 
 if TYPE_CHECKING:
     import amisc.variable
@@ -65,7 +65,7 @@ def to_surrogate_dataset(dataset: Dataset, variables: 'amisc.variable.VariableLi
         # Only grab scalars in the dataset or field qtys if all fields are present
         if var in dataset or (var.compression is not None and all([f in dataset for f in var.compression.fields])):
             if var.compression is not None:
-                coords = dataset.get(f'{var}_coords', field_coords.get(f'{var}_coords', None))
+                coords = dataset.get(f'{var}{COORDS_STR_ID}', field_coords.get(f'{var}{COORDS_STR_ID}', None))
                 latent = var.compress({field: dataset[field] for field in
                                        var.compression.fields}, coords=coords)['latent']  # all fields must be present
                 for i in range(latent.shape[-1]):
@@ -74,8 +74,8 @@ def to_surrogate_dataset(dataset: Dataset, variables: 'amisc.variable.VariableLi
                 if del_fields:
                     for field in var.compression.fields:
                         del dataset[field]
-                    if dataset.get(f'{var}_coords', None) is not None:
-                        del dataset[f'{var}_coords']
+                    if dataset.get(f'{var}{COORDS_STR_ID}', None) is not None:
+                        del dataset[f'{var}{COORDS_STR_ID}']
             else:
                 dataset[var.name] = var.normalize(dataset[var.name])
                 surr_vars.append(f'{var.name}')
@@ -103,12 +103,12 @@ def to_model_dataset(dataset: Dataset, variables: 'amisc.variable.VariableList',
         if var in dataset:
             if var.compression is not None:
                 # coords = self.model_kwargs.get(f'{var.name}_coords', None)
-                coords = field_coords.get(f'{var}_coords', None)
+                coords = field_coords.get(f'{var}{COORDS_STR_ID}', None)
                 field = var.reconstruct({'latent': dataset[var]}, coords=coords)
                 if del_latent:
                     del dataset[var]
                 coords = field.pop('coords')
-                ret_coords[f'{var.name}_coords'] = copy.deepcopy(coords)
+                ret_coords[f'{var.name}{COORDS_STR_ID}'] = copy.deepcopy(coords)
                 dataset.update(field)
             else:
                 dataset[var] = var.denormalize(dataset[var])

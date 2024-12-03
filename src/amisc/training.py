@@ -209,8 +209,15 @@ class SparseGrid(TrainingData, PickleSerializable):
                     for var in yi_vars:
                         yi = np.atleast_1d(yi_curr[var])
                         y_squeeze[var] = self._is_singleton(yi)  # squeeze for scalar quantities
-                        yi = np.expand_dims(yi, axis=0)
-                        yi_dict[var] = yi if yi_dict.get(var) is None else np.concatenate((yi_dict[var], yi), axis=0)
+                        if y_squeeze[var]:
+                            yi = np.expand_dims(yi, axis=0)
+                            yi_dict[var] = yi if yi_dict.get(var) is None else np.concatenate((yi_dict[var], yi),
+                                                                                              axis=0)
+                        else:
+                            # Object arrays for field qtys
+                            yi_dict[var] = np.array([None], dtype=object) if yi_dict.get(var) is None else \
+                                np.concatenate((yi_dict[var], [None]), axis=0)
+                            yi_dict[var][-1] = yi
             except KeyError as e:
                 raise KeyError(f"Can't access sparse grid data for alpha={alpha}, coord={coord}. "
                                f"Make sure the data has been set first.") from e
