@@ -766,9 +766,13 @@ class System(BaseModel, Serializable):
         perf = {}
         for var in targets:
             # Handle relative error for object arrays (field qtys)
-            if np.issubdtype(ytest[var].dtype, np.object_) or np.issubdtype(ysurr[var].dtype, np.object_):
+            ytest_obj = np.issubdtype(ytest[var].dtype, np.object_)
+            ysurr_obj = np.issubdtype(ysurr[var].dtype, np.object_)
+            if ytest_obj or ysurr_obj:
+                _iterable = np.ndindex(ytest[var].shape) if ytest_obj else np.ndindex(ysurr[var].shape)
                 num, den = [], []
-                for pred, targ in zip(ysurr[var], ytest[var]):
+                for index in _iterable:
+                    pred, targ = ysurr[var][index], ytest[var][index]
                     num.append((pred - targ)**2)
                     den.append(targ ** 2)
                 perf[var] = float(np.sqrt(sum([np.sum(n) for n in num]) / sum([np.sum(d) for d in den])))
@@ -1345,12 +1349,13 @@ class System(BaseModel, Serializable):
         # Try to infer amisc_root/surrogates/iter/filename structure
         if root_dir is None:
             parts = Path(filename).resolve().parts
-            if len(parts) > 2:
-                if parts[-3].startswith('amisc_'):
-                    root_dir = Path(filename).resolve().parent.parent
-            elif len(parts) > 3:
-                if parts[-4].startswith('amisc_'):
-                    root_dir = Path(filename).resolve().parent.parent.parent
+            if len(parts) > 1 and parts[-2].startswith('amisc_'):
+                root_dir = Path(filename).resolve().parent
+            elif len(parts) > 2 and parts[-3].startswith('amisc_'):
+                root_dir = Path(filename).resolve().parent.parent
+            elif len(parts) > 3 and parts[-4].startswith('amisc_'):
+                root_dir = Path(filename).resolve().parent.parent.parent
+
         system.root_dir = root_dir
         return system
 
