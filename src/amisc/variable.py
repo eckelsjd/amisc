@@ -153,11 +153,15 @@ class Variable(BaseModel, Serializable):
             if dist := info.data['distribution']:
                 domain = dist.domain()
             elif compression := info.data['compression']:
-                domain = compression.estimate_latent_ranges()
+                if (ranges := compression.estimate_latent_ranges()) is not None:
+                    domain = [tuple(map(float, val)) for val in ranges]
         elif isinstance(domain, str):
             domain = tuple(ast.literal_eval(domain.strip()))
         elif isinstance(domain, list):
-            domain = [tuple(ast.literal_eval(d.strip())) if isinstance(d, str) else d for d in domain]
+            if len(domain) == 2 and isinstance(domain[0], float | int) and isinstance(domain[1], float | int):
+                domain = tuple(domain)  # allow lists of 2 elements to be interpreted as a scalar variable domain
+            else:
+                domain = [tuple(ast.literal_eval(d.strip())) if isinstance(d, str) else d for d in domain]  # field qty
 
         if domain is None:
             return domain
@@ -536,7 +540,7 @@ class Variable(BaseModel, Serializable):
             return [ele if isinstance(ele, Variable) else Variable.deserialize(ele, search_paths=[save_path]) for ele in
                     loader.construct_sequence(node, deep=True)]
         elif isinstance(node, yaml.MappingNode):
-            return Variable.deserialize(loader.construct_mapping(node), search_paths=[save_path])
+            return Variable.deserialize(loader.construct_mapping(node, deep=True), search_paths=[save_path])
         else:
             raise NotImplementedError(f'The "{Variable.yaml_tag}" yaml tag can only be used on a yaml sequence or '
                                       f'mapping, not a "{type(node)}".')

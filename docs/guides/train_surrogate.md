@@ -91,7 +91,7 @@ Surrogate predictions are obtained using [`System.predict`][amisc.system.System.
 === "Single input"
     ```python
     system = System(...)  # computes y1 = x1 * x2, for example
-    
+
     inputs = { 'x1': 0.5, 'x2': 1.5 }
     output = system.predict(inputs)
 
@@ -101,7 +101,7 @@ Surrogate predictions are obtained using [`System.predict`][amisc.system.System.
 === "Arrayed inputs"
     ```python
     system = System(...)  # computes y1 = x1 * x2, for example
-    
+
     inputs = { 'x1': np.random.rand(100), 'x2': np.random.rand(100) }
     output = system.predict(inputs)
 
@@ -190,9 +190,11 @@ To convert between dataset formats (i.e. for comparing surrogate outputs to mode
 
     x = Variable(norm='log10', domain=(10, 100))     # a scalar
     f = Variable(compression=...)                    # a field quantity
-    
+
     model_dataset = { 'x': 100, 'f': np.array([1, 2, 3, ...]) }
 
     surr_dataset, surr_vars = to_surrogate_dataset(model_dataset, [x, f])  # also returns the names of the latent variables
     model_dataset, coords = to_model_dataset(surr_dataset, [x, f])         # also returns grid coordinates for field quantities
     ```
+
+Note that field quantities returned by `System.predict(use_model=...)` or `Component.call_model()` will be `numpy` object arrays. The `to_surrogate_dataset` only supports 1d object arrays for compression.
