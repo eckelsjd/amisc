@@ -849,7 +849,7 @@ class System(BaseModel, Serializable):
                     error = {}
                     for var, arr in y_cand.items():
                         if var in targets:
-                            error[var] = relative_error(arr, y_curr[var])
+                            error[var] = relative_error(arr, y_curr[var], skip_nan=True)
 
                         if update_bounds and var in coupling_vars:
                             y_min[var] = np.nanmin(np.concatenate((y_min[var], arr), axis=0), axis=0, keepdims=True)

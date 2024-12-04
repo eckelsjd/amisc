@@ -529,16 +529,18 @@ def parse_function_string(call_string: str) -> tuple[str, list, dict]:
     return name, args, kwargs
 
 
-def relative_error(pred, targ, axis=None):
+def relative_error(pred, targ, axis=None, skip_nan=False):
     """Compute the relative L2 error between two vectors along the given axis.
 
     :param pred: the predicted values
     :param targ: the target values
     :param axis: the axis along which to compute the error
+    :param skip_nan: whether to skip NaN values in the error calculation
     :returns: the relative L2 error
     """
     with np.errstate(divide='ignore', invalid='ignore'):
-        err = np.sqrt(np.sum((pred - targ)**2, axis=axis) / np.sum(targ**2, axis=axis))
+        sum_func = np.nansum if skip_nan else np.sum
+        err = np.sqrt(sum_func((pred - targ)**2, axis=axis) / sum_func(targ**2, axis=axis))
     return np.nan_to_num(err, nan=np.nan, posinf=np.nan, neginf=np.nan)
 
 
