@@ -1,7 +1,7 @@
 Variables are the basic objects used as inputs or outputs in a model. In this guide, we will learn how to construct and use variables within `amisc`.
 
 ## Construct a variable
-In its most basic form, a variable is just a placeholder with a name, just like $x$ in the equation $y=x^2$. 
+In its most basic form, a variable is just a placeholder with a name, just like $x$ in the equation $y=x^2$.
 
 ```python
 from amisc import Variable
@@ -147,7 +147,7 @@ In order to make use of this field quantity when building surrogates, we'll need
     # Now we can use the compression map to compress/reconstruct new values
     new_sim_data  = {'ux': np.random.rand(1000), 'uy': ..., 'uz': ...}
     latent_data   = vel.compress(new_sim_data)
-    reconstructed = vel.reconstruct(latent_data) 
+    reconstructed = vel.reconstruct(latent_data)
     ```
 
 Once the compression map has been computed, we can compress or reconstruct new field quantity data:
@@ -171,3 +171,19 @@ Unlike scalar variables, the domain of a field quantity `Variable` should be a l
 The only time you would need to worry about specifying the latent domains is if you are intending on using a field quantity as an input to any of your component models.
 
 As a final note on field quantities, once you've defined and computed the compression map, `amisc` will internally use the compression map during training or prediction to convert the field quantity to/from the latent space. If you have a field quantity named `"vel"` for example, `amisc` will generate latent coefficients with the names `"vel_LATENT0" ... "vel_LATENT1"` and so on up to the total size of the latent space. These temporary latent coefficients will be used as inputs and outputs until they are converted back to the full field quantity. So if you ever inspect raw data arrays returned by `amisc`, you may find these temporary latent coefficients floating around. See the `amisc.to_model_dataset` utility function for reconstructing such arrays.
+
+!!! Note "Object arrays for field quantities"
+    If you call `System.predict(use_model=...)` and inspect the true model return values, you will find that field quantities get stored in `numpy` arrays with `dtype=object`. The shape of the object arrays will match the "loop" dimension of the inputs, which is also the same shape as all scalar return values. Each element of the object array will be the field quantity array corresponding to the given input. This allows the field quantity to possibly take on different shapes for different inputs, such as if the model computes a new mesh for each set of inputs.
+
+    For example:
+    ```python
+    inputs = {'x': np.random.rand(100)}
+    outputs = System.predict(inputs, use_model='best')
+    scalar = outputs['y']       # numeric array of shape (100,)
+    field = outputs['y_field']  # object array of shape  (100,)
+
+    field[0].shape              # (20, 20) for example
+    field[1].shape              # (19, 25) for example, if the mesh changed between inputs
+    ```
+
+    Your component models should generally return the grid coordinates for field quantities in a special variable name suffixed by `"_coords"`. For example, if your model returns a field quantity named `u_ion`, you would also return the grid coordinates as `u_ion_coords`.

@@ -1,11 +1,15 @@
 """Test the package utilities."""
 # ruff: noqa: E741
+import io
 import time
 
 import numpy as np
+import pytest
 from matplotlib import pyplot as plt
+from pydantic import ValidationError
 from scipy.linalg import lapack
 
+from amisc import YamlLoader
 from amisc.compression import SVD
 from amisc.typing import LATENT_STR_ID
 from amisc.utils import (
@@ -20,6 +24,33 @@ from amisc.utils import (
     to_surrogate_dataset,
 )
 from amisc.variable import Variable, VariableList
+
+
+def test_yaml_loader(tmp_path):
+    """Test the YAML loader for various streams."""
+    # Test correct load/dump from filename, string, and open file stream
+    obj = {'key': 'value', 'variable': Variable('x', domain=(0, 1), distribution='U(0, 1)'), 'number': 42}
+    YamlLoader.dump(obj, tmp_path / 'test.yaml')
+    assert (loaded := YamlLoader.load(tmp_path / 'test.yaml')) == obj, f"Loaded object mismatch: {loaded} != {obj}"
+    s = io.StringIO()
+    YamlLoader.dump(obj, s)
+    s.seek(0)
+    assert (loaded := YamlLoader.load(s)) == obj, f"Loaded object mismatch: {loaded} != {obj}"
+    with open(tmp_path / 'test_stream.yaml', 'w+') as f:
+        YamlLoader.dump(obj, f)
+        f.seek(0)
+        assert (loaded := YamlLoader.load(f)) == obj, f"Loaded object mismatch: {loaded} != {obj}"
+
+    # Test exceptions get raised for bad yaml
+    bad_yaml = """key: value\nvariable: !Variable\n  name: x\n  domain: [0, 1, 2]\n  distribution: U(0, 1)\n"""
+    with open(tmp_path / 'bad.yml', 'w') as f:
+        f.write(bad_yaml)
+        f.seek(0)
+
+    with pytest.raises(ValidationError):
+        obj = YamlLoader.load(tmp_path / 'bad.yml')  # Bad domain in variable
+    with pytest.raises(FileNotFoundError):
+        obj = YamlLoader.load(tmp_path / 'nonexistent.yml')  # Nonexistent file
 
 
 def test_inspect_function():

@@ -71,7 +71,7 @@ test = "pytest --cov=amisc --cov-report html:htmlcov tests"
 docs = "mkdocs serve"
 lint = "ruff check src tests {args}"
 
-[tool.pdm.dev-dependencies]
+[dependency-groups]
 dev = [
     "copier>=9.3",
     "copier-templates-extensions>=0.3",
