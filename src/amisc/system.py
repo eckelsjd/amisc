@@ -1670,6 +1670,11 @@ class System(BaseModel, Serializable):
                         self.logger.warning(f"Attribute '{key}' of type '{type(value)}' may not be a builtin "
                                             f"Python type. This may cause issues when saving/loading from file.")
                     d[key] = value
+
+        for key, value in self.model_extra.items():
+            if isinstance(value, _builtin):
+                d[key] = value
+
         return d
 
     @classmethod
