@@ -155,7 +155,7 @@ def test_compression_fields():
     pressure_y = gamma_samples[..., np.newaxis] * np.cos(grid)
     pressure_matrix = np.concatenate((pressure_x[..., np.newaxis], pressure_y[..., np.newaxis]),
                                      axis=-1).reshape((num_samples, -1))
-    pressure = Variable(compression=SVD(rank=2, data_matrix=pressure_matrix.T, coords=grid,
+    pressure = Variable(compression=SVD(reconstruction_tol=0.001, data_matrix=pressure_matrix.T, coords=grid,
                                         fields=['pressure_x', 'pressure_y']), name='pressure')
 
     latent = pressure.compress({'pressure_x': pressure_x, 'pressure_y': pressure_y})

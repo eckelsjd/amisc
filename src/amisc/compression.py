@@ -16,6 +16,7 @@ import numpy as np
 from scipy.interpolate import RBFInterpolator
 
 from amisc.serialize import PickleSerializable
+from amisc.utils import relative_error
 
 __all__ = ["Compression", "SVD"]
 
@@ -302,21 +303,29 @@ class SVD(Compression):
     :ivar projection_matrix: `(dof, rank)` - the projection matrix
     :ivar rank: the rank of the SVD decomposition
     :ivar energy_tol: the energy tolerance of the SVD decomposition
+    :ivar reconstruction_tol: the reconstruction error tolerance of the SVD decomposition
     """
     data_matrix: np.ndarray = None          # (dof, num_samples)
     projection_matrix: np.ndarray = None    # (dof, rank)
     rank: int = None
     energy_tol: float = None
+    reconstruction_tol: float = None
 
     def __post_init__(self):
         """Compute the SVD if the data matrix is provided."""
         if (data_matrix := self.data_matrix) is not None:
-            self.compute_map(data_matrix, rank=self.rank, energy_tol=self.energy_tol)
+            self.compute_map(data_matrix, rank=self.rank, energy_tol=self.energy_tol,
+                             reconstruction_tol=self.reconstruction_tol)
 
-    def compute_map(self, data_matrix: np.ndarray | dict, rank: int = None, energy_tol: float = None):
+    def compute_map(self, data_matrix: np.ndarray | dict, rank: int = None, energy_tol: float = None,
+                    reconstruction_tol: float = None):
         """Compute the SVD compression map from the data matrix. Recall that `dof` is the total number of degrees of
         freedom, equal to the number of grid points `num_pts` times the number of quantities of interest `num_qoi`
         at each grid point.
+
+        **Rank priority:** if `rank` is provided, then it will be used. Otherwise, if `reconstruction_tol` is provided,
+        then the rank will be chosen to meet this reconstruction error level. Finally, if `energy_tol` is provided,
+        then the rank will be chosen to meet this energy fraction level (sum of squared singular values).
 
         :param data_matrix: `(dof, num_samples)` - the data matrix. If passed in as a `dict`, then the data matrix
                             will be formed by concatenating the values of the `dict` along the last axis in the order
@@ -324,7 +333,8 @@ class SVD(Compression):
                             in a dictionary of field values like `{field1: (num_samples, num_pts), field2: ...}`
                             which ensures consistency of shape with the compression `coords`.
         :param rank: the rank of the SVD decomposition
-        :param energy_tol: the energy tolerance of the SVD decomposition
+        :param energy_tol: the energy tolerance of the SVD decomposition (defaults to 0.95)
+        :param reconstruction_tol: the reconstruction error tolerance of the SVD decomposition
         """
         if isinstance(data_matrix, dict):
             data_matrix = np.concatenate([data_matrix[field][..., np.newaxis] for field in self.fields], axis=-1)
@@ -336,14 +346,23 @@ class SVD(Compression):
         energy_frac = np.cumsum(s ** 2 / np.sum(s ** 2))
         if rank := (rank or self.rank):
             energy_tol = energy_frac[rank - 1]
+            reconstruction_tol = relative_error(u[:, :rank] @ u[:, :rank].T @ data_matrix, data_matrix)
+        elif reconstruction_tol := (reconstruction_tol or self.reconstruction_tol):
+            for r in range(u.shape[1]):
+                if relative_error(u[:, :r] @ u[:, :r].T @ data_matrix, data_matrix) <= reconstruction_tol:
+                    rank = r
+                    break
+            energy_tol = energy_frac[rank - 1]
         else:
             energy_tol = energy_tol or self.energy_tol or 0.95
             idx = int(np.where(energy_frac >= energy_tol)[0][0])
             rank = idx + 1
+            reconstruction_tol = relative_error(u[:, :rank] @ u[:, :rank].T @ data_matrix, data_matrix)
 
         self.data_matrix = data_matrix
         self.rank = rank
         self.energy_tol = energy_tol
+        self.reconstruction_tol = reconstruction_tol
         self.projection_matrix = u[:, :rank]  # (dof, rank)
         self._map_computed = True
 
