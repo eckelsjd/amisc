@@ -120,13 +120,13 @@ class FileLoader(_ABC):
 
     @classmethod
     @_abstractmethod
-    def load(cls, stream: str | _Path | _Any):
+    def load(cls, stream: str | _Path | _Any, **kwargs):
         """Load an `amisc` object from a stream. If a file path is given, will attempt to open the file."""
         raise NotImplementedError
 
     @classmethod
     @_abstractmethod
-    def dump(cls, obj, stream: str | _Path | _Any):
+    def dump(cls, obj, stream: str | _Path | _Any, **kwargs):
         """Save an `amisc` object to a stream. If a file path is given, will attempt to write to the file."""
         raise NotImplementedError
 
@@ -155,17 +155,29 @@ class YamlLoader(FileLoader):
         return dumper
 
     @classmethod
-    def load(cls, stream):
+    def load(cls, stream, **kwargs):
+        """Extra kwargs ignored for YAML loading (since they are not used by `yaml.load`)."""
         try:
-            with open(_Path(stream).with_suffix('.yml'), 'r', encoding='utf-8') as fd:
+            p = _Path(stream).with_suffix('.yml')
+        except (TypeError, ValueError):
+            pass
+        else:
+            with open(p, 'r', encoding='utf-8') as fd:
                 return _yaml.load(fd, Loader=cls._yaml_loader())
-        except (TypeError, OSError, FileNotFoundError):
-            return _yaml.load(stream, Loader=cls._yaml_loader())
+
+        return _yaml.load(stream, Loader=cls._yaml_loader())
 
     @classmethod
-    def dump(cls, obj, stream):
+    def dump(cls, obj, stream, **kwargs):
+        """Extra kwargs get passed to `yaml.dump`."""
+        kwargs['allow_unicode'] = kwargs.get('allow_unicode', True)
+        kwargs['sort_keys'] = kwargs.get('sort_keys', False)
         try:
-            with open(_Path(stream).with_suffix('.yml'), 'w', encoding='utf-8') as fd:
-                return _yaml.dump(obj, fd, Dumper=cls._yaml_dumper(), allow_unicode=True, sort_keys=False)
-        except (TypeError, OSError, FileNotFoundError):
-            return _yaml.dump(obj, stream, Dumper=cls._yaml_dumper(), allow_unicode=True, sort_keys=False)
+            p = _Path(stream).with_suffix('.yml')
+        except (TypeError, ValueError):
+            pass
+        else:
+            with open(p, 'w', encoding='utf-8') as fd:
+                return _yaml.dump(obj, fd, Dumper=cls._yaml_dumper(), **kwargs)
+
+        return _yaml.dump(obj, stream, Dumper=cls._yaml_dumper(), **kwargs)

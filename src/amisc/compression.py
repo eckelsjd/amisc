@@ -16,6 +16,7 @@ import numpy as np
 from scipy.interpolate import RBFInterpolator
 
 from amisc.serialize import PickleSerializable
+from amisc.utils import relative_error
 
 __all__ = ["Compression", "SVD"]
 
@@ -88,8 +89,13 @@ class Compression(PickleSerializable, ABC):
     def _correct_coords(self, coords):
         """Correct the coordinates to be in the correct shape for compression."""
         coords = np.atleast_1d(coords)
-        if len(coords.shape) == 1:
-            coords = coords[..., np.newaxis] if self.dim == 1 else coords[np.newaxis, ...]
+        if np.issubdtype(coords.dtype, np.object_):  # must be object array of np.arrays (for unique coords)
+            for i, arr in np.ndenumerate(coords):
+                if len(arr.shape) == 1:
+                    coords[i] = arr[..., np.newaxis] if self.dim == 1 else arr[np.newaxis, ...]
+        else:
+            if len(coords.shape) == 1:
+                coords = coords[..., np.newaxis] if self.dim == 1 else coords[np.newaxis, ...]
         return coords
 
     def interpolator(self):
@@ -116,55 +122,126 @@ class Compression(PickleSerializable, ABC):
         """Interpolate the states on the compression grid to new coordinates.
 
         :param states: `(*loop_shape, dof)` - the states on the compression grid
-        :param new_coords: `(*coord_shape, dim)` - the new coordinates to interpolate to
-        :return: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the interpolated states
+        :param new_coords: `(*coord_shape, dim)` - the new coordinates to interpolate to; if a 1d object array, then
+                            each element is assumed to be a unique `(*coord_shape, dim)` array with assumed
+                            same length as loop_shape of the states -- will interpolate each state to the
+                            corresponding new coordinates
+        :return: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the interpolated states; will return a
+                 single 1d object array for each qoi if new_coords is a 1d object array
         """
         new_coords = self._correct_coords(new_coords)
         grid_coords = self._correct_coords(self.coords)
-        skip_interp = (new_coords.shape == grid_coords.shape and np.allclose(new_coords, grid_coords))
 
-        ret_dict = {}
-        loop_shape = states.shape[:-1]
-        coords_shape = new_coords.shape[:-1]
-        states = states.reshape((*loop_shape, self.num_pts, self.num_qoi))
-        new_coords = new_coords.reshape((-1, self.dim))
-        for i, qoi in enumerate(self.fields):
-            if skip_interp:
-                ret_dict[qoi] = states[..., i]
+        coords_obj_array = np.issubdtype(new_coords.dtype, np.object_)
+
+        # Iterate over one set of coords and states at a time
+        def _iterate_coords_and_states():
+            if coords_obj_array:
+                for index, c in np.ndenumerate(new_coords):  # assumes same number of coords and states
+                    yield index, c, states[index]
             else:
-                reshaped_states = states[..., i].reshape(-1, self.num_pts).T  # (num_pts, ...)
-                interp = self.interpolator()(grid_coords, reshaped_states, **self.interpolate_opts)
-                yp = interp(new_coords)
-                ret_dict[qoi] = yp.T.reshape(*loop_shape, *coords_shape)
+                yield (0,), new_coords, states  # assumes same coords for all states
 
-        return ret_dict
+        all_qois = np.empty(new_coords.shape if coords_obj_array else (1,), dtype=object)
+
+        # Do interpolation for each set of unique coordinates (if multiple)
+        for j, n_coords, state in _iterate_coords_and_states():
+            skip_interp = (n_coords.shape == grid_coords.shape and np.allclose(n_coords, grid_coords))
+
+            ret_dict = {}
+            loop_shape = state.shape[:-1]
+            coords_shape = n_coords.shape[:-1]
+            state = state.reshape((*loop_shape, self.num_pts, self.num_qoi))
+            n_coords = n_coords.reshape((-1, self.dim))
+            for i, qoi in enumerate(self.fields):
+                if skip_interp:
+                    ret_dict[qoi] = state[..., i]
+                else:
+                    reshaped_states = state[..., i].reshape(-1, self.num_pts).T  # (num_pts, ...)
+                    interp = self.interpolator()(grid_coords, reshaped_states, **self.interpolate_opts)
+                    yp = interp(n_coords)
+                    ret_dict[qoi] = yp.T.reshape(*loop_shape, *coords_shape)
+
+            all_qois[j] = ret_dict
+
+        if coords_obj_array:
+            # Make an object array for each qoi, where each element is a unique `(*loop_shape, *coord_shape)` array
+            _, _first_dict = next(np.ndenumerate(all_qois))
+            ret = {qoi: np.empty(all_qois.shape, dtype=object) for qoi in _first_dict}
+            for qoi in ret:
+                for index, qoi_dict in np.ndenumerate(all_qois):
+                    ret[qoi][index] = qoi_dict[qoi]
+        else:
+            # Otherwise, all loop dims used the same coords, so just return the single array for each qoi
+            ret = all_qois[0]
+
+        return ret
 
     def interpolate_to_grid(self, field_coords: np.ndarray, field_values):
         """Interpolate the field values at given coordinates to the compression grid.
 
-        :param field_coords: `(*coord_shape, dim)` - the coordinates of the field values
-        :param field_values: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the field values at the coordinates
+        :param field_coords: `(*coord_shape, dim)` - the coordinates of the field values; if a 1d object array, then
+                             each element is assumed to be a unique `(*coord_shape, dim)` array
+        :param field_values: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the field values at the coordinates;
+                              if each array is a 1d object array, then each element is assumed to be a unique
+                             `(*loop_shape, *coord_shape)` array corresponding to the `field_coords`
         :return: `(*loop_shape, dof)` - the interpolated values on the compression grid
         """
         field_coords = self._correct_coords(field_coords)
         grid_coords = self._correct_coords(self.coords)
-        skip_interp = (field_coords.shape == grid_coords.shape and np.allclose(field_coords, grid_coords))
 
-        coords_shape = field_coords.shape[:-1]
-        loop_shape = next(iter(field_values.values())).shape[:-len(coords_shape)]
-        states = np.empty((*loop_shape, self.num_pts, self.num_qoi))
-        field_coords = field_coords.reshape(-1, self.dim)
-        for i, qoi in enumerate(self.fields):
-            field_vals = field_values[qoi].reshape((*loop_shape, -1))  # (..., Q)
-            if skip_interp:
-                states[..., i] = field_vals
+        # Loop over each set of coordinates and field values (multiple if they are object arrays)
+        # If only one set of coords, then they are assumed the same for each set of field values
+        coords_obj_array = np.issubdtype(field_coords.dtype, np.object_)
+        fields_obj_array = np.issubdtype(next(iter(field_values.values())).dtype, np.object_)
+        def _iterate_coords_and_fields():
+            if coords_obj_array:
+                for index, c in np.ndenumerate(field_coords):  # assumes same number of coords and field values
+                    yield index, c, {qoi: field_values[qoi][index] for qoi in field_values}
+            elif fields_obj_array:
+                for index in np.ndindex(next(iter(field_values.values())).shape):
+                    yield index, field_coords, {qoi: field_values[qoi][index] for qoi in field_values}
             else:
-                field_vals = field_vals.reshape((-1, field_vals.shape[-1])).T  # (Q, ...)
-                interp = self.interpolator()(field_coords, field_vals, **self.interpolate_opts)
-                yg = interp(grid_coords)
-                states[..., i] = yg.T.reshape(*loop_shape, self.num_pts)
+                yield (0,), field_coords, field_values  # assumes same coords for all field values
 
-        return states.reshape((*loop_shape, self.dof))
+        if coords_obj_array:
+            shape = field_coords.shape
+        elif fields_obj_array:
+            shape = next(iter(field_values.values())).shape
+        else:
+            shape = (1,)
+
+        all_states = np.empty(shape, dtype=object)  # are you in good hands?
+
+        for j, f_coords, f_values in _iterate_coords_and_fields():
+            skip_interp = (f_coords.shape == grid_coords.shape and np.allclose(f_coords, grid_coords))
+
+            coords_shape = f_coords.shape[:-1]
+            loop_shape = next(iter(f_values.values())).shape[:-len(coords_shape)]
+            states = np.empty((*loop_shape, self.num_pts, self.num_qoi))
+            f_coords = f_coords.reshape(-1, self.dim)
+            for i, qoi in enumerate(self.fields):
+                field_vals = f_values[qoi].reshape((*loop_shape, -1))  # (..., Q)
+                if skip_interp:
+                    states[..., i] = field_vals
+                else:
+                    field_vals = field_vals.reshape((-1, field_vals.shape[-1])).T  # (Q, ...)
+                    interp = self.interpolator()(f_coords, field_vals, **self.interpolate_opts)
+                    yg = interp(grid_coords)
+                    states[..., i] = yg.T.reshape(*loop_shape, self.num_pts)
+            all_states[j] = states.reshape((*loop_shape, self.dof))
+
+        # All fields now on the same dof grid, so stack them in same array
+        index = next(np.ndindex(all_states.shape))
+        ret_states = np.empty(shape + all_states[index].shape)
+
+        for index, arr in np.ndenumerate(all_states):
+            ret_states[index] = arr
+
+        if not (coords_obj_array or fields_obj_array):
+            ret_states = np.squeeze(ret_states, axis=0)  # artificial leading dim for non-object arrays
+
+        return ret_states
 
     @abstractmethod
     def compute_map(self, **kwargs):
@@ -226,21 +303,29 @@ class SVD(Compression):
     :ivar projection_matrix: `(dof, rank)` - the projection matrix
     :ivar rank: the rank of the SVD decomposition
     :ivar energy_tol: the energy tolerance of the SVD decomposition
+    :ivar reconstruction_tol: the reconstruction error tolerance of the SVD decomposition
     """
     data_matrix: np.ndarray = None          # (dof, num_samples)
     projection_matrix: np.ndarray = None    # (dof, rank)
     rank: int = None
     energy_tol: float = None
+    reconstruction_tol: float = None
 
     def __post_init__(self):
         """Compute the SVD if the data matrix is provided."""
         if (data_matrix := self.data_matrix) is not None:
-            self.compute_map(data_matrix, rank=self.rank, energy_tol=self.energy_tol)
+            self.compute_map(data_matrix, rank=self.rank, energy_tol=self.energy_tol,
+                             reconstruction_tol=self.reconstruction_tol)
 
-    def compute_map(self, data_matrix: np.ndarray | dict, rank: int = None, energy_tol: float = None):
+    def compute_map(self, data_matrix: np.ndarray | dict, rank: int = None, energy_tol: float = None,
+                    reconstruction_tol: float = None):
         """Compute the SVD compression map from the data matrix. Recall that `dof` is the total number of degrees of
         freedom, equal to the number of grid points `num_pts` times the number of quantities of interest `num_qoi`
         at each grid point.
+
+        **Rank priority:** if `rank` is provided, then it will be used. Otherwise, if `reconstruction_tol` is provided,
+        then the rank will be chosen to meet this reconstruction error level. Finally, if `energy_tol` is provided,
+        then the rank will be chosen to meet this energy fraction level (sum of squared singular values).
 
         :param data_matrix: `(dof, num_samples)` - the data matrix. If passed in as a `dict`, then the data matrix
                             will be formed by concatenating the values of the `dict` along the last axis in the order
@@ -248,7 +333,8 @@ class SVD(Compression):
                             in a dictionary of field values like `{field1: (num_samples, num_pts), field2: ...}`
                             which ensures consistency of shape with the compression `coords`.
         :param rank: the rank of the SVD decomposition
-        :param energy_tol: the energy tolerance of the SVD decomposition
+        :param energy_tol: the energy tolerance of the SVD decomposition (defaults to 0.95)
+        :param reconstruction_tol: the reconstruction error tolerance of the SVD decomposition
         """
         if isinstance(data_matrix, dict):
             data_matrix = np.concatenate([data_matrix[field][..., np.newaxis] for field in self.fields], axis=-1)
@@ -260,14 +346,24 @@ class SVD(Compression):
         energy_frac = np.cumsum(s ** 2 / np.sum(s ** 2))
         if rank := (rank or self.rank):
             energy_tol = energy_frac[rank - 1]
+            reconstruction_tol = relative_error(u[:, :rank] @ u[:, :rank].T @ data_matrix, data_matrix)
+        elif reconstruction_tol := (reconstruction_tol or self.reconstruction_tol):
+            rank = u.shape[1]
+            for r in range(1, u.shape[1] + 1):
+                if relative_error(u[:, :r] @ u[:, :r].T @ data_matrix, data_matrix) <= reconstruction_tol:
+                    rank = r
+                    break
+            energy_tol = energy_frac[rank - 1]
         else:
             energy_tol = energy_tol or self.energy_tol or 0.95
             idx = int(np.where(energy_frac >= energy_tol)[0][0])
             rank = idx + 1
+            reconstruction_tol = relative_error(u[:, :rank] @ u[:, :rank].T @ data_matrix, data_matrix)
 
         self.data_matrix = data_matrix
         self.rank = rank
         self.energy_tol = energy_tol
+        self.reconstruction_tol = reconstruction_tol
         self.projection_matrix = u[:, :rank]  # (dof, rank)
         self._map_computed = True
 

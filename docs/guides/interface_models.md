@@ -52,14 +52,14 @@ A wrapper function may be written in one of the two following formats:
         x3 = input_dict['x3']
 
         # Compute model
-        
+
         output_dict = {}
         output_dict['y1'] = ...
         output_dict['y2'] = ...
 
         return output_dict
     ```
-    
+
     This format is the default and should typically be preferred (since you don't have to worry about variable ordering).
 
 === "Unpacked inputs/outputs"
@@ -67,13 +67,13 @@ A wrapper function may be written in one of the two following formats:
     ```python
     def my_model(x1, x2, x3):
         # Compute model
-        
+
         y1 = ...
         y2 = ...
-        
+
         return y1, y2
     ```
-    
+
     This format is used when the inputs/outputs are inferred from the function signature (i.e. not provided directly to `Component()`). You may manually set the `Component(call_unpacked=True, ret_unpacked=True)` attributes if you prefer this format. Note that it is then up to you to keep track of ordering if you later decide to change the component's inputs or outputs.
 
 It is also possible to accept "packed" inputs but return "unpacked" outputs, or vice versa by specifying the `call_unpacked` and `ret_unpacked` attributes of `Component`.
@@ -91,7 +91,7 @@ Regardless of how you prefer to format your model wrapper function, the `Compone
 ```python
 from amisc import Component
 
-comp = Component(...)                 
+comp = Component(...)
 
 inputs = {'x1': 1.0, 'x2': 5.5}
 
@@ -109,7 +109,7 @@ Apart from providing a consistent interface for calling the model, the `call_mod
 - `input_vars` - will provide the actual `Variable` objects from `Component.inputs` in case your model needs extra details about the inputs,
 - `output_vars` - will similarly provide the `Variable` objects from `Component.outputs`,
 - `output_path` - will give your function a `Path` to a directory where it can write model outputs to file (e.g. if you have lots of extra save data you want to keep). This would be useful if you want to keep the context of each model evaluation with respect to the `amisc` surrogate, so that you might later construct a new surrogate for outputs you saved to file. This is similar to the `tmp_path` within the `pytest` framework.
-- `{{ var }}_coords` - for a given "var" name, this will pass the compression grid coordinates for a given field quantity variable.
+- `{{ var }}_coords` - for a given "var" name, this will pass the compression grid coordinates for a given field quantity input variable.
 
 You may additionally pass any extra keyword arguments on to the model directly through `call_model(inputs, **kwargs)`.
 
@@ -117,7 +117,7 @@ You may additionally pass any extra keyword arguments on to the model directly t
     ```python
     def my_model(inputs, model_fidelity=(0,), output_path=None, input_vars=None, x_coords=None, config=None):
         x = inputs['x']                           # get the input values for 'x'
-        
+
         if x_coords is None:                      # read compression grid coordinates for the 'x' field quantity
             x_coords = np.linspace(0, 1, 100)     # default
 
@@ -128,7 +128,7 @@ You may additionally pass any extra keyword arguments on to the model directly t
 
         # Compute model
         y = ...
-        
+
         if output_path is not None:               # write outputs to file
             with open(output_path / 'my_outputs.txt', 'w') as fd:
                 fd.writelines(f'y = {y}')
@@ -140,13 +140,14 @@ You may additionally pass any extra keyword arguments on to the model directly t
     ```
 
 ### Special model return values
-In addition to special keyword arguments, your wrapper function may also return special values. There are 3 values that may be returned by the wrapper function:
+In addition to special keyword arguments, your wrapper function may also return special values. There are 4 values that may be returned by the wrapper function:
 
 - `{{ var }}` - for a given output "var" name -- these are just the usual numeric return values that match the variables in `Component.outputs`,
+- `{{ var_coords }}` - for a given field quantity output "var" name -- these are the grid coordinates corresponding to the locations of the "var" output field quantity (returned shape is $(N, D)$ where $N$ is the number of points and $D$ is the number of dimensions),
 - `model_cost` - a best estimate for total model evaluation time (in seconds of CPU time). For example, if your model makes continuous use of 16 CPUs and takes 1 hour to evaluate one set of inputs, then you would return `16 * 3600` as the model cost. This metric is used by `amisc` to help evaluate which are the most "effective" model evaluations, i.e. more expensive models are penalized greater than cheaper models.
 - `output_path` - if your function _requested_ `output_path` and subsequently wrote some data to file, then you can _return_ the new file name as `output_path` to keep track of the file's location within the `Component's` internal data storage.
 
-Your wrapper function may also return any extra data that you wish to store within the `Component` -- `amisc` will keep track of this data but will not use it for any purpose. You might do this if you wish to return to old model evaluations later on and view data even if you did not explicitly build a surrogate for the data. This extra data will be stored in `numpy` object arrays, so the data does not have to be strictly numeric type -- it could even be custom object types of your own.
+Your wrapper function may also return any extra data that you wish to store within the `Component` -- `amisc` will keep track of this data but will not use it for any purpose. You might do this if you wish to return to old model evaluations later on and view data even if you did not explicitly build a surrogate for the data. This extra data will be stored in `numpy` object arrays, so the data does not have to be strictly numeric type -- it could even be custom object types of your own. Field quantities will also be stored in `numpy` object arrays.
 
 !!! Example
     ```python
@@ -162,9 +163,9 @@ Your wrapper function may also return any extra data that you wish to store with
             with open(output_path / 'my_output.txt', 'w') as fd:
                 fd.writelines(f'I want to store some output data via file here')
 
-        extra_data = {'store': 'extra', 'data': 'here'}  
+        extra_data = {'store': 'extra', 'data': 'here'}
 
-        return {'y1': y1, 'y2': y2, 'model_cost': t2 - t1, 'output_path': 'my_output.txt', **extra_data} 
+        return {'y1': y1, 'y2': y2, 'model_cost': t2 - t1, 'output_path': 'my_output.txt', **extra_data}
     ```
 
 ## Model fidelities
@@ -175,7 +176,7 @@ def my_model(inputs, model_fidelity=(0, 0)):
     time_step = 1e-8 * (1 / (model_fidelity[1] + 1))  # controls time step size
 
     # etc.
-    
+
     return outputs
 ```
 During surrogate training, your wrapper function will then be passed tuples of varying model fidelity (from $(0, 0)$ up to $(3, 2)$ in the example). If you do not request `model_fidelity`, then your wrapper function will not be passed any fidelity indices, and will instead be treated as a single fidelity model.
@@ -243,9 +244,9 @@ A large advantage of the `Component.call_model()` interface is the ability to ev
     def my_model(inputs):
         x1 = inputs['x1']       # single float
         x2 = inputs['x2']       # single float
-        
+
         return {'y1': x1 * x2}  # single float
-    
+
     output = my_model({ 'x1': 0.5, 'x2': 1.5 })
 
     # will give { 'y1': 0.75 }
@@ -256,9 +257,9 @@ A large advantage of the `Component.call_model()` interface is the ability to ev
     def my_model(inputs):
         x1 = inputs['x1']       # single float
         x2 = inputs['x2']       # single float
-        
+
         return {'y1': x1 * x2}  # single float
-    
+
     comp = Component(my_model, ['x1', 'x2'], 'y1')
     output = comp.call_model({ 'x1': np.random.rand(100), 'x2': np.random.rand(100) })
 
@@ -269,7 +270,7 @@ By default, this will run the input samples in a serial loop, which will not pro
 
 To parallelize the model over the input arrays, you may pass an instance of an `Executor` to `call_model` (i.e. something that implements the built-in Python `concurrent.futures.Executor` interface -- Python itself provides the `ProcessPoolExecutor` and `ThreadPoolExecutor` which use parallel process- or thread-based workers). The popular `mpi4py` library also provides an `MPIExecutor` to distribute parallel tasks over MPI-enabled workers. You may similarly pass an instance of `Executor` to any functions where you wish to parallelize model evaluations (such as `System.fit()` for training the surrogate).
 
-Finally, if your wrapper function can handle arrayed inputs on its own, then you may set `Component.vectorized=True`. Input dictionaries will then be passed to your wrapper function with `np.ndarrays` as values for each input variable rather than scalar `floats`. For example, you can take advantage of `numpy` vectorization to directly manipulate two arrays of inputs rather than looping over each element (e.g. `y = x1 * x2` rather than `y = [x1[i] * x2[i] for i in range(N)]`). 
+Finally, if your wrapper function can handle arrayed inputs on its own, then you may set `Component.vectorized=True`. Input dictionaries will then be passed to your wrapper function with `np.ndarrays` as values for each input variable rather than scalar `floats`. For example, you can take advantage of `numpy` vectorization to directly manipulate two arrays of inputs rather than looping over each element (e.g. `y = x1 * x2` rather than `y = [x1[i] * x2[i] for i in range(N)]`).
 
 If you do use `vectorized=True` and you're also using `model_fidelity`, you should expect `model_fidelity` as an `np.ndarray` of shape `(N, R)`, where `N` is the loop shape of the inputs and `R` is the number of fidelity indices; usually you would just expect a tuple of length `R` when `vectorized=False`.
 
@@ -279,9 +280,9 @@ If you do use `vectorized=True` and you're also using `model_fidelity`, you shou
         x1 = inputs['x1']   # float
         x2 = inputs['x2']   # float
         return { 'y1': x1 * x2 }
-    
+
     comp = Component(my_model, ['x1', 'x2'], 'y1')
-    
+
     in  = { 'x1': np.random.rand(100), 'x2': np.random.rand(100) }
     out = comp.call_model(in)
     ```
@@ -292,9 +293,9 @@ If you do use `vectorized=True` and you're also using `model_fidelity`, you shou
         x1 = inputs['x1']   # float
         x2 = inputs['x2']   # float
         return { 'y1': x1 * x2 }
-    
+
     comp = Component(my_model, ['x1', 'x2'], 'y1')
-    
+
     with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
         in  = { 'x1': np.random.rand(100), 'x2': np.random.rand(100) }
         out = comp.call_model(in, executor=executor)
@@ -306,9 +307,9 @@ If you do use `vectorized=True` and you're also using `model_fidelity`, you shou
         x1 = inputs['x1']   # np.ndarray (100,)
         x2 = inputs['x2']   # np.ndarray (100,)
         return { 'y1': x1 * x2 }
-    
+
     comp = Component(my_model, ['x1', 'x2'], 'y1', vectorized=True)
-    
+
     in  = { 'x1': np.random.rand(100), 'x2': np.random.rand(100) }
     out = comp.call_model(in)
     ```
@@ -323,7 +324,7 @@ Generally, the surrogate predictions (e.g. `Component.predict`) make use of `num
     x = np.random.rand(100, 2)      # scalar
     f = np.random.rand(100, 2, 20)  # field quantity with shape (20,)
     ```
-    
+
     Clearly, the loop shape is (100, 2) and we can infer the field quantity shape of (20,). If the field quantity were provided by itself, then you should also provide `f_coords` to `call_model()` so that the field quantity shape for the `f` variable can be obtained from the shape of its grid coordinates. See the [field quantity](variables.md) documentation for more details.
 
 ## `Component` configuration summary
@@ -333,7 +334,7 @@ def my_model(inputs, model_fidelity=(0, 0), **extra_kwargs):
     x1 = inputs['x1']
     x2 = inputs['x2']
     x3 = inputs['x3']
-    
+
     return {'y1': ..., 'y2': ...}
 
 comp = Component(model=my_model,                # The Python wrapper function of the component model
@@ -359,6 +360,7 @@ A few important things to keep in mind:
 - Data and surrogate fidelity usage are dependent on `training_data` and `interpolator`, respectively. The length of `data_fidelity` should match the number of inputs for `SparseGrid` training data.
 - Setting `vectorized=True` means the wrapper function should handle arrayed inputs (as well as arrayed `model_fidelity` if applicable).
 - The "packed" call and return signatures are preferred (i.e. the default is `call_unpacked=False` and `ret_unpacked=False`) -- the wrapper function should receive and return dictionaries, where the keys are the variables with their corresponding values.
+- The wrapper function should additionally return the special variables `{{ var }}_coords` to provide the grid coordinates for field quantity outputs.
 
 
 ## Viewing internal data
