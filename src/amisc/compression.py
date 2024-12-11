@@ -348,7 +348,8 @@ class SVD(Compression):
             energy_tol = energy_frac[rank - 1]
             reconstruction_tol = relative_error(u[:, :rank] @ u[:, :rank].T @ data_matrix, data_matrix)
         elif reconstruction_tol := (reconstruction_tol or self.reconstruction_tol):
-            for r in range(u.shape[1]):
+            rank = u.shape[1]
+            for r in range(1, u.shape[1] + 1):
                 if relative_error(u[:, :r] @ u[:, :r].T @ data_matrix, data_matrix) <= reconstruction_tol:
                     rank = r
                     break
