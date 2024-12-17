@@ -606,7 +606,8 @@ class System(BaseModel, Serializable):
             test_set: tuple | str | Path = None,
             start_test_check: int = None,
             plot_interval: int = 1,
-            executor: Executor = None):
+            executor: Executor = None,
+            weight_fcns: dict[str, callable] | Literal['pdf'] | None = 'pdf'):
         """Train the system surrogate adaptively by iterative refinement until an end condition is met.
 
         :param targets: list of system output variables to focus refinement on, use all outputs if not specified
@@ -632,6 +633,8 @@ class System(BaseModel, Serializable):
                               will only plot and save to file if a root directory is set
         :param executor: a `concurrent.futures.Executor` object to parallelize model evaluations (optional, but
                          recommended for expensive models)
+        :param weight_fcns: a `dict` of weight functions to apply to each input variable for training data selection;
+                            defaults to using the pdf of each variable. If None, then no weighting is applied.
         """
         start_test_check = start_test_check or 2 * len(self.components)
         targets = targets or self.outputs()
@@ -679,7 +682,7 @@ class System(BaseModel, Serializable):
         while True:
             # Adaptive refinement step
             train_result = self.refine(targets=targets, num_refine=num_refine, update_bounds=update_bounds,
-                                       executor=executor)
+                                       executor=executor, weight_fcns=weight_fcns)
             if train_result['component'] is None:
                 self._print_title_str('Termination criteria reached: No candidates left to refine')
                 break
@@ -781,14 +784,16 @@ class System(BaseModel, Serializable):
 
         return perf
 
-    def refine(self, targets: list = None, num_refine: int = 100, update_bounds: bool = True,
-               executor: Executor = None) -> TrainIteration:
+    def refine(self, targets: list = None, num_refine: int = 100, update_bounds: bool = True, executor: Executor = None,
+               weight_fcns: dict[str, callable] | Literal['pdf'] | None = 'pdf') -> TrainIteration:
         """Perform a single adaptive refinement step on the system surrogate.
 
         :param targets: list of system output variables to focus refinement on, use all outputs if not specified
         :param num_refine: number of input samples to compute error indicators on
         :param update_bounds: whether to continuously update coupling variable bounds during refinement
         :param executor: a `concurrent.futures.Executor` object to parallelize model evaluations
+        :param weight_fcns: weight functions for choosing new training data for each input variable; defaults to
+                            the PDFs of each variable. If None, then no weighting is applied.
         :returns: `dict` of the refinement results indicating the chosen component and candidate index
         """
         self._print_title_str(f'Refining system surrogate: iteration {self.refine_level + 1}')
@@ -801,7 +806,8 @@ class System(BaseModel, Serializable):
                 beta_star = (0,) * len(comp.max_beta)
                 self.logger.info(f"Initializing component {comp.name}: adding {(alpha_star, beta_star)} to active set")
                 model_dir = (pth / 'components' / comp.name) if (pth := self.root_dir) is not None else None
-                comp.activate_index(alpha_star, beta_star, model_dir=model_dir, executor=executor)
+                comp.activate_index(alpha_star, beta_star, model_dir=model_dir, executor=executor,
+                                    weight_fcns=weight_fcns)
                 num_evals = comp.get_cost(alpha_star, beta_star)
                 cost_star = comp.model_costs.get(alpha_star, 1.) * num_evals  # Cpu time (s)
                 err_star = np.nan
@@ -886,7 +892,8 @@ class System(BaseModel, Serializable):
         if comp_star is not None:
             self.logger.info(f"Candidate multi-index {(alpha_star, beta_star)} chosen for component '{comp_star}'.")
             model_dir = (pth / 'components' / comp_star) if (pth := self.root_dir) is not None else None
-            self[comp_star].activate_index(alpha_star, beta_star, model_dir=model_dir, executor=executor)
+            self[comp_star].activate_index(alpha_star, beta_star, model_dir=model_dir, executor=executor,
+                                           weight_fcns=weight_fcns)
             num_evals = self[comp_star].get_cost(alpha_star, beta_star)
         else:
             self.logger.info(f"No candidates left for refinement, iteration: {self.refine_level}")

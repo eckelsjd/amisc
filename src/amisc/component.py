@@ -1128,7 +1128,7 @@ class Component(BaseModel, Serializable):
                     misc_coeff[old_alpha, old_beta] += (-1) ** int(np.sum(np.abs(diff)))
 
     def activate_index(self, alpha: MultiIndex, beta: MultiIndex, model_dir: str | Path = None,
-                       executor: Executor = None):
+                       executor: Executor = None, weight_fcns: dict[str, callable] | Literal['pdf'] | None = 'pdf'):
         """Add a multi-index to the active set and all neighbors to the candidate set.
 
         !!! Warning
@@ -1139,6 +1139,10 @@ class Component(BaseModel, Serializable):
         :param beta: A multi-index specifying surrogate fidelity
         :param model_dir: Directory to save model output files
         :param executor: Executor for parallel execution of model on training data if the model is not vectorized
+        :param weight_fcns: Dictionary of weight functions for each input variable (defaults to the variable PDFs);
+                            each function should be callable as `fcn(x: np.ndarray) -> np.ndarray`, where the input
+                            is an array of normalized input data and the output is an array of weights. If None, then
+                            no weighting is applied.
         """
         if (alpha, beta) in self.active_set:
             self.logger.warning(f'Multi-index {(alpha, beta)} is already in the active index set. Ignoring...')
@@ -1161,7 +1165,10 @@ class Component(BaseModel, Serializable):
         field_coords = {f'{var}{COORDS_STR_ID}': self.model_kwargs.get(f'{var}{COORDS_STR_ID}', None)
                         for var in self.inputs}
         domains = self.inputs.get_domains()
-        weight_fcns = self.inputs.get_pdfs()
+
+        if weight_fcns == 'pdf':
+            weight_fcns = self.inputs.get_pdfs()
+
         for a, b in indices:
             design_coords, design_pts = self.training_data.refine(a, b[:len(self.data_fidelity)],
                                                                   domains, weight_fcns)
