@@ -802,9 +802,9 @@ class System(BaseModel, Serializable):
                 self.logger.info(f"Initializing component {comp.name}: adding {(alpha_star, beta_star)} to active set")
                 model_dir = (pth / 'components' / comp.name) if (pth := self.root_dir) is not None else None
                 comp.activate_index(alpha_star, beta_star, model_dir=model_dir, executor=executor)
-                cost_star = max(1., comp.get_cost(alpha_star, beta_star))  # Cpu time (s)
+                num_evals = comp.get_cost(alpha_star, beta_star)
+                cost_star = comp.model_costs.get(alpha_star, 1.) * num_evals  # Cpu time (s)
                 err_star = np.nan
-                num_evals = round(cost_star / comp.model_costs.get(alpha_star, 1.))
                 return {'component': comp.name, 'alpha': alpha_star, 'beta': beta_star, 'num_evals': int(num_evals),
                         'added_cost': float(cost_star), 'added_error': float(err_star)}
 
@@ -856,7 +856,8 @@ class System(BaseModel, Serializable):
                             y_max[var] = np.nanmax(np.concatenate((y_max[var], arr), axis=0), axis=0, keepdims=True)
 
                     delta_error = np.nanmax([np.nanmax(error[var]) for var in error])  # Max error over all target QoIs
-                    delta_work = max(1., comp.get_cost(alpha, beta))  # Cpu time (s)
+                    num_evals = comp.get_cost(alpha, beta)
+                    delta_work = comp.model_costs.get(alpha_star, 1.) * num_evals  # Cpu time (s)
                     error_indicator = delta_error / delta_work
 
                     self.logger.info(f"Candidate multi-index: {(alpha, beta)}. Relative error: {delta_error}. "
@@ -886,7 +887,7 @@ class System(BaseModel, Serializable):
             self.logger.info(f"Candidate multi-index {(alpha_star, beta_star)} chosen for component '{comp_star}'.")
             model_dir = (pth / 'components' / comp_star) if (pth := self.root_dir) is not None else None
             self[comp_star].activate_index(alpha_star, beta_star, model_dir=model_dir, executor=executor)
-            num_evals = round(cost_star / self[comp_star].model_costs.get(alpha_star, 1.))
+            num_evals = self[comp_star].get_cost(alpha_star, beta_star)
         else:
             self.logger.info(f"No candidates left for refinement, iteration: {self.refine_level}")
             num_evals = 0
@@ -1531,23 +1532,15 @@ class System(BaseModel, Serializable):
 
         return fig, axs
 
-    def get_allocation(self, idx: int = None):
-        """Get a breakdown of cost allocation up to a certain iteration number during training (starting at 1).
+    def get_allocation(self):
+        """Get a breakdown of cost allocation during training.
 
-        :param idx: the iteration number to get allocation results for (defaults to last refinement step)
-        :returns: `cost_alloc, eval_alloc, cost_cum, eval_cum` - the cost allocation per model/fidelity, the
-                  number of model evaluations per model/fidelity, the cumulative training cost, and the cumulative
-                  number of model evaluations
+        :returns: `cost_alloc, cost_cum, model_evals` - the cost allocation per model/fidelity, the cumulative training
+                  cost (in s of CPU time), and the number of model evaluations at each training iteration
         """
-        if idx is None:
-            idx = self.refine_level
-        if idx > self.refine_level:
-            raise ValueError(f'Specified index: {idx} is greater than the max training level of {self.refine_level}')
-
-        eval_alloc = dict()     # Model evaluation counts per node and model fidelity
         cost_alloc = dict()     # Cost allocation (cpu time in s) per node and model fidelity
         cost_cum = []           # Cumulative cost allocation during training
-        eval_cum = []           # Cumulative number of model evaluations during training
+        model_evals = []        # Number of model evaluations at each training iteration
 
         prev_cands = {comp.name: IndexSet() for comp in self.components}  # empty candidate sets
 
@@ -1557,7 +1550,6 @@ class System(BaseModel, Serializable):
             alpha = train_res['alpha']
             beta = train_res['beta']
 
-            eval_alloc.setdefault(comp, dict())
             cost_alloc.setdefault(comp, dict())
 
             new_cands = cand_sets[comp].union({(alpha, beta)}) - prev_cands[comp]  # newly computed candidates
@@ -1565,24 +1557,21 @@ class System(BaseModel, Serializable):
             iter_cost = 0.
             iter_eval = 0
             for alpha_new, beta_new in new_cands:
-                eval_alloc[comp].setdefault(alpha_new, 0.)
                 cost_alloc[comp].setdefault(alpha_new, 0.)
 
-                added_cost = self[comp].get_cost(alpha_new, beta_new)
+                added_eval = self[comp].get_cost(alpha_new, beta_new)
                 model_cost = self[comp].model_costs.get(alpha_new, 1.)
-                added_eval = round(added_cost / model_cost)
 
-                iter_cost += added_cost
+                iter_cost += added_eval * model_cost
                 iter_eval += added_eval
 
-                eval_alloc[comp][alpha_new] += added_eval
-                cost_alloc[comp][alpha_new] += added_cost
+                cost_alloc[comp][alpha_new] += added_eval * model_cost
 
             cost_cum.append(iter_cost)
-            eval_cum.append(iter_eval)
+            model_evals.append(iter_eval)
             prev_cands[comp] = cand_sets[comp].union({(alpha, beta)})
 
-        return cost_alloc, eval_alloc, np.cumsum(cost_cum), np.cumsum(eval_cum)
+        return cost_alloc, np.cumsum(cost_cum), np.atleast_1d(model_evals)
 
     def plot_allocation(self, cmap: str = 'Blues', text_bar_width: float = 0.06, arrow_bar_width: float = 0.02):
         """Plot bar charts showing cost allocation during training.
@@ -1598,7 +1587,7 @@ class System(BaseModel, Serializable):
         :returns: `fig, ax`, Figure and Axes objects
         """
         # Get total cost (including offline overhead)
-        cost_alloc, eval_alloc, cost_cum, _ = self.get_allocation()
+        cost_alloc, cost_cum, _ = self.get_allocation()
         total_cost = cost_cum[-1]
 
         # Remove nodes with cost=0 from alloc dicts (i.e. analytical models)
@@ -1608,7 +1597,6 @@ class System(BaseModel, Serializable):
                 remove_nodes.append(node)
         for node in remove_nodes:
             del cost_alloc[node]
-            del eval_alloc[node]
 
         # Bar chart showing cost allocation breakdown for MF system at final iteration
         fig, ax = plt.subplots(figsize=(6, 5), layout='tight')
@@ -1626,11 +1614,12 @@ class System(BaseModel, Serializable):
                 p = ax.bar(x[j], frac, width, color=cmap(c_intervals[i]), linewidth=1,
                            edgecolor=[0, 0, 0], bottom=bottom)
                 bottom += frac
+                num_evals = round(cost / self[node].model_costs.get(alpha, 1.))
                 if frac > text_bar_width:
-                    ax.bar_label(p, labels=[f'{alpha}, {round(eval_alloc[node][alpha])}'], label_type='center')
+                    ax.bar_label(p, labels=[f'{alpha}, {num_evals}'], label_type='center')
                 elif frac > arrow_bar_width:
                     xy = (x[j] + width / 2, bottom - frac / 2)  # Label smaller bars with a text off to the side
-                    ax.annotate(f'{alpha}, {round(eval_alloc[node][alpha])}', xy, xytext=(xy[0] + 0.2, xy[1]),
+                    ax.annotate(f'{alpha}, {num_evals}', xy, xytext=(xy[0] + 0.2, xy[1]),
                                 arrowprops={'arrowstyle': '->', 'linewidth': 1})
                 else:
                     pass  # Don't label really small bars
