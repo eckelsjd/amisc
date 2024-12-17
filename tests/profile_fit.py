@@ -54,7 +54,8 @@ def profile_iteration_number():
         t1 = time.time()
         surr.fit(max_iter=iteration, max_tol=max_tol)
         t_serial.append(time.time() - t1)
-        model_evals.append(surr.get_allocation()[1]['comp'][()])
+        num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+        model_evals.append(num_evals)
         assert surr.refine_level == iteration
 
         # Parallel
@@ -64,7 +65,8 @@ def profile_iteration_number():
             t1 = time.time()
             surr.fit(max_iter=iteration, max_tol=max_tol, executor=executor)
             t_parallel.append(time.time() - t1)
-            model_evals.append(surr.get_allocation()[1]['comp'][()])
+            num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+            model_evals.append(num_evals)
             assert surr.refine_level == iteration
 
         # Vectorized
@@ -73,7 +75,8 @@ def profile_iteration_number():
         t1 = time.time()
         surr.fit(max_iter=iteration, max_tol=max_tol)
         t_vectorized.append(time.time() - t1)
-        model_evals.append(surr.get_allocation()[1]['comp'][()])
+        num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+        model_evals.append(num_evals)
         assert surr.refine_level == iteration
 
         evals.append(int(model_evals[0]))
@@ -121,7 +124,8 @@ def profile_model_cost():
         t1 = time.time()
         surr.fit(max_iter=iteration, max_tol=max_tol)
         t_serial.append(time.time() - t1)
-        model_evals.append(surr.get_allocation()[1]['comp'][()])
+        num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+        model_evals.append(num_evals)
         assert surr.refine_level == iteration
 
         # Parallel
@@ -131,7 +135,8 @@ def profile_model_cost():
             t1 = time.time()
             surr.fit(max_iter=iteration, max_tol=max_tol, executor=executor)
             t_parallel.append(time.time() - t1)
-            model_evals.append(surr.get_allocation()[1]['comp'][()])
+            num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+            model_evals.append(num_evals)
             assert surr.refine_level == iteration
 
         # Vectorized
@@ -140,7 +145,8 @@ def profile_model_cost():
         t1 = time.time()
         surr.fit(max_iter=iteration, max_tol=max_tol)
         t_vectorized.append(time.time() - t1)
-        model_evals.append(surr.get_allocation()[1]['comp'][()])
+        num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+        model_evals.append(num_evals)
         assert surr.refine_level == iteration
 
         evals.append(int(model_evals[0]))
@@ -183,7 +189,8 @@ def profile_num_workers():
     t1 = time.time()
     surr.fit(max_iter=iteration, max_tol=max_tol)
     t_serial = np.atleast_1d([time.time() - t1] * len(num_workers))
-    evals.append(surr.get_allocation()[1]['comp'][()])
+    num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+    evals.append(num_evals)
     assert surr.refine_level == iteration
 
     # Vectorized
@@ -193,7 +200,8 @@ def profile_num_workers():
     t1 = time.time()
     surr.fit(max_iter=iteration, max_tol=max_tol)
     t_vectorized = np.atleast_1d([time.time() - t1] * len(num_workers))
-    evals.append(surr.get_allocation()[1]['comp'][()])
+    num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+    evals.append(num_evals)
     assert surr.refine_level == iteration
 
 
@@ -208,7 +216,8 @@ def profile_num_workers():
             t1 = time.time()
             surr.fit(max_iter=iteration, max_tol=max_tol, executor=executor)
             t_parallel.append(time.time() - t1)
-            model_evals.append(surr.get_allocation()[1]['comp'][()])
+            num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+            model_evals.append(num_evals)
             assert surr.refine_level == iteration
 
         print(f'{num_worker:>15d} {t_serial[-1]:>10.2f} {t_parallel[-1]:>10.2f} {t_vectorized[-1]:>10.2f} '

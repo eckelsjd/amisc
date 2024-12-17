@@ -372,7 +372,8 @@ class Component(BaseModel, Serializable):
     :ivar misc_costs: the computational cost associated with each multi-index in the MISC approximation
     :ivar misc_coeff_train: the combination technique coefficients for the active set multi-indices
     :ivar misc_coeff_test: the combination technique coefficients for the active and candidate set multi-indices
-    :ivar model_costs: the average single fidelity model costs for each $\\alpha$
+    :ivar model_costs: the tracked average single fidelity model costs for each $\\alpha$
+    :ivar model_evals: the tracked number of evaluations for each $\\alpha$
     :ivar training_data: the training data storage structure for the surrogate model
 
     :ivar serializers: the custom serializers for the `[model_kwargs, interpolator, training_data]`
@@ -406,6 +407,7 @@ class Component(BaseModel, Serializable):
     misc_coeff_train: dict | MiscTree = MiscTree()     # (alpha, beta) -> c_[alpha, beta] (active set only)
     misc_coeff_test: dict | MiscTree = MiscTree()      # (alpha, beta) -> c_[alpha, beta] (including candidate set)
     model_costs: dict = dict()                         # Average single fidelity model costs (for each alpha)
+    model_evals: dict = dict()                         # Number of evaluations for each alpha
     training_data: Any | TrainingData = SparseGrid()   # Stores surrogate training data
 
     # Internal
@@ -604,6 +606,11 @@ class Component(BaseModel, Serializable):
     def _validate_model_costs(cls, model_costs: dict) -> dict:
         return {MultiIndex(key): float(value) for key, value in model_costs.items()}
 
+    @field_validator('model_evals')
+    @classmethod
+    def _validate_model_evals(cls, model_evals: dict) -> dict:
+        return {MultiIndex(key): int(value) for key, value in model_evals.items()}
+
     @field_validator('model_kwargs', 'interpolator', 'training_data')
     @classmethod
     def _validate_arbitrary_serializable(cls, data: Any, info: ValidationInfo) -> Any:
@@ -767,6 +774,7 @@ class Component(BaseModel, Serializable):
                    model_fidelity: Literal['best', 'worst'] | tuple | list = None,
                    output_path: str | Path = None,
                    executor: Executor = None,
+                   track_costs: bool = False,
                    **kwds) -> Dataset:
         """Wrapper function for calling the underlying component model.
 
@@ -798,6 +806,7 @@ class Component(BaseModel, Serializable):
                                in its keyword arguments).
         :param output_path: Directory to save model output files (model must request this in its keyword arguments).
         :param executor: Executor for parallel execution if the model is not vectorized (optional).
+        :param track_costs: Whether to track the computational cost of each model evaluation.
         :param kwds: Additional keyword arguments to pass to the model (model must request these in its keyword args).
         :returns: The output data from the model, formatted as a `dict` with a key for each output variable and a
                   corresponding value that is an array of the output data.
@@ -944,13 +953,21 @@ class Component(BaseModel, Serializable):
                                 output_dict[key][i] = val
 
         # Save average model costs for each alpha fidelity
-        if model_fidelity is not None and output_dict.get('model_cost') is not None:
-            alpha_costs = {}
-            for i, cost in enumerate(output_dict['model_cost']):
-                alpha_costs.setdefault(MultiIndex(model_fidelity[i]), [])
-                alpha_costs[MultiIndex(model_fidelity[i])].append(cost)
-            for a, costs in alpha_costs.items():
-                self.model_costs[a] = float(np.nanmean(np.hstack((costs, self.model_costs.get(a, [])))))
+        if track_costs:
+            if model_fidelity is not None and output_dict.get('model_cost') is not None:
+                alpha_costs = {}
+                for i, cost in enumerate(output_dict['model_cost']):
+                    alpha_costs.setdefault(MultiIndex(model_fidelity[i]), [])
+                    alpha_costs[MultiIndex(model_fidelity[i])].append(cost)
+                for a, costs in alpha_costs.items():
+                    self.model_evals.setdefault(a, 0)
+                    self.model_costs.setdefault(a, 0.0)
+                    num_evals_prev = self.model_evals.get(a)
+                    num_evals_new = len(costs)
+                    prev_avg = self.model_costs.get(a)
+                    new_avg = (np.sum(costs) + prev_avg * num_evals_prev) / (num_evals_prev + num_evals_new)
+                    self.model_evals[a] += num_evals_new
+                    self.model_costs[a] = float(new_avg)
 
         # Reshape loop dimensions to match the original input shape
         output_dict = format_outputs(output_dict, loop_shape)
@@ -960,10 +977,11 @@ class Component(BaseModel, Serializable):
                 for field in var.compression.fields:
                     if field not in output_dict:
                         self.logger.warning(f"Model return missing field '{field}' for output variable '{var}'. "
-                                            f"Returning NaNs...")
+                                            f"This may indicate an error during model evaluation. Returning NaNs...")
                         output_dict[field].setdefault(field, np.full((N,), np.nan))
             elif var.name not in output_dict:
-                self.logger.warning(f"Model return missing output variable '{var.name}'. Returning NaNs...")
+                self.logger.warning(f"Model return missing output variable '{var.name}'. This may indicate "
+                                    f"an error during model evaluation. Returning NaNs...")
                 output_dict[var.name] = np.full((N,), np.nan)
 
         # Return the output dictionary and any errors
@@ -1173,7 +1191,7 @@ class Component(BaseModel, Serializable):
             self.logger.info(f"Running {len(alpha_list)} total model evaluations for component "
                              f"'{self.name}' new candidate indices: {indices}...")
             model_outputs = self.call_model(model_inputs, model_fidelity=alpha_list, output_path=model_dir,
-                                            executor=executor, **field_coords)
+                                            executor=executor, track_costs=True, **field_coords)
             errors = model_outputs.pop('errors', {})
 
         # Unpack model outputs and update states
@@ -1204,7 +1222,7 @@ class Component(BaseModel, Serializable):
             # Store training data, computational cost, and new interpolator state
             self.training_data.set(a, b[:len(self.data_fidelity)], design_list[i], yi_dict)
             self.training_data.impute_missing_data(a, b[:len(self.data_fidelity)])
-            self.misc_costs[a, b] = self.model_costs.get(a, 1.) * num_train_pts
+            self.misc_costs[a, b] = num_train_pts
             self.misc_states[a, b] = self.interpolator.refine(b[len(self.data_fidelity):],
                                                               self.training_data.get(a, b[:len(self.data_fidelity)],
                                                                                      y_vars=y_vars, skip_nan=True),
@@ -1332,17 +1350,18 @@ class Component(BaseModel, Serializable):
         new_kwargs.update(kwargs)
         self.model_kwargs = new_kwargs
 
-    def get_cost(self, alpha: MultiIndex, beta: MultiIndex) -> float:
-        """Return the total cost (wall time s) required to add $(\\alpha, \\beta)$ to the MISC approximation.
+    def get_cost(self, alpha: MultiIndex, beta: MultiIndex) -> int:
+        """Return the total cost (i.e. number of model evaluations) required to add $(\\alpha, \\beta)$ to the
+        MISC approximation.
 
         :param alpha: A multi-index specifying model fidelity
         :param beta: A multi-index specifying surrogate fidelity
-        :returns: the total cost of adding this multi-index pair to the MISC approximation
+        :returns: the total number of model evaluations required for adding this multi-index to the MISC approximation
         """
         try:
             return self.misc_costs[alpha, beta]
         except Exception:
-            return 0.0
+            return 0
 
     @staticmethod
     def is_downward_closed(indices: IndexSet) -> bool:
@@ -1378,6 +1397,7 @@ class Component(BaseModel, Serializable):
         self.misc_coeff_train.clear()
         self.misc_coeff_test.clear()
         self.model_costs.clear()
+        self.model_evals.clear()
         self.training_data.clear()
 
     def serialize(self, keep_yaml_objects: bool = False, serialize_args: dict[str, tuple] = None,
@@ -1417,6 +1437,9 @@ class Component(BaseModel, Serializable):
                 elif key in ['model_costs']:
                     if len(value) > 0:
                         d[key] = {str(k): float(v) for k, v in value.items()}
+                elif key in ['model_evals']:
+                    if len(value) > 0:
+                        d[key] = {str(k): int(v) for k, v in value.items()}
                 elif key in ComponentSerializers.__annotations__.keys():
                     if key in ['training_data', 'interpolator'] and not self.has_surrogate:
                         continue
