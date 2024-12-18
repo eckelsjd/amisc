@@ -626,7 +626,7 @@ class System(BaseModel, Serializable):
                          inputs and outputs are specified as `dicts` of `np.ndarrays` with keys corresponding to the
                          variable names. Can also pass a path to a `.pkl` file that has the test set data as
                          {'test_set': (xtest, ytest)}.
-        :param start_test_check: the iteration to start checking the test set error (defaults to twice the number
+        :param start_test_check: the iteration to start checking the test set error (defaults to the number
                                  of components); surrogate evaluation isn't useful during initialization so you
                                  should at least allow one iteration per component before checking test set error
         :param plot_interval: how often to plot the error indicator and test set error (defaults to every iteration);
@@ -636,7 +636,7 @@ class System(BaseModel, Serializable):
         :param weight_fcns: a `dict` of weight functions to apply to each input variable for training data selection;
                             defaults to using the pdf of each variable. If None, then no weighting is applied.
         """
-        start_test_check = start_test_check or 2 * len(self.components)
+        start_test_check = start_test_check or sum([1 for _ in self.components if _.has_surrogate])
         targets = targets or self.outputs()
         xtest, ytest = self._get_test_set(test_set)
         max_iter = self.refine_level + max_iter
@@ -703,7 +703,7 @@ class System(BaseModel, Serializable):
             # Save performance on a test set
             if xtest is not None and ytest is not None:
                 # don't compute if components are uninitialized
-                perf = self.test_set_performance(xtest, ytest) if self.refine_level >= start_test_check else (
+                perf = self.test_set_performance(xtest, ytest) if self.refine_level + 1 >= start_test_check else (
                     {str(var): np.nan for var in ytest if COORDS_STR_ID not in var})
                 train_result['test_error'] = perf.copy()
 
