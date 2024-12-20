@@ -93,11 +93,15 @@ class TrainHistory(UserList, Serializable):
     def _validate_item(cls, item: dict):
         """Format a `TrainIteration` `dict` item before appending to the history."""
         item.setdefault('test_error', None)
+        item.setdefault('overhead_s', 0.0)
+        item.setdefault('model_s', 0.0)
         item['alpha'] = MultiIndex(item['alpha'])
         item['beta'] = MultiIndex(item['beta'])
         item['num_evals'] = int(item['num_evals'])
         item['added_cost'] = float(item['added_cost'])
         item['added_error'] = float(item['added_error'])
+        item['overhead_s'] = float(item['overhead_s'])
+        item['model_s'] = float(item['model_s'])
         return item
 
     def append(self, item: dict):
@@ -640,8 +644,6 @@ class System(BaseModel, Serializable):
         targets = targets or self.outputs()
         xtest, ytest = self._get_test_set(test_set)
         max_iter = self.refine_level + max_iter
-        curr_error = np.inf
-        t_start = time.time()
 
         # Estimate bounds from test set if provided (override current bounds if they are set)
         if estimate_bounds:
@@ -679,13 +681,28 @@ class System(BaseModel, Serializable):
                         if (perf := res.get('test_error')) is not None:
                             test_record[j, i] = perf[var]
 
+        total_overhead = 0.0
+        total_model_wall_time = 0.0
+        t_start = time.time()
         while True:
             # Adaptive refinement step
+            t_iter_start = time.time()
             train_result = self.refine(targets=targets, num_refine=num_refine, update_bounds=update_bounds,
                                        executor=executor, weight_fcns=weight_fcns)
             if train_result['component'] is None:
                 self._print_title_str('Termination criteria reached: No candidates left to refine')
                 break
+
+            # Keep track of algorithmic overhead (before and after call_model for this iteration)
+            m_start, m_end = self[train_result['component']].get_model_timestamps()  # Start and end of call_model
+            if m_start is not None and m_end is not None:
+                train_result['overhead_s'] = (m_start - t_iter_start) + (time.time() - m_end)
+                train_result['model_s'] = m_end - m_start
+            else:
+                train_result['overhead_s'] = time.time() - t_iter_start
+                train_result['model_s'] = 0.0
+            total_overhead += train_result['overhead_s']
+            total_model_wall_time += train_result['model_s']
 
             curr_error = train_result['added_error']
 
@@ -723,6 +740,7 @@ class System(BaseModel, Serializable):
                         t_fig.savefig(str(Path(self.root_dir) / 'test_set_error.pdf'),format='pdf',bbox_inches='tight')
 
             self.train_history.append(train_result)
+
             if self.root_dir is not None and save_interval > 0 and self.refine_level % save_interval == 0:
                 iter_name = f'{self.name}_iter{self.refine_level}'
                 if not (pth := self.root_dir / 'surrogates' / iter_name).is_dir():
@@ -737,10 +755,17 @@ class System(BaseModel, Serializable):
                 self._print_title_str(f'Termination criteria reached: relative error {curr_error} < tol {max_tol}')
                 break
             if ((time.time() - t_start) / 3600.0) >= runtime_hr:
-                actual = datetime.timedelta(seconds=time.time() - t_start)
+                t_end = time.time()
+                actual = datetime.timedelta(seconds=t_end - t_start)
                 target = datetime.timedelta(seconds=runtime_hr * 3600)
+                train_surplus = ((t_end - t_start) - runtime_hr * 3600) / 3600
                 self._print_title_str(f'Termination criteria reached: runtime {str(actual)} > {str(target)}')
+                self.logger.info(f'Surplus wall time: {train_surplus:.3f}/{runtime_hr:.3f} hours '
+                                 f'(+{100 * train_surplus / runtime_hr:.2f}%)')
                 break
+
+        self.logger.info(f'Model evaluation algorithm efficiency: '
+                         f'{100 * total_model_wall_time / (total_model_wall_time + total_overhead):.2f}%')
 
         if self.root_dir is not None:
             iter_name = f'{self.name}_iter{self.refine_level}'
@@ -1542,11 +1567,13 @@ class System(BaseModel, Serializable):
     def get_allocation(self):
         """Get a breakdown of cost allocation during training.
 
-        :returns: `cost_alloc, cost_cum, model_evals` - the cost allocation per model/fidelity, the cumulative training
-                  cost (in s of CPU time), and the number of model evaluations at each training iteration
+        :returns: `cost_alloc, model_cost, overhead_cost, model_evals` - the cost allocation per model/fidelity,
+                  the model evaluation cost per iteration (in s of CPU time), the algorithmic overhead cost per
+                  iteration, and the total number of model evaluations at each training iteration
         """
         cost_alloc = dict()     # Cost allocation (cpu time in s) per node and model fidelity
-        cost_cum = []           # Cumulative cost allocation during training
+        model_cost = []         # Cost of model evaluations (CPU time in s) per iteration
+        overhead_cost = []      # Algorithm overhead costs (CPU time in s) per iteration
         model_evals = []        # Number of model evaluations at each training iteration
 
         prev_cands = {comp.name: IndexSet() for comp in self.components}  # empty candidate sets
@@ -1556,6 +1583,7 @@ class System(BaseModel, Serializable):
             comp = train_res['component']
             alpha = train_res['alpha']
             beta = train_res['beta']
+            overhead = train_res['overhead_s']
 
             cost_alloc.setdefault(comp, dict())
 
@@ -1567,18 +1595,19 @@ class System(BaseModel, Serializable):
                 cost_alloc[comp].setdefault(alpha_new, 0.)
 
                 added_eval = self[comp].get_cost(alpha_new, beta_new)
-                model_cost = self[comp].model_costs.get(alpha_new, 1.)
+                single_cost = self[comp].model_costs.get(alpha_new, 1.)
 
-                iter_cost += added_eval * model_cost
+                iter_cost += added_eval * single_cost
                 iter_eval += added_eval
 
-                cost_alloc[comp][alpha_new] += added_eval * model_cost
+                cost_alloc[comp][alpha_new] += added_eval * single_cost
 
-            cost_cum.append(iter_cost)
+            overhead_cost.append(overhead)
+            model_cost.append(iter_cost)
             model_evals.append(iter_eval)
             prev_cands[comp] = cand_sets[comp].union({(alpha, beta)})
 
-        return cost_alloc, np.cumsum(cost_cum), np.atleast_1d(model_evals)
+        return cost_alloc, np.atleast_1d(model_cost), np.atleast_1d(overhead_cost), np.atleast_1d(model_evals)
 
     def plot_allocation(self, cmap: str = 'Blues', text_bar_width: float = 0.06, arrow_bar_width: float = 0.02):
         """Plot bar charts showing cost allocation during training.
@@ -1593,9 +1622,9 @@ class System(BaseModel, Serializable):
                                 below this amount, the bar is too skinny and won't print any text
         :returns: `fig, ax`, Figure and Axes objects
         """
-        # Get total cost (including offline overhead)
-        cost_alloc, cost_cum, _ = self.get_allocation()
-        total_cost = cost_cum[-1]
+        # Get total cost
+        cost_alloc, model_cost, _, _ = self.get_allocation()
+        total_cost = np.cumsum(model_cost)[-1]
 
         # Remove nodes with cost=0 from alloc dicts (i.e. analytical models)
         remove_nodes = []

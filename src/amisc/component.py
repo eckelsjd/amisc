@@ -26,6 +26,7 @@ import itertools
 import logging
 import random
 import string
+import time
 import traceback
 import typing
 import warnings
@@ -412,6 +413,8 @@ class Component(BaseModel, Serializable):
 
     # Internal
     _logger: Optional[logging.Logger] = None
+    _model_start_time: float = -1.0  # Temporarily store the most recent model start timestamp from call_model
+    _model_end_time: float = -1.0    # Temporarily store the most recent model end timestamp from call_model
 
     def __init__(self, /, model, *args, inputs=None, outputs=None, name=None, **kwargs):
         if name is None:
@@ -868,12 +871,17 @@ class Component(BaseModel, Serializable):
         if self.vectorized:
             if alpha_requested:
                 kwargs['model_fidelity'] = np.atleast_1d(model_fidelity).reshape((N, -1))
+
+            self._model_start_time = time.time()
             output_dict = self.model(*[inputs[var.name] for var in self.inputs], **kwargs) if self.call_unpacked \
                 else self.model(inputs, **kwargs)
+            self._model_end_time = time.time()
+
             if self.ret_unpacked:
                 output_dict = (output_dict,) if not isinstance(output_dict, tuple) else output_dict
                 output_dict = {out_var.name: output_dict[i] for i, out_var in enumerate(self.outputs)}
         else:
+            self._model_start_time = time.time()
             if executor is None:  # Serial
                 results = deque(maxlen=N)
                 for i in range(N):
@@ -915,6 +923,7 @@ class Component(BaseModel, Serializable):
                     except Exception:
                         results.append({'inputs': {k: v[i] for k, v in inputs.items()}, 'index': i,
                                         'model_kwargs': kwargs.copy(), 'error': traceback.format_exc()})
+            self._model_end_time = time.time()
 
             # Collect parallel/serial results
             output_dict = {}
@@ -1154,9 +1163,10 @@ class Component(BaseModel, Serializable):
                                 f'Ignoring...')
             return
 
-        # Collect all neighbor candidate indices
+        # Collect all neighbor candidate indices; sort by largest model cost first
         neighbors = self._neighbors(alpha, beta, forward=True)
         indices = list(itertools.chain([(alpha, beta)] if (alpha, beta) not in self.candidate_set else [], neighbors))
+        indices.sort(key=lambda ele: self.model_costs.get(ele[0], sum(ele[0])), reverse=True)
 
         # Refine and collect all new model inputs (i.e. training points) requested by the new candidates
         alpha_list = []    # keep track of model fidelities
@@ -1200,6 +1210,9 @@ class Component(BaseModel, Serializable):
             model_outputs = self.call_model(model_inputs, model_fidelity=alpha_list, output_path=model_dir,
                                             executor=executor, track_costs=True, **field_coords)
             errors = model_outputs.pop('errors', {})
+        else:
+            self._model_start_time = -1.0
+            self._model_end_time = -1.0
 
         # Unpack model outputs and update states
         start_idx = 0
@@ -1370,6 +1383,15 @@ class Component(BaseModel, Serializable):
         except Exception:
             return 0
 
+    def get_model_timestamps(self):
+        """Return a tuple with the (start, end) timestamps for the most recent call to `call_model`. This
+        is useful for tracking the duration of model evaluations. Will return (None, None) if no model has been called.
+        """
+        if self._model_start_time < 0 or self._model_end_time < 0:
+            return None, None
+        else:
+            return self._model_start_time, self._model_end_time
+
     @staticmethod
     def is_downward_closed(indices: IndexSet) -> bool:
         """Return if a list of $(\\alpha, \\beta)$ multi-indices is downward-closed.
@@ -1406,6 +1428,8 @@ class Component(BaseModel, Serializable):
         self.model_costs.clear()
         self.model_evals.clear()
         self.training_data.clear()
+        self._model_start_time = -1.0
+        self._model_end_time = -1.0
 
     def serialize(self, keep_yaml_objects: bool = False, serialize_args: dict[str, tuple] = None,
                   serialize_kwargs: dict[str: dict] = None) -> dict:
