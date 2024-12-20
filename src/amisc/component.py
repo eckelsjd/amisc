@@ -442,6 +442,7 @@ class Component(BaseModel, Serializable):
                 field_super = next(filter(lambda x: issubclass(x, Serializable),
                                           typing.get_args(self.model_fields[key].annotation)), None)
                 field = field_super.from_dict(field) if field_super is not None else field
+                kwargs[key] = field
             if not serializers.get(key, None):
                 serializers[key] = type(field) if isinstance(field, Serializable) else (
                     type(self.model_fields[key].default))
