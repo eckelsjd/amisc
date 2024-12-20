@@ -54,7 +54,7 @@ def profile_iteration_number():
         t1 = time.time()
         surr.fit(max_iter=iteration, max_tol=max_tol)
         t_serial.append(time.time() - t1)
-        num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+        num_evals = np.cumsum(surr.get_allocation()[3])[-1]
         model_evals.append(num_evals)
         assert surr.refine_level == iteration
 
@@ -65,7 +65,7 @@ def profile_iteration_number():
             t1 = time.time()
             surr.fit(max_iter=iteration, max_tol=max_tol, executor=executor)
             t_parallel.append(time.time() - t1)
-            num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+            num_evals = np.cumsum(surr.get_allocation()[3])[-1]
             model_evals.append(num_evals)
             assert surr.refine_level == iteration
 
@@ -75,7 +75,7 @@ def profile_iteration_number():
         t1 = time.time()
         surr.fit(max_iter=iteration, max_tol=max_tol)
         t_vectorized.append(time.time() - t1)
-        num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+        num_evals = np.cumsum(surr.get_allocation()[3])[-1]
         model_evals.append(num_evals)
         assert surr.refine_level == iteration
 
@@ -124,7 +124,7 @@ def profile_model_cost():
         t1 = time.time()
         surr.fit(max_iter=iteration, max_tol=max_tol)
         t_serial.append(time.time() - t1)
-        num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+        num_evals = np.cumsum(surr.get_allocation()[3])[-1]
         model_evals.append(num_evals)
         assert surr.refine_level == iteration
 
@@ -135,7 +135,7 @@ def profile_model_cost():
             t1 = time.time()
             surr.fit(max_iter=iteration, max_tol=max_tol, executor=executor)
             t_parallel.append(time.time() - t1)
-            num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+            num_evals = np.cumsum(surr.get_allocation()[3])[-1]
             model_evals.append(num_evals)
             assert surr.refine_level == iteration
 
@@ -145,7 +145,7 @@ def profile_model_cost():
         t1 = time.time()
         surr.fit(max_iter=iteration, max_tol=max_tol)
         t_vectorized.append(time.time() - t1)
-        num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+        num_evals = np.cumsum(surr.get_allocation()[3])[-1]
         model_evals.append(num_evals)
         assert surr.refine_level == iteration
 
@@ -189,7 +189,7 @@ def profile_num_workers():
     t1 = time.time()
     surr.fit(max_iter=iteration, max_tol=max_tol)
     t_serial = np.atleast_1d([time.time() - t1] * len(num_workers))
-    num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+    num_evals = np.cumsum(surr.get_allocation()[3])[-1]
     evals.append(num_evals)
     assert surr.refine_level == iteration
 
@@ -200,7 +200,7 @@ def profile_num_workers():
     t1 = time.time()
     surr.fit(max_iter=iteration, max_tol=max_tol)
     t_vectorized = np.atleast_1d([time.time() - t1] * len(num_workers))
-    num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+    num_evals = np.cumsum(surr.get_allocation()[3])[-1]
     evals.append(num_evals)
     assert surr.refine_level == iteration
 
@@ -216,7 +216,7 @@ def profile_num_workers():
             t1 = time.time()
             surr.fit(max_iter=iteration, max_tol=max_tol, executor=executor)
             t_parallel.append(time.time() - t1)
-            num_evals = np.cumsum(surr.get_allocation()[2])[-1]
+            num_evals = np.cumsum(surr.get_allocation()[3])[-1]
             model_evals.append(num_evals)
             assert surr.refine_level == iteration
 

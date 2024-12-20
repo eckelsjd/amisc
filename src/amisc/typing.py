@@ -59,9 +59,11 @@ class TrainIteration(_TypedDict):
     :ivar alpha: the selected candidate model fidelity multi-index
     :ivar beta: the selected candidate surrogate fidelity multi-index
     :ivar num_evals: the number of model evaluations performed during this iteration
-    :ivar added_cost: the total added computational cost of the new model evaluations
+    :ivar added_cost: the total added computational cost of the new model evaluations (CPU time in seconds)
     :ivar added_error: the error/difference between the refined surrogate and the previous surrogate
     :ivar test_error: the error of the refined surrogate on the test set (optional)
+    :ivar overhead_s: the algorithmic overhead wall time in seconds for the training iteration
+    :ivar model_s: the total wall time in seconds for the model evaluations for the training iteration
     """
     component: str
     alpha: MultiIndex
@@ -70,6 +72,8 @@ class TrainIteration(_TypedDict):
     added_cost: float
     added_error: float
     test_error: _Optional[dict[str, float]]
+    overhead_s: float
+    model_s: float
 
 
 class CompressionData(_TypedDict, total=False):
