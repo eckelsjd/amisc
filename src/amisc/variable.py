@@ -279,6 +279,9 @@ class Variable(BaseModel, Serializable):
         """Return an array of the given `shape` for uniform samples over the domain of this variable. Returns
         samples for each latent dimension if this is a field quantity with compression.
 
+        Will always sample uniformly over the normalized surrogate domain if `norm` is specified, and will return
+        samples in the original unnormalized domain.
+
         !!! Note
             The last dim of the returned samples will be the latent space size for field quantities.
 
@@ -293,7 +296,9 @@ class Variable(BaseModel, Serializable):
                 ub = np.atleast_1d([d[1] for d in domain])
                 return np.random.rand(*shape, 1) * (ub - lb) + lb
             else:
-                return np.random.rand(*shape) * (domain[1] - domain[0]) + domain[0]
+                lb, ub = self.normalize(domain)
+                norm_samples = np.random.rand(*shape) * (ub - lb) + lb
+                return self.denormalize(norm_samples)
         else:
             raise RuntimeError(f'Variable "{self.name}" does not have a domain specified.')
 
