@@ -15,6 +15,30 @@ from amisc.compression import SVD
 from amisc.utils import relative_error
 
 
+def test_sample_inputs():
+    def my_func(inputs):
+        return inputs
+
+    inputs = [Variable('x1', distribution='N(0, 1)', category='calibration'),
+              Variable('x2', domain=(0.1, 100), norm='log10', category='calibration'),
+              Variable('x3', domain=(1e-6, 10e-6), norm='linear(1e6)', category='other')]
+    surr = System(Component(my_func, inputs, ['y1', 'y2', 'y3'], name='c1'))
+
+    s1 = surr.sample_inputs(100)
+    assert all([v in s1 for v in ['x1', 'x2', 'x3']])
+    assert np.all(s1['x1'] < 3) and np.all(s1['x1'] > -3)
+    assert np.all(s1['x2'] < 2) and np.all(s1['x2'] > -1)
+    assert np.all(s1['x3'] < 10) and np.all(s1['x3'] > 1)
+
+    s1 = surr.sample_inputs(100, use_pdf='x1', include='calibration', normalize=False)
+    assert 'x3' not in s1
+    assert np.all(s1['x2'] < 100) and np.all(s1['x2'] > 0.1)
+
+    s1 = surr.sample_inputs(100, exclude=['x1', 'x2'], normalize=False)
+    assert 'x1' not in s1 and 'x2' not in s1
+    assert np.all(s1['x3'] < 10e-6) and np.all(s1['x3'] > 1e-6)
+
+
 def test_feedforward_simple(plots=False):
     """Test the MD system in Figure 5 in Jakeman 2022."""
     from amisc.examples.models import f1, f2
@@ -348,7 +372,7 @@ def test_fire_sat(tmp_path, plots=False):
     # Plot 1d slices
     slice_idx = ['H', 'Po', 'Cd']
     try:
-        surr.plot_slice(slice_idx, targs, show_model=['best', 'worst'], model_dir=surr.root_dir,
+        surr.plot_slice(slice_idx, targs, show_model=['best', 'worst'], save_dir=surr.root_dir,
                         random_walk=True, num_steps=15)
     except np.linalg.LinAlgError:
         print('Its alright. Sometimes the random walks are wacky and FPI wont converge.')
