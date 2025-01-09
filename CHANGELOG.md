@@ -1,3 +1,28 @@
+## v0.6.0 (2025-01-09)
+
+### Feat
+
+- clean sample inputs and plot slice api
+- overhead tracking and sorted fidelity evaluation
+- adds flag for custom weighting functions during training
+- adds reconstruction tolerance for svd
+
+### Fix
+
+- bug with component serializer dict validation
+- more consistent tracking of model costs and allocation
+- rank starts at 1 for svd reconstruction tolerance
+- serialize system model_extra if builtin
+- allow skipping nan in relative error
+- fixes bug in load_from_file and allows nd object arrays for compression
+- cushion turbojet test tolerance
+- integrate field coords and object arrays for changing field shapes
+
+### Refactor
+
+- update PEP735 pyproject dependency groups
+- rename sweep plots to slice
+
 ## v0.5.2 (2024-11-05)
 
 ### Fix
