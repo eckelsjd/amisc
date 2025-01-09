@@ -1298,6 +1298,7 @@
 <li><code>TrainIteration</code> — the results of a single training iteration</li>
 <li><code>CompressionData</code> — a dictionary spec for passing data to/from <code>Variable.compress()</code></li>
 <li><code>LATENT_STR_ID</code> — a string identifier for latent coefficients of field quantities</li>
+<li><code>COORDS_STR_ID</code> — a string identifier for coordinate locations of field quantities</li>
 </ul>
 
 
@@ -1642,7 +1643,7 @@ consider migrating to <code>xarray</code> for more advanced data manipulation.</
             <td><code><span title="amisc.typing.TrainIteration.added_cost">added_cost</span></code></td>
             <td class="doc-attribute-details">
               <div class="doc-md-description">
-                <p>the total added computational cost of the new model evaluations</p>
+                <p>the total added computational cost of the new model evaluations (CPU time in seconds)</p>
               </div>
               <p>
                   <span class="doc-attribute-annotation">
@@ -1676,6 +1677,34 @@ consider migrating to <code>xarray</code> for more advanced data manipulation.</
                   <span class="doc-attribute-annotation">
                     <b>TYPE:</b>
                       <code><span title="typing.Optional">Optional</span>[dict[str, float]]</code>
+                  </span>
+              </p>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td><code><span title="amisc.typing.TrainIteration.overhead_s">overhead_s</span></code></td>
+            <td class="doc-attribute-details">
+              <div class="doc-md-description">
+                <p>the algorithmic overhead wall time in seconds for the training iteration</p>
+              </div>
+              <p>
+                  <span class="doc-attribute-annotation">
+                    <b>TYPE:</b>
+                      <code>float</code>
+                  </span>
+              </p>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td><code><span title="amisc.typing.TrainIteration.model_s">model_s</span></code></td>
+            <td class="doc-attribute-details">
+              <div class="doc-md-description">
+                <p>the total wall time in seconds for the model evaluations for the training iteration</p>
+              </div>
+              <p>
+                  <span class="doc-attribute-annotation">
+                    <b>TYPE:</b>
+                      <code>float</code>
                   </span>
               </p>
             </td>
