@@ -613,12 +613,13 @@ class System(BaseModel, Serializable):
             max_iter: int = 20,
             max_tol: float = 1e-3,
             runtime_hr: float = 1.,
-            save_interval: int = 0,
             estimate_bounds: bool = False,
             update_bounds: bool = True,
             test_set: tuple | str | Path = None,
             start_test_check: int = None,
+            save_interval: int = 0,
             plot_interval: int = 1,
+            cache_interval: int = 0,
             executor: Executor = None,
             weight_fcns: dict[str, callable] | Literal['pdf'] | None = 'pdf'):
         """Train the system surrogate adaptively by iterative refinement until an end condition is met.
@@ -629,8 +630,6 @@ class System(BaseModel, Serializable):
         :param max_tol: the max allowable value in relative L2 error to achieve
         :param runtime_hr: the threshold wall clock time (hr) at which to stop further refinement (will go
                            until all models finish the current iteration)
-        :param save_interval: number of refinement steps between each progress save, none if 0; `System.root_dir`
-                              must be specified to save to file
         :param estimate_bounds: whether to estimate bounds for the coupling variables; will only try to estimate from
                                 the `test_set` if provided (defaults to `True`). Otherwise, you should manually
                                 provide domains for all coupling variables.
@@ -642,8 +641,12 @@ class System(BaseModel, Serializable):
         :param start_test_check: the iteration to start checking the test set error (defaults to the number
                                  of components); surrogate evaluation isn't useful during initialization so you
                                  should at least allow one iteration per component before checking test set error
+        :param save_interval: number of refinement steps between each progress save, none if 0; `System.root_dir`
+                              must be specified to save to file
         :param plot_interval: how often to plot the error indicator and test set error (defaults to every iteration);
                               will only plot and save to file if a root directory is set
+        :param cache_interval: how often to cache component data in order to speed up future training iterations (at
+                               the cost of additional memory usage); defaults to 0 (no caching)
         :param executor: a `concurrent.futures.Executor` object to parallelize model evaluations (optional, but
                          recommended for expensive models)
         :param weight_fcns: a `dict` of weight functions to apply to each input variable for training data selection;
@@ -755,6 +758,10 @@ class System(BaseModel, Serializable):
                 if not (pth := self.root_dir / 'surrogates' / iter_name).is_dir():
                     os.mkdir(pth)
                 self.save_to_file(f'{iter_name}.yml', save_dir=pth)  # Save to an iteration-specific directory
+
+            if cache_interval > 0 and self.refine_level % cache_interval == 0:
+                for comp in self.components:
+                    comp.cache()
 
             # Check all end conditions
             if self.refine_level >= max_iter:

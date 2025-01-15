@@ -211,10 +211,12 @@ class Compression(PickleSerializable, ABC):
         else:
             shape = (1,)
 
+        always_skip_interp = not coords_obj_array and np.array_equal(field_coords, grid_coords)  # must be exact match
+
         all_states = np.empty(shape, dtype=object)  # are you in good hands?
 
         for j, f_coords, f_values in _iterate_coords_and_fields():
-            skip_interp = (f_coords.shape == grid_coords.shape and np.allclose(f_coords, grid_coords))
+            skip_interp = always_skip_interp or np.array_equal(f_coords, grid_coords)  # exact even for floats
 
             coords_shape = f_coords.shape[:-1]
             loop_shape = next(iter(f_values.values())).shape[:-len(coords_shape)]

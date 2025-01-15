@@ -415,6 +415,7 @@ class Component(BaseModel, Serializable):
     _logger: Optional[logging.Logger] = None
     _model_start_time: float = -1.0  # Temporarily store the most recent model start timestamp from call_model
     _model_end_time: float = -1.0    # Temporarily store the most recent model end timestamp from call_model
+    _cache: dict = dict()            # Temporary cache for faster access to training data and similar
 
     def __init__(self, /, model, *args, inputs=None, outputs=None, name=None, **kwargs):
         if name is None:
@@ -738,14 +739,40 @@ class Component(BaseModel, Serializable):
 
         return index_set, misc_coeff
 
+    def cache(self, kind: list | Literal["training"] = "training"):
+        """Cache data for quicker access. Only `"training"` is supported.
+
+        :param kind: the type(s) of data to cache (only "training" is supported). This will cache the
+                     surrogate training data with nans removed.
+        """
+        if not isinstance(kind, list):
+            kind = [kind]
+
+        if "training" in kind:
+            self._cache.setdefault("training", {})
+            y_vars = self._surrogate_outputs()
+            for alpha, beta in self.active_set.union(self.candidate_set):
+                self._cache["training"].setdefault(alpha, {})
+
+                if beta not in self._cache["training"][alpha]:
+                    self._cache["training"][alpha][beta] = self.training_data.get(alpha, beta[:len(self.data_fidelity)],
+                                                                                  y_vars=y_vars, skip_nan=True)
+
+    def clear_cache(self):
+        """Clear cached data."""
+        self._cache.clear()
+
     def get_training_data(self, alpha: Literal['best', 'worst'] | MultiIndex = 'best',
                           beta: Literal['best', 'worst'] | MultiIndex = 'best',
-                          y_vars: list = None) -> tuple[Dataset, Dataset]:
+                          y_vars: list = None,
+                          cached: bool = False) -> tuple[Dataset, Dataset]:
         """Get all training data for a given multi-index pair `(alpha, beta)`.
 
         :param alpha: the model fidelity index (defaults to the maximum available model fidelity)
         :param beta: the surrogate fidelity index (defaults to the maximum available surrogate fidelity)
         :param y_vars: the training data to return (defaults to all stored data)
+        :param cached: if True, will get cached training data if available (this will ignore `y_vars` and
+                       only grab whatever is in the cache, which is surrogate outputs only and no nans)
         :returns: `(xtrain, ytrain)` - the training data for the given multi-indices
         """
         # Find the best alpha
@@ -769,7 +796,10 @@ class Component(BaseModel, Serializable):
             beta = (0,) * len(self.max_beta)
 
         try:
-            return self.training_data.get(alpha, beta, y_vars=y_vars, skip_nan=True)
+            if cached and (data := self._cache.get("training", {}).get(alpha, {}).get(beta)) is not None:
+                return data
+            else:
+                return self.training_data.get(alpha, beta[:len(self.data_fidelity)], y_vars=y_vars, skip_nan=True)
         except Exception as e:
             self.logger.error(f"Error getting training data for alpha={alpha}, beta={beta}.")
             raise e
@@ -1087,7 +1117,7 @@ class Component(BaseModel, Serializable):
             if np.abs(comb_coeff) > 0:
                 coeffs.append(comb_coeff)
                 args = (self.misc_states.get((alpha, beta)),
-                        self.training_data.get(alpha, beta[:len(self.data_fidelity)], skip_nan=True, y_vars=y_vars))
+                        self.get_training_data(alpha, beta, y_vars=y_vars, cached=True))
 
                 results.append(self.interpolator.predict(inputs, *args) if executor is None else
                                executor.submit(self.interpolator.predict, inputs, *args))
@@ -1210,6 +1240,7 @@ class Component(BaseModel, Serializable):
                              f"'{self.name}' new candidate indices: {indices}...")
             model_outputs = self.call_model(model_inputs, model_fidelity=alpha_list, output_path=model_dir,
                                             executor=executor, track_costs=True, **field_coords)
+            self.logger.info(f"Model evaluations complete for component '{self.name}'.")
             errors = model_outputs.pop('errors', {})
         else:
             self._model_start_time = -1.0
@@ -1305,7 +1336,7 @@ class Component(BaseModel, Serializable):
                 coeffs.append(comb_coeff)
                 func = self.interpolator.gradient if derivative == 'first' else self.interpolator.hessian
                 args = (self.misc_states.get((alpha, beta)),
-                        self.training_data.get(alpha, beta[:len(self.data_fidelity)], skip_nan=True, y_vars=y_vars))
+                        self.get_training_data(alpha, beta, y_vars=y_vars, cached=True))
 
                 results.append(func(inputs, *args) if executor is None else executor.submit(func, inputs, *args))
 
@@ -1431,6 +1462,7 @@ class Component(BaseModel, Serializable):
         self.training_data.clear()
         self._model_start_time = -1.0
         self._model_end_time = -1.0
+        self.clear_cache()
 
     def serialize(self, keep_yaml_objects: bool = False, serialize_args: dict[str, tuple] = None,
                   serialize_kwargs: dict[str: dict] = None) -> dict:
