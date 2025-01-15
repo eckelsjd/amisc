@@ -904,7 +904,7 @@ class System(BaseModel, Serializable):
 
                     delta_error = np.nanmax([np.nanmax(error[var]) for var in error])  # Max error over all target QoIs
                     num_evals = comp.get_cost(alpha, beta)
-                    delta_work = comp.model_costs.get(alpha_star, 1.) * num_evals  # Cpu time (s)
+                    delta_work = comp.model_costs.get(alpha, 1.) * num_evals  # Cpu time (s)
                     error_indicator = delta_error / delta_work
 
                     self.logger.info(f"Candidate multi-index: {(alpha, beta)}. Relative error: {delta_error}. "
