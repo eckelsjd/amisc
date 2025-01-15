@@ -185,53 +185,51 @@ class SparseGrid(TrainingData, PickleSerializable):
         :param alpha: the model fidelity indices
         :param coords: a list of grid coordinates to locate the `yi` values in the sparse grid data structure
         :param y_vars: the keys of the outputs to return (if `None`, return all outputs)
-        :param skip_nan: skip any data points with remaining `nan` values if `skip_nan=True`
+        :param skip_nan: skip any data points with remaining `nan` values if `skip_nan=True` (only for numeric outputs)
         :returns: `dicts` of model inputs `xi_dict` and outputs `yi_dict`
         """
-        xi_dict = {}
+        N = len(coords)
+        is_numeric = {}
+        is_singleton = {}
+        xi_dict = self._extract_grid_points(coords)
         yi_dict = {}
-        y_squeeze = {}  # Keep track of whether to squeeze extra output dimensions (i.e. non field quantities)
-        for coord in coords:
-            try:
-                skip_coord = False
-                yi_curr = copy.deepcopy(self.yi_map[alpha][coord])
-                output_vars = self._numeric_outputs(yi_curr)
-                for var in output_vars:
-                    if np.any(np.isnan(yi_curr[var])):
-                        yi_curr[var] = self.yi_nan_map[alpha].get(coord, yi_curr)[var]
-                    if skip_nan and np.any(np.isnan(yi_curr[var])):
-                        skip_coord = True
-                        break
 
-                if not skip_coord:
-                    self._append_grid_points(coord, xi_dict)
-                    yi_vars = y_vars if y_vars is not None else yi_curr.keys()
-                    for var in yi_vars:
-                        yi = np.atleast_1d(yi_curr[var])
-                        y_squeeze[var] = self._is_singleton(yi)  # squeeze for scalar quantities
-                        if y_squeeze[var]:
-                            yi = np.expand_dims(yi, axis=0)
-                            yi_dict[var] = yi if yi_dict.get(var) is None else np.concatenate((yi_dict[var], yi),
-                                                                                              axis=0)
-                        else:
-                            # Object arrays for field qtys
-                            yi_dict[var] = np.array([None], dtype=object) if yi_dict.get(var) is None else \
-                                np.concatenate((yi_dict[var], [None]), axis=0)
-                            yi_dict[var][-1] = yi
+        first_yi = next(iter(self.yi_map[alpha].values()))
+        if y_vars is None:
+            y_vars = first_yi.keys()
+
+        for var in y_vars:
+            yi = np.atleast_1d(first_yi[var])
+            is_numeric[var] = self._is_numeric(yi)
+            is_singleton[var] = self._is_singleton(yi)
+            yi_dict[var] = np.empty(N, dtype=np.float64 if is_numeric[var] and is_singleton[var] else object)
+
+        for i, coord in enumerate(coords):
+            try:
+                yi_curr = self.yi_map[alpha][coord]
+                for var in y_vars:
+                    yi = arr if (arr := self.yi_nan_map[alpha].get(coord, {}).get(var)) is not None else yi_curr[var]
+                    yi_dict[var][i] = yi if is_singleton[var] else np.atleast_1d(yi)
+
             except KeyError as e:
                 raise KeyError(f"Can't access sparse grid data for alpha={alpha}, coord={coord}. "
                                f"Make sure the data has been set first.") from e
 
-        # Squeeze out extra dimension for scalar quantities
-        for var in yi_dict.keys():
-            if y_squeeze[var]:
-                yi_dict[var] = np.squeeze(yi_dict[var], axis=-1)
+        # Delete nans if requested (only for numeric singleton outputs)
+        if skip_nan:
+            nan_idx = np.full(N, False)
+            for var in y_vars:
+                if is_numeric[var] and is_singleton[var]:
+                    nan_idx |= np.isnan(yi_dict[var])
+
+            xi_dict = {k: v[~nan_idx] for k, v in xi_dict.items()}
+            yi_dict = {k: v[~nan_idx] for k, v in yi_dict.items()}
 
         return xi_dict, yi_dict  # Both with elements of shape (N, ...) for N grid points
 
     def get(self, alpha: MultiIndex, beta: MultiIndex, y_vars: list[str] = None, skip_nan: bool = False):
         """Get the training data from the sparse grid for a given `alpha` and `beta` pair."""
-        return self.get_by_coord(alpha, self._expand_grid_coords(beta), y_vars=y_vars, skip_nan=skip_nan)
+        return self.get_by_coord(alpha, list(self._expand_grid_coords(beta)), y_vars=y_vars, skip_nan=skip_nan)
 
     def set_errors(self, alpha: MultiIndex, beta: MultiIndex, coords: list, errors: list[dict]):
         """Store error information in the sparse-grid for a given multi-index pair."""
@@ -256,16 +254,18 @@ class SparseGrid(TrainingData, PickleSerializable):
     def impute_missing_data(self, alpha: MultiIndex, beta: MultiIndex):
         """Impute missing values in the sparse grid for a given multi-index pair by linear regression imputation."""
         imputer, xi_all, yi_all = None, None, None
-        for coord, yi_dict in self.yi_map[alpha].items():
-            # only impute (small-length) numeric quantities
-            output_vars = [var for var in self._numeric_outputs(yi_dict)
-                           if len(np.ravel(yi_dict[var])) <= self.MAX_IMPUTE_SIZE]
 
+        # only impute (small-length) numeric quantities
+        yi_dict = next(iter(self.yi_map[alpha].values()))
+        output_vars = [var for var in self._numeric_outputs(yi_dict)
+                       if len(np.ravel(yi_dict[var])) <= self.MAX_IMPUTE_SIZE]
+
+        for coord, yi_dict in self.yi_map[alpha].items():
             if any([np.any(np.isnan(yi_dict[var])) for var in output_vars]):
                 if imputer is None:
                     # Grab all 'good' interpolation points and train a simple linear regression fit
                     xi_all, yi_all = self.get(alpha, beta, y_vars=output_vars, skip_nan=True)
-                    if len(xi_all) == 0:
+                    if len(xi_all) == 0 or len(next(iter(xi_all.values()))) == 0:
                         continue  # possible if no good data has been set yet
 
                     N = next(iter(xi_all.values())).shape[0]  # number of grid points
@@ -278,7 +278,7 @@ class SparseGrid(TrainingData, PickleSerializable):
                     imputer.fit(xi_mat, yi_mat)
 
                 # Run the imputer for this coordinate
-                x_interp = self._append_grid_points(coord)
+                x_interp = self._extract_grid_points(coord)
                 x_interp = np.concatenate([x_interp[var][:, np.newaxis] if len(x_interp[var].shape) == 1 else
                                            x_interp[var] for var in x_interp.keys()], axis=-1)
                 y_interp = imputer.predict(x_interp)
@@ -339,7 +339,7 @@ class SparseGrid(TrainingData, PickleSerializable):
             self.yi_nan_map.setdefault(alpha, dict())
             self.error_map.setdefault(alpha, dict())
             new_coords = list(self._expand_grid_coords(beta))
-            return new_coords, self._append_grid_points(new_coords[0])
+            return new_coords, self._extract_grid_points(new_coords)
 
         # Otherwise, refine the sparse grid
         for beta_old in self.betas:
@@ -368,31 +368,32 @@ class SparseGrid(TrainingData, PickleSerializable):
                 break
 
         new_coords = []
-        new_pts = {}
         for coord in self._expand_grid_coords(beta):
             if coord not in self.yi_map[alpha]:
                 # If we have not computed this grid coordinate yet
-                self._append_grid_points(coord, new_pts)
                 new_coords.append(coord)
+
+        new_pts = self._extract_grid_points(new_coords)
 
         self.betas.add(beta)
         return new_coords, new_pts
 
-    def _append_grid_points(self, coord: tuple, pts: dict = None):
-        """Extract the `x` grid point located at `coord` from `x_grids` and append to the `pts` dictionary."""
-        if pts is None:
-            pts = {}
-        grids = iter(self.x_grids.items())
-        for idx in coord:
-            if isinstance(idx, int):        # scalar grid point
-                var, grid = next(grids)
-                new_pt = np.atleast_1d(grid[idx])
-                pts[var] = new_pt if pts.get(var) is None else np.concatenate((pts[var], new_pt), axis=0)
-            else:                           # latent coefficients
-                for i in idx:
+    def _extract_grid_points(self, coords: list[tuple] | tuple):
+        """Extract the `x` grid points located at `coords` from `x_grids` and return as the `pts` dictionary."""
+        if not isinstance(coords, list):
+            coords = [coords]
+        pts = {var: np.empty(len(coords)) for var in self.x_grids}
+
+        for k, coord in enumerate(coords):
+            grids = iter(self.x_grids.items())
+            for idx in coord:
+                if isinstance(idx, int):        # scalar grid point
                     var, grid = next(grids)
-                    new_pt = np.atleast_1d(grid[i])
-                    pts[var] = new_pt if pts.get(var) is None else np.concatenate((pts[var], new_pt), axis=0)
+                    pts[var][k] = grid[idx]
+                else:                           # latent coefficients
+                    for i in idx:
+                        var, grid = next(grids)
+                        pts[var][k] = grid[i]
 
         return pts
 
