@@ -314,8 +314,8 @@ def test_simulate_fit():
             train_error = {var: relative_error(y_surr_train[var], ytest[var]) for var in ytest}
             test_error = {var: relative_error(y_surr_test[var], ytest[var]) for var in ytest}
 
-            # Training error should be the same as was originally computed during fit
-            assert all([np.allclose(error[var], train_error[var]) for var in train_error])
+            # Testing error should be the same as was originally computed during fit
+            assert all([np.allclose(error[var], test_error[var]) for var in train_error])
 
             # Error using the candidate set should be less than the training error
             assert all([np.all(test_error[var] <= train_error[var]) for var in test_error])
