@@ -794,7 +794,7 @@ class System(BaseModel, Serializable):
 
         self.logger.info(f'Final system surrogate: \n {self}')
 
-    def test_set_performance(self, xtest: Dataset, ytest: Dataset, index_set='train') -> Dataset:
+    def test_set_performance(self, xtest: Dataset, ytest: Dataset, index_set='test') -> Dataset:
         """Compute the relative L2 error on a test set for the given target output variables.
 
         :param xtest: `dict` of test set input samples   (unnormalized)
