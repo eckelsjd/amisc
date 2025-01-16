@@ -1,3 +1,14 @@
+## v0.7.0 (2025-01-16)
+
+### Feat
+
+- adds training data caching and performance improvements
+
+### Fix
+
+- makes test the default index set for test set performance
+- bug with error indicator model cost
+
 ## v0.6.0 (2025-01-09)
 
 ### Feat

@@ -1,6 +1,6 @@
 [project]
 name = "amisc"
-version = "0.6.0"
+version = "0.7.0"
 description = "Efficient framework for building surrogates of multidisciplinary systems using the adaptive multi-index stochastic collocation (AMISC) technique."
 authors = [
     {name = "Joshua Eckels", email = "eckelsjd@umich.edu"},
