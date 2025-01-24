@@ -342,6 +342,31 @@ def test_fit_with_executor(model_cost=1, max_iter=5, max_workers=8):
         surr.fit(max_iter=max_iter, executor=executor)
 
 
+def test_predict_extra_returns():
+    """Test system prediction when component models return extra things."""
+    class ExtraThing:
+        def __init__(self, x):
+            self.x = x
+
+    def comp1(inputs):
+        return {'y1': -inputs['x']**2, 'extra': inputs['x'], 'extrathing': ExtraThing(inputs['x'])}
+    def comp2(inputs):
+        return {'y2': 2*inputs['y1'], 'more_extra': np.random.rand(100, 2)}
+
+    surr = System(Component(comp1, [Variable('x', domain=(0, 1))], [Variable('y1', domain=(-1, 0))], data_fidelity=(3,),
+                            name='comp1'),
+                  Component(comp2, ['y1'], [Variable('y2')], data_fidelity=(3,), name='comp2'))
+    surr.fit()
+
+    samples = surr.sample_inputs(10)
+    pred = surr.predict(samples, use_model={'comp1': 'best'})
+
+    assert all([pred['extrathing'][i].x == pred['extra'][i] for i in range(len(samples['x']))])
+    assert 'more_extra' not in pred  # should not be returned since it is only using the surrogate for comp2
+    assert np.allclose(pred['y1'], -samples['x']**2)  # should be exact
+    assert relative_error(pred['y2'], 2*pred['y1']) < 1e-6
+
+
 def test_fire_sat(tmp_path, plots=False):
     """Test the fire satellite coupled system from Chaudhuri (2018)."""
     from amisc.examples.models import fire_sat_system

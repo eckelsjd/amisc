@@ -964,30 +964,34 @@ class Component(BaseModel, Serializable):
                     errors[i] = res
                 else:
                     for key, val in res.items():
-                        # Save numeric outputs
-                        numeric_flag = False
+                        # Save this component's variables
+                        is_component_var = False
                         for var in self.outputs:
                             if var.compression is not None:  # field quantity return values (save as object arrays)
                                 if key in var.compression.fields or key == f'{var}{COORDS_STR_ID}':
                                     if output_dict.get(key) is None:
                                         output_dict.setdefault(key, np.full((N,), None, dtype=object))
                                     output_dict[key][i] = np.atleast_1d(val)
-                                    numeric_flag = True
+                                    is_component_var = True
                                     break
                             elif key == var:
                                 if output_dict.get(key) is None:
                                     output_dict.setdefault(key, np.full((N, *np.atleast_1d(val).shape), np.nan))
                                 output_dict[key][i, ...] = np.atleast_1d(val)
-                                numeric_flag = True
+                                is_component_var = True
                                 break
 
                         # Otherwise, save other objects
-                        if not numeric_flag:
-                            if key == 'model_cost':
+                        if not is_component_var:
+                            # Save singleton numeric values as numeric arrays (model costs, etc.)
+                            _val = np.atleast_1d(val)
+                            if key == 'model_cost' or (np.issubdtype(_val.dtype, np.number)
+                                                       and len(_val.shape) == 1 and _val.shape[0] == 1):
                                 if output_dict.get(key) is None:
                                     output_dict.setdefault(key, np.full((N,), np.nan))
-                                output_dict[key][i] = val
+                                output_dict[key][i] = _val[0]
                             else:
+                                # Otherwise save into a generic object array
                                 if output_dict.get(key) is None:
                                     output_dict.setdefault(key, np.full((N,), None, dtype=object))
                                 output_dict[key][i] = val
@@ -1064,18 +1068,7 @@ class Component(BaseModel, Serializable):
         # Use raw model inputs/outputs
         if use_model is not None:
             outputs = self.call_model(inputs, model_fidelity=use_model, output_path=model_dir, executor=executor,**kwds)
-            ret = {}
-            for var in self.outputs:
-                if var.compression is not None:
-                    coords_str = f'{var}{COORDS_STR_ID}'
-                    if coords_str in outputs:
-                        ret[coords_str] = outputs[coords_str]
-                    for field in var.compression.fields:
-                        ret[field] = outputs[field]
-                elif var in outputs:
-                    ret[var.name] = outputs[var.name]
-
-            return ret
+            return {str(var): outputs[var] for var in outputs}
 
         # Convert inputs/outputs to/from model if no surrogate (i.e. analytical models)
         if not self.has_surrogate:
@@ -1086,8 +1079,8 @@ class Component(BaseModel, Serializable):
             field_coords.update(kwds)
             outputs = self.call_model(inputs, model_fidelity=use_model or 'best', output_path=model_dir,
                                       executor=executor, **field_coords)
-            outputs, surr_vars = to_surrogate_dataset(outputs, self.outputs, del_fields=True, **field_coords)
-            return {str(var): outputs[var] for var in surr_vars}
+            outputs, _ = to_surrogate_dataset(outputs, self.outputs, del_fields=True, **field_coords)
+            return {str(var): outputs[var] for var in outputs}
 
         # Choose the correct index set and misc_coeff data structures
         if incremental:

@@ -802,7 +802,7 @@ class System(BaseModel, Serializable):
         :param index_set: index set to use for prediction (defaults to 'train')
         :returns: `dict` of relative L2 errors for each target output variable
         """
-        targets = [var for var in ytest.keys() if COORDS_STR_ID not in var]
+        targets = [var for var in ytest.keys() if COORDS_STR_ID not in var and var in self.outputs()]
         coords = {var: ytest[var] for var in ytest if COORDS_STR_ID in var}
         xtest = to_surrogate_dataset(xtest, self.inputs(), del_fields=True)[0]
         ysurr = self.predict(xtest, index_set=index_set, targets=targets)
@@ -997,7 +997,6 @@ class System(BaseModel, Serializable):
         x, loop_shape = format_inputs(x, var_shape=var_shape)  # {'x': (N, *var_shape)}
         y = {}
         all_inputs = ChainMap(x, y)   # track all inputs (including coupling vars in y)
-        all_coords = {}               # track field coordinates for each field quantity
         N = int(np.prod(loop_shape))
         t1 = 0
         output_dir = None
@@ -1035,7 +1034,7 @@ class System(BaseModel, Serializable):
             """Helper to gather inputs for a component, making sure they are normalized correctly. Any coupling
             variables passed in will be used in preference over `all_inputs`.
             """
-            # Will access but not modify: all_inputs, all_coords, use_model, norm_status
+            # Will access but not modify: all_inputs, use_model, norm_status
             field_coords = {}
             comp_input = {}
             coupling = coupling or {}
@@ -1052,7 +1051,7 @@ class System(BaseModel, Serializable):
             # Gather field coordinates
             for var in comp.inputs:
                 coords_str = f'{var}{COORDS_STR_ID}'
-                if (coords := all_coords.get(coords_str)) is not None:
+                if (coords := all_inputs.get(coords_str)) is not None:
                     field_coords[coords_str] = coords[samples.curr_idx, ...]
                 elif (coords := comp.model_kwargs.get(coords_str)) is not None:
                     field_coords[coords_str] = coords
@@ -1119,25 +1118,27 @@ class System(BaseModel, Serializable):
                                            misc_coeff=misc_coeff.get(scc[0]), executor=executor, **field_coords)
 
                 for var, arr in comp_output.items():
-                    if COORDS_STR_ID in var:
-                        all_coords[var] = arr
-                        continue
-
-                    if np.issubdtype(arr.dtype, np.number):  # for scalars or vectorized field quantities
+                    is_numeric = np.issubdtype(arr.dtype, np.number)
+                    if is_numeric:  # for scalars or vectorized field quantities
                         output_shape = arr.shape[1:]
                         if y.get(var) is None:
                             y.setdefault(var, np.full((N, *output_shape), np.nan))
                         y[var][samples.curr_idx, ...] = arr
-                        samples.valid_idx = np.logical_and(samples.valid_idx,
-                                                           ~np.any(np.isnan(y[var]), axis=tuple(range(1, y[var].ndim))))
+
                     else:  # for fields returned as object arrays
                         if y.get(var) is None:
                             y.setdefault(var, np.full((N,), None, dtype=object))
                         y[var][samples.curr_idx] = arr
-                        samples.valid_idx = np.logical_and(samples.valid_idx,
-                                                           [~np.any(np.isnan(y[var][i])) for i in range(N)])
-                    is_computed[str(var).split(LATENT_STR_ID)[0]] = True
-                    norm_status[var] = not call_model
+
+                    # Update valid indices and status for component outputs
+                    if str(var).split(LATENT_STR_ID)[0] in comp.outputs:
+                        new_valid = ~np.any(np.isnan(y[var]), axis=tuple(range(1, y[var].ndim))) if is_numeric else (
+                            [~np.any(np.isnan(y[var][i])) for i in range(N)]
+                        )
+                        samples.valid_idx = np.logical_and(samples.valid_idx, new_valid)
+
+                        is_computed[str(var).split(LATENT_STR_ID)[0]] = True
+                        norm_status[var] = not call_model
 
                 if verbose:
                     self.logger.info(f"Component '{scc[0]}' completed. Runtime: {time.time() - t1} s")
@@ -1217,10 +1218,6 @@ class System(BaseModel, Serializable):
                                                    index_set=index_set.get(node), incremental=incremental.get(node),
                                                    misc_coeff=misc_coeff.get(node), executor=executor, **kwds)
                         for var, arr in comp_output.items():
-                            if COORDS_STR_ID in var:
-                                all_coords[var] = arr
-                                continue
-
                             if np.issubdtype(arr.dtype, np.number):  # scalars and vectorized field quantities
                                 output_shape = arr.shape[1:]
                                 if y.get(var) is not None:
@@ -1234,8 +1231,9 @@ class System(BaseModel, Serializable):
                                     y.setdefault(var, np.full((N,), None, dtype=object))
                                 y[var][samples.curr_idx] = arr
 
-                            norm_status[var] = not call_model
-                            is_computed[var] = True
+                            if str(var).split(LATENT_STR_ID)[0] in comp.outputs:
+                                norm_status[var] = not call_model
+                                is_computed[str(var).split(LATENT_STR_ID)[0]] = True
 
                     # Compute residual and check end conditions
                     if _end_conditions_met():
@@ -1278,7 +1276,6 @@ class System(BaseModel, Serializable):
                     k += 1
 
         # Return all component outputs; samples that didn't converge during FPI are left as np.nan
-        y.update(all_coords)
         return format_outputs(y, loop_shape)
 
     def __call__(self, *args, **kwargs):
