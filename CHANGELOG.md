@@ -1,3 +1,9 @@
+## v0.7.1 (2025-01-23)
+
+### Fix
+
+- all component outputs returned by system predict
+
 ## v0.7.0 (2025-01-16)
 
 ### Feat
