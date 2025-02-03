@@ -1,3 +1,9 @@
+## v0.7.2 (2025-02-03)
+
+### Fix
+
+- fixes indexing error in system predict when handling exceptions
+
 ## v0.7.1 (2025-01-23)
 
 ### Fix
