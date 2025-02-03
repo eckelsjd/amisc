@@ -55,8 +55,8 @@
         </aside>
         <h2>
             <span class="text">899 statements &nbsp;</span>
-            <button type="button" class="run button_toggle_run" value="run" data-shortcut="r" title="Toggle lines run">770<span class="text"> run</span></button>
-            <button type="button" class="mis show_mis button_toggle_mis" value="mis" data-shortcut="m" title="Toggle lines missing">129<span class="text"> missing</span></button>
+            <button type="button" class="run button_toggle_run" value="run" data-shortcut="r" title="Toggle lines run">772<span class="text"> run</span></button>
+            <button type="button" class="mis show_mis button_toggle_mis" value="mis" data-shortcut="m" title="Toggle lines missing">127<span class="text"> missing</span></button>
             <button type="button" class="exc show_exc button_toggle_exc" value="exc" data-shortcut="x" title="Toggle lines excluded">0<span class="text"> excluded</span></button>
         </h2>
         <p class="text">
@@ -65,7 +65,7 @@
             <a id="nextFileLink" class="nav" href="z_806a84536edbb98e_compression_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.6.1">coverage.py v7.6.1</a>,
-            created at 2025-01-24 04:51 +0000
+            created at 2025-02-03 20:09 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -1008,8 +1008,8 @@
     <p class="run"><span class="n"><a id="t926" href="#t926">926</a></span><span class="t">                            <span class="nam">ret</span> <span class="op">=</span> <span class="op">(</span><span class="nam">ret</span><span class="op">,</span><span class="op">)</span> <span class="key">if</span> <span class="key">not</span> <span class="nam">isinstance</span><span class="op">(</span><span class="nam">ret</span><span class="op">,</span> <span class="nam">tuple</span><span class="op">)</span> <span class="key">else</span> <span class="nam">ret</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t927" href="#t927">927</a></span><span class="t">                            <span class="nam">ret</span> <span class="op">=</span> <span class="op">{</span><span class="nam">out_var</span><span class="op">.</span><span class="nam">name</span><span class="op">:</span> <span class="nam">ret</span><span class="op">[</span><span class="nam">i</span><span class="op">]</span> <span class="key">for</span> <span class="nam">i</span><span class="op">,</span> <span class="nam">out_var</span> <span class="key">in</span> <span class="nam">enumerate</span><span class="op">(</span><span class="nam">self</span><span class="op">.</span><span class="nam">outputs</span><span class="op">)</span><span class="op">}</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t928" href="#t928">928</a></span><span class="t">                        <span class="nam">results</span><span class="op">.</span><span class="nam">append</span><span class="op">(</span><span class="nam">ret</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t929" href="#t929">929</a></span><span class="t">                    <span class="key">except</span> <span class="nam">Exception</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t930" href="#t930">930</a></span><span class="t">                        <span class="nam">results</span><span class="op">.</span><span class="nam">append</span><span class="op">(</span><span class="op">{</span><span class="str">'inputs'</span><span class="op">:</span> <span class="op">{</span><span class="nam">k</span><span class="op">:</span> <span class="nam">v</span><span class="op">[</span><span class="nam">i</span><span class="op">]</span> <span class="key">for</span> <span class="nam">k</span><span class="op">,</span> <span class="nam">v</span> <span class="key">in</span> <span class="nam">inputs</span><span class="op">.</span><span class="nam">items</span><span class="op">(</span><span class="op">)</span><span class="op">}</span><span class="op">,</span> <span class="str">'index'</span><span class="op">:</span> <span class="nam">i</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t929" href="#t929">929</a></span><span class="t">                    <span class="key">except</span> <span class="nam">Exception</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t930" href="#t930">930</a></span><span class="t">                        <span class="nam">results</span><span class="op">.</span><span class="nam">append</span><span class="op">(</span><span class="op">{</span><span class="str">'inputs'</span><span class="op">:</span> <span class="op">{</span><span class="nam">k</span><span class="op">:</span> <span class="nam">v</span><span class="op">[</span><span class="nam">i</span><span class="op">]</span> <span class="key">for</span> <span class="nam">k</span><span class="op">,</span> <span class="nam">v</span> <span class="key">in</span> <span class="nam">inputs</span><span class="op">.</span><span class="nam">items</span><span class="op">(</span><span class="op">)</span><span class="op">}</span><span class="op">,</span> <span class="str">'index'</span><span class="op">:</span> <span class="nam">i</span><span class="op">,</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t931" href="#t931">931</a></span><span class="t">                                        <span class="str">'model_kwargs'</span><span class="op">:</span> <span class="nam">kwargs</span><span class="op">.</span><span class="nam">copy</span><span class="op">(</span><span class="op">)</span><span class="op">,</span> <span class="str">'error'</span><span class="op">:</span> <span class="nam">traceback</span><span class="op">.</span><span class="nam">format_exc</span><span class="op">(</span><span class="op">)</span><span class="op">}</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t932" href="#t932">932</a></span><span class="t">            <span class="key">else</span><span class="op">:</span>  <span class="com"># Parallel</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t933" href="#t933">933</a></span><span class="t">                <span class="nam">results</span> <span class="op">=</span> <span class="nam">deque</span><span class="op">(</span><span class="nam">maxlen</span><span class="op">=</span><span class="nam">N</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
@@ -1659,7 +1659,7 @@
             <a class="nav" href="z_806a84536edbb98e_compression_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.6.1">coverage.py v7.6.1</a>,
-            created at 2025-01-24 04:51 +0000
+            created at 2025-02-03 20:09 +0000
         </p>
     </div>
 </footer>

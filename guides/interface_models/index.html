@@ -706,6 +706,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#handling-exceptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      Handling exceptions
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#model-fidelities" class="md-nav__link">
     <span class="md-ellipsis">
       Model fidelities
@@ -1390,6 +1399,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#handling-exceptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      Handling exceptions
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#model-fidelities" class="md-nav__link">
     <span class="md-ellipsis">
       Model fidelities
@@ -1633,7 +1651,7 @@ As you can see, the <code>call_model</code> has the same signature as the <code>
 <li><code>model_cost</code> - a best estimate for total model evaluation time (in seconds of CPU time). For example, if your model makes continuous use of 16 CPUs and takes 1 hour to evaluate one set of inputs, then you would return <code>16 * 3600</code> as the model cost. This metric is used by <code>amisc</code> to help evaluate which are the most "effective" model evaluations, i.e. more expensive models are penalized greater than cheaper models.</li>
 <li><code>output_path</code> - if your function <em>requested</em> <code>output_path</code> and subsequently wrote some data to file, then you can <em>return</em> the new file name as <code>output_path</code> to keep track of the file's location within the <code>Component's</code> internal data storage.</li>
 </ul>
-<p>Your wrapper function may also return any extra data that you wish to store within the <code>Component</code> -- <code>amisc</code> will keep track of this data but will not use it for any purpose. You might do this if you wish to return to old model evaluations later on and view data even if you did not explicitly build a surrogate for the data. This extra data will be stored in <code>numpy</code> object arrays, so the data does not have to be strictly numeric type -- it could even be custom object types of your own. Field quantities will also be stored in <code>numpy</code> object arrays.</p>
+<p>Your wrapper function may also return any extra data that you wish to store within the <code>Component</code> — <code>amisc</code> will keep track of this data but will not use it for any purpose. You might do this if you wish to return to old model evaluations later on and view data even if you did not explicitly build a surrogate for the data. This extra data will be stored in <code>numpy</code> object arrays, so the data does not have to be strictly numeric type — it could even be custom object types of your own. Field quantities will also be stored in <code>numpy</code> object arrays.</p>
 <div class="admonition example">
 <p class="admonition-title">Example</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">def</span> <span class="nf">my_model</span><span class="p">(</span><span class="n">inputs</span><span class="p">,</span> <span class="n">output_path</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
@@ -1653,6 +1671,8 @@ As you can see, the <code>call_model</code> has the same signature as the <code>
 </span><span id="__span-7-15"><a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a>    <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;y1&#39;</span><span class="p">:</span> <span class="n">y1</span><span class="p">,</span> <span class="s1">&#39;y2&#39;</span><span class="p">:</span> <span class="n">y2</span><span class="p">,</span> <span class="s1">&#39;model_cost&#39;</span><span class="p">:</span> <span class="n">t2</span> <span class="o">-</span> <span class="n">t1</span><span class="p">,</span> <span class="s1">&#39;output_path&#39;</span><span class="p">:</span> <span class="s1">&#39;my_output.txt&#39;</span><span class="p">,</span> <span class="o">**</span><span class="n">extra_data</span><span class="p">}</span>
 </span></code></pre></div>
 </div>
+<h2 id="handling-exceptions">Handling exceptions</h2>
+<p>If your wrapper function raises an exception, this will be caught and handled by <code>Component.call_model()</code> — an <code>errors</code> dictionary will be returned whose keys are the indices of the input samples that failed and whose values contain traceback information. If an exception is raised by a component during <code>System.predict()</code>, then an <code>errors</code> array will be returned that matches the shape of all other output arrays — only indices in the array where an exception was raised will contain traceback information. By default, <code>amisc</code> will fill all other output arrays with <code>nan</code> for failed samples.</p>
 <h2 id="model-fidelities">Model fidelities</h2>
 <p>As we saw in the <a href="#special-model-arguments">special arguments</a> section, your wrapper function may request the <code>model_fidelity</code> keyword argument. This will pass a tuple of integers (what we call a <em>multi-index</em>) to your function, for which you can use to "tune" the fidelity level of your model. For example, if you build a <code>Component</code> and specify a tuple of two integers: <code>Component(..., model_fidelity=(3, 2))</code>, then the "maximum" fidelity of your model is fully specified by the numbers <span class="arithmatex">\((3, 2)\)</span>. You can use these integers however you want to adjust model fidelity, e.g. <code>num_grid_pts = 100 * (model_fidelity[0] + 1)</code> would use the first integer to tune how many grid points are used in a simulation, with higher integers corresponding to more grid points, and therefore higher numerical accuracy. Your wrapper function should then request <code>model_fidelity</code> and use the multi-index as desired:
 <div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">def</span> <span class="nf">my_model</span><span class="p">(</span><span class="n">inputs</span><span class="p">,</span> <span class="n">model_fidelity</span><span class="o">=</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)):</span>
@@ -1867,7 +1887,7 @@ During surrogate training, your wrapper function will then be passed tuples of v
     <span class="md-icon" title="Last update">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
     </span>
-    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago"><span class="timeago" datetime="2024-12-03T03:03:31+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date">2024-12-03</span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago"><span class="timeago" datetime="2025-02-03T19:34:18+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date">2025-02-03</span>
   </span>
 
     
