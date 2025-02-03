@@ -1118,6 +1118,17 @@ class System(BaseModel, Serializable):
                                            misc_coeff=misc_coeff.get(scc[0]), executor=executor, **field_coords)
 
                 for var, arr in comp_output.items():
+                    if var == 'errors':
+                        if y.get(var) is None:
+                            y.setdefault(var, np.full((N,), None, dtype=object))
+                        global_indices = np.arange(N)[samples.curr_idx]
+
+                        for local_idx, err_info in arr.items():
+                            global_idx = int(global_indices[local_idx])
+                            err_info['index'] = global_idx
+                            y[var][global_idx] = err_info
+                        continue
+
                     is_numeric = np.issubdtype(arr.dtype, np.number)
                     if is_numeric:  # for scalars or vectorized field quantities
                         output_shape = arr.shape[1:]
@@ -1130,8 +1141,10 @@ class System(BaseModel, Serializable):
                             y.setdefault(var, np.full((N,), None, dtype=object))
                         y[var][samples.curr_idx] = arr
 
-                    # Update valid indices and status for component outputs
+                # Update valid indices and status for component outputs
+                for var in comp_output:
                     if str(var).split(LATENT_STR_ID)[0] in comp.outputs:
+                        is_numeric = np.issubdtype(y[var].dtype, np.number)
                         new_valid = ~np.any(np.isnan(y[var]), axis=tuple(range(1, y[var].ndim))) if is_numeric else (
                             [~np.any(np.isnan(y[var][i])) for i in range(N)]
                         )
@@ -1217,7 +1230,19 @@ class System(BaseModel, Serializable):
                         comp_output = comp.predict(comp_input, use_model=use_model.get(node), model_dir=None,
                                                    index_set=index_set.get(node), incremental=incremental.get(node),
                                                    misc_coeff=misc_coeff.get(node), executor=executor, **kwds)
+
                         for var, arr in comp_output.items():
+                            if var == 'errors':
+                                if y.get(var) is None:
+                                    y.setdefault(var, np.full((N,), None, dtype=object))
+                                global_indices = np.arange(N)[samples.curr_idx]
+
+                                for local_idx, err_info in arr.items():
+                                    global_idx = int(global_indices[local_idx])
+                                    err_info['index'] = global_idx
+                                    y[var][global_idx] = err_info
+                                continue
+
                             if np.issubdtype(arr.dtype, np.number):  # scalars and vectorized field quantities
                                 output_shape = arr.shape[1:]
                                 if y.get(var) is not None:

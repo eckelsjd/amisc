@@ -147,7 +147,7 @@ In addition to special keyword arguments, your wrapper function may also return 
 - `model_cost` - a best estimate for total model evaluation time (in seconds of CPU time). For example, if your model makes continuous use of 16 CPUs and takes 1 hour to evaluate one set of inputs, then you would return `16 * 3600` as the model cost. This metric is used by `amisc` to help evaluate which are the most "effective" model evaluations, i.e. more expensive models are penalized greater than cheaper models.
 - `output_path` - if your function _requested_ `output_path` and subsequently wrote some data to file, then you can _return_ the new file name as `output_path` to keep track of the file's location within the `Component's` internal data storage.
 
-Your wrapper function may also return any extra data that you wish to store within the `Component` -- `amisc` will keep track of this data but will not use it for any purpose. You might do this if you wish to return to old model evaluations later on and view data even if you did not explicitly build a surrogate for the data. This extra data will be stored in `numpy` object arrays, so the data does not have to be strictly numeric type -- it could even be custom object types of your own. Field quantities will also be stored in `numpy` object arrays.
+Your wrapper function may also return any extra data that you wish to store within the `Component` — `amisc` will keep track of this data but will not use it for any purpose. You might do this if you wish to return to old model evaluations later on and view data even if you did not explicitly build a surrogate for the data. This extra data will be stored in `numpy` object arrays, so the data does not have to be strictly numeric type — it could even be custom object types of your own. Field quantities will also be stored in `numpy` object arrays.
 
 !!! Example
     ```python
@@ -167,6 +167,9 @@ Your wrapper function may also return any extra data that you wish to store with
 
         return {'y1': y1, 'y2': y2, 'model_cost': t2 - t1, 'output_path': 'my_output.txt', **extra_data}
     ```
+
+## Handling exceptions
+If your wrapper function raises an exception, this will be caught and handled by `Component.call_model()` — an `errors` dictionary will be returned whose keys are the indices of the input samples that failed and whose values contain traceback information. If an exception is raised by a component during `System.predict()`, then an `errors` array will be returned that matches the shape of all other output arrays — only indices in the array where an exception was raised will contain traceback information. By default, `amisc` will fill all other output arrays with `nan` for failed samples.
 
 ## Model fidelities
 As we saw in the [special arguments](#special-model-arguments) section, your wrapper function may request the `model_fidelity` keyword argument. This will pass a tuple of integers (what we call a _multi-index_) to your function, for which you can use to "tune" the fidelity level of your model. For example, if you build a `Component` and specify a tuple of two integers: `Component(..., model_fidelity=(3, 2))`, then the "maximum" fidelity of your model is fully specified by the numbers $(3, 2)$. You can use these integers however you want to adjust model fidelity, e.g. `num_grid_pts = 100 * (model_fidelity[0] + 1)` would use the first integer to tune how many grid points are used in a simulation, with higher integers corresponding to more grid points, and therefore higher numerical accuracy. Your wrapper function should then request `model_fidelity` and use the multi-index as desired:
