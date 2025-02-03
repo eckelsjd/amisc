@@ -5,7 +5,7 @@
 groups = ["default", "dev", "doc", "jupyter", "test"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:ffdfc4808a715b5be40ebda027693a7acffc6a25c4796a79fb1cd1f69811b8eb"
+content_hash = "sha256:8ff69439f7c40ae39ffdaaee3fb2a4ed63dd44c1220d726b687c3e6d724a0895"
 
 [[metadata.targets]]
 requires_python = ">=3.11"
@@ -354,8 +354,8 @@ files = [
 
 [[package]]
 name = "commitizen"
-version = "3.29.1"
-requires_python = ">=3.8"
+version = "4.1.1"
+requires_python = ">=3.9"
 summary = "Python commitizen client tool"
 groups = ["dev"]
 dependencies = [
@@ -370,11 +370,11 @@ dependencies = [
     "questionary<3.0,>=2.0",
     "termcolor<3,>=1.1",
     "tomlkit<1.0.0,>=0.5.3",
-    "typing-extensions<5.0.0,>=4.0.1; python_version < \"3.8\"",
+    "typing-extensions<5.0.0,>=4.0.1; python_version < \"3.11\"",
 ]
 files = [
-    {file = "commitizen-3.29.1-py3-none-any.whl", hash = "sha256:83f6563fae6a6262238e4424c55db5743eaa9827d2044dc23719466e4e78a0ca"},
-    {file = "commitizen-3.29.1.tar.gz", hash = "sha256:b9a56190f4f3b20c73600e5ba448c7b81e0e6f87be3092aec1db4de75bf0fa91"},
+    {file = "commitizen-4.1.1-py3-none-any.whl", hash = "sha256:fdb5c7e72581b8bf568ae23a0342a1dce2c8e954a276b188320eb242290c223d"},
+    {file = "commitizen-4.1.1.tar.gz", hash = "sha256:a2ce2fa0c7960939f48ea01ae2e6db541904e74ef151b8f9dc35c67dbd9b03ac"},
 ]
 
 [[package]]

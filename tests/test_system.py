@@ -367,6 +367,41 @@ def test_predict_extra_returns():
     assert relative_error(pred['y2'], 2*pred['y1']) < 1e-6
 
 
+def test_invalid_sample_predict():
+    """Test that prediction exits gracefully when a sample fails."""
+    def faulty_model(inputs):
+        if 0.4 < inputs['x'] < 0.6:
+            raise Exception("This model is faulty... sorry:)")
+        return {'y1': inputs['x'], 'y2': inputs['x'] ** 2}
+
+    def also_faulty(inputs):
+        if np.sqrt(inputs['y2']) < 0.1:
+            raise Exception("You can't handle the truth")
+        return {'y3': np.sqrt(inputs['y2'])}
+
+    x = Variable(domain=(0, 1))
+    comp1 = Component(faulty_model, [x], ['y1', 'y2'])
+    comp2 = Component(also_faulty, ['y2'], ['y3'])
+    system = System(comp1, comp2)
+
+    samples = np.linspace(0, 1, 20)
+    outputs = system.predict({'x': samples}, use_model='best')  # make sure nans carry through for faulty cases
+
+    faulty_idx = ((samples > 0.4) & (samples < 0.6))
+
+    for var in ['y1', 'y2']:
+        assert np.all(np.isnan(outputs[var][faulty_idx]))
+        assert np.all(~np.isnan(outputs[var][~faulty_idx]))
+
+    faulty_idx |= (samples < 0.1)
+
+    for var in ['y3']:
+        assert np.all(np.isnan(outputs[var][faulty_idx]))
+        assert np.all(~np.isnan(outputs[var][~faulty_idx]))
+
+    assert all([faulty_idx[idx] for idx, err_info in enumerate(outputs['errors']) if err_info is not None])
+
+
 def test_fire_sat(tmp_path, plots=False):
     """Test the fire satellite coupled system from Chaudhuri (2018)."""
     from amisc.examples.models import fire_sat_system
