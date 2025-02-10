@@ -1009,6 +1009,7 @@ class Component(BaseModel, Serializable):
                     num_evals_prev = self.model_evals.get(a)
                     num_evals_new = len(costs)
                     prev_avg = self.model_costs.get(a)
+                    costs = np.nan_to_num(costs, nan=prev_avg)
                     new_avg = (np.sum(costs) + prev_avg * num_evals_prev) / (num_evals_prev + num_evals_new)
                     self.model_evals[a] += num_evals_new
                     self.model_costs[a] = float(new_avg)
@@ -1096,6 +1097,8 @@ class Component(BaseModel, Serializable):
 
         # Handle prediction with empty active set (return nan)
         if len(index_set) == 0:
+            self.logger.warning(f"Component '{self.name}' has an empty active set. "
+                                f"Has the surrogate been trained yet? Returning NaNs...")
             for var in self.outputs:
                 outputs[var.name] = np.full(loop_shape, np.nan)
             return outputs

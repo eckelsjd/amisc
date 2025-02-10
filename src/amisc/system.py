@@ -521,7 +521,10 @@ class System(BaseModel, Serializable):
 
             # Sample scalars normally
             else:
-                lb, ub = var.get_domain()
+                if (domain := var.get_domain()) is None:
+                    raise RuntimeError(f"Trying to sample variable '{var}' with empty domain. Please set a domain "
+                                       f"for this variable. Samples outside the provided domain will be rejected.")
+                lb, ub = domain
                 pdf = (var.name in use_pdf or var.category in use_pdf) if isinstance(use_pdf, list) else use_pdf
                 nom = nominal.get(var.name, None)
 
@@ -1146,7 +1149,7 @@ class System(BaseModel, Serializable):
                     if str(var).split(LATENT_STR_ID)[0] in comp.outputs:
                         is_numeric = np.issubdtype(y[var].dtype, np.number)
                         new_valid = ~np.any(np.isnan(y[var]), axis=tuple(range(1, y[var].ndim))) if is_numeric else (
-                            [~np.any(np.isnan(y[var][i])) for i in range(N)]
+                            [False if arr is None else ~np.any(np.isnan(arr)) for i, arr in enumerate(y[var])]
                         )
                         samples.valid_idx = np.logical_and(samples.valid_idx, new_valid)
 
@@ -1164,7 +1167,10 @@ class System(BaseModel, Serializable):
                 coupling_vars = [scc_inputs.get(var) for var in (scc_inputs.keys() - x.keys()) if var in scc_outputs]
                 coupling_prev = {}
                 for var in coupling_vars:
-                    domain = var.get_domain()
+                    if (domain := var.get_domain()) is None:
+                        raise RuntimeError(f"Coupling variable '{var}' has an empty domain. All coupling variables "
+                                           f"require a domain for the fixed-point iteration (FPI) solver.")
+
                     if isinstance(domain, list):  # Latent coefficients are the coupling variables
                         for i, d in enumerate(domain):
                             lb, ub = d
