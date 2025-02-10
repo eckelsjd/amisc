@@ -1023,7 +1023,7 @@ class Component(BaseModel, Serializable):
                     if field not in output_dict:
                         self.logger.warning(f"Model return missing field '{field}' for output variable '{var}'. "
                                             f"This may indicate an error during model evaluation. Returning NaNs...")
-                        output_dict[field].setdefault(field, np.full((N,), np.nan))
+                        output_dict.setdefault(field, np.full((N,), np.nan))
             elif var.name not in output_dict:
                 self.logger.warning(f"Model return missing output variable '{var.name}'. This may indicate "
                                     f"an error during model evaluation. Returning NaNs...")
