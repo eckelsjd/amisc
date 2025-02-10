@@ -19,7 +19,7 @@ from amisc.interpolator import Interpolator, InterpolatorState, LagrangeState
 from amisc.serialize import Base64Serializable, Serializable, StringSerializable
 from amisc.training import TrainingData
 from amisc.typing import LATENT_STR_ID
-from amisc.utils import relative_error, to_model_dataset
+from amisc.utils import relative_error, to_model_dataset, to_surrogate_dataset
 from amisc.variable import Variable
 
 
@@ -501,3 +501,45 @@ def test_get_training_data():
     xtrue, ytrue = comp.training_data.get(comp.model_fidelity, comp.max_beta)
     assert all([np.allclose(xtrain[var], xtrue[var]) for var in xtrue])
     assert all([np.allclose(ytrain[var], ytrue[var]) for var in ytrue])
+
+
+def test_compression_empty_fields():
+    """Make sure compression skips samples that are nan or None."""
+    A = Variable('A', distribution='U(-5, 5)')
+    p = Variable('p')
+    def model(inputs, pct_fail=0):
+        if np.random.rand() < pct_fail:
+            raise ValueError('Sorry this model just fails sometimes')
+
+        coords = np.linspace(-2, 2, 100)
+        amp = np.atleast_1d(inputs['A'])
+        res = amp[..., np.newaxis] * np.tanh(coords)
+        if len(amp.shape) == 1 and amp.shape[0] == 1:
+            res = np.squeeze(res, axis=0)
+        return {'p': res, 'p_coords': coords, 'y': amp ** 2}
+
+    # Generate SVD data matrix
+    rank = 4
+    samples = A.sample(50)
+    outputs = model({str(A): samples})
+    data_matrix = outputs[p].T  # (dof, num_samples)
+    p.compression = SVD(rank=rank, coords=outputs['p_coords'], data_matrix=data_matrix)
+
+    comp = Component(model, [A], [p, 'y'], pct_fail=0.3)
+    samples = A.sample(50)
+    outputs = comp.call_model({'A': samples})
+    compressed, y_vars = to_surrogate_dataset(outputs, comp.outputs, del_fields=True)
+    recon, _ = to_model_dataset(compressed, comp.outputs, del_latent=True)
+
+    indices = list(outputs.get('errors', {}).keys())
+    error_cases = np.full(50, False)
+    error_cases[indices] = True
+
+    assert all([np.all(np.isnan(compressed[var][error_cases])) for var in y_vars])
+    assert all([np.all(~np.isnan(compressed[var][~error_cases])) for var in y_vars])
+
+    assert all([np.all(np.isnan(recon[var][error_cases, ...])) for var in comp.outputs])
+    assert all([np.all(~np.isnan(recon[var][~error_cases, ...])) for var in comp.outputs])
+
+    for original, reconstruct in zip(outputs['p'][~error_cases], recon['p'][~error_cases]):
+        assert relative_error(reconstruct, original) < 1e-6

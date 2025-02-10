@@ -91,6 +91,8 @@ class Compression(PickleSerializable, ABC):
         coords = np.atleast_1d(coords)
         if np.issubdtype(coords.dtype, np.object_):  # must be object array of np.arrays (for unique coords)
             for i, arr in np.ndenumerate(coords):
+                if arr is None:
+                    continue  # skip empty values
                 if len(arr.shape) == 1:
                     coords[i] = arr[..., np.newaxis] if self.dim == 1 else arr[np.newaxis, ...]
         else:
@@ -146,6 +148,9 @@ class Compression(PickleSerializable, ABC):
 
         # Do interpolation for each set of unique coordinates (if multiple)
         for j, n_coords, state in _iterate_coords_and_states():
+            if n_coords is None:  # Skip empty coords
+                continue
+
             skip_interp = (n_coords.shape == grid_coords.shape and np.allclose(n_coords, grid_coords))
 
             ret_dict = {}
@@ -166,11 +171,14 @@ class Compression(PickleSerializable, ABC):
 
         if coords_obj_array:
             # Make an object array for each qoi, where each element is a unique `(*loop_shape, *coord_shape)` array
-            _, _first_dict = next(np.ndenumerate(all_qois))
+            for _, _first_dict in np.ndenumerate(all_qois):
+                if _first_dict is not None:
+                    break
             ret = {qoi: np.empty(all_qois.shape, dtype=object) for qoi in _first_dict}
             for qoi in ret:
                 for index, qoi_dict in np.ndenumerate(all_qois):
-                    ret[qoi][index] = qoi_dict[qoi]
+                    if qoi_dict is not None:
+                        ret[qoi][index] = qoi_dict[qoi]
         else:
             # Otherwise, all loop dims used the same coords, so just return the single array for each qoi
             ret = all_qois[0]
@@ -178,12 +186,13 @@ class Compression(PickleSerializable, ABC):
         return ret
 
     def interpolate_to_grid(self, field_coords: np.ndarray, field_values):
-        """Interpolate the field values at given coordinates to the compression grid.
+        """Interpolate the field values at given coordinates to the compression grid. An array of nan is returned
+        for any coordinates or field values that are empty or None.
 
-        :param field_coords: `(*coord_shape, dim)` - the coordinates of the field values; if a 1d object array, then
+        :param field_coords: `(*coord_shape, dim)` - the coordinates of the field values; if an object array, then
                              each element is assumed to be a unique `(*coord_shape, dim)` array
         :param field_values: `dict` of `(*loop_shape, *coord_shape)` for each qoi - the field values at the coordinates;
-                              if each array is a 1d object array, then each element is assumed to be a unique
+                              if each array is an object array, then each element is assumed to be a unique
                              `(*loop_shape, *coord_shape)` array corresponding to the `field_coords`
         :return: `(*loop_shape, dof)` - the interpolated values on the compression grid
         """
@@ -216,6 +225,9 @@ class Compression(PickleSerializable, ABC):
         all_states = np.empty(shape, dtype=object)  # are you in good hands?
 
         for j, f_coords, f_values in _iterate_coords_and_fields():
+            if f_coords is None or any([val is None for val in f_values.values()]):  # Skip empty samples
+                continue
+
             skip_interp = always_skip_interp or np.array_equal(f_coords, grid_coords)  # exact even for floats
 
             coords_shape = f_coords.shape[:-1]
@@ -234,11 +246,15 @@ class Compression(PickleSerializable, ABC):
             all_states[j] = states.reshape((*loop_shape, self.dof))
 
         # All fields now on the same dof grid, so stack them in same array
-        index = next(np.ndindex(all_states.shape))
-        ret_states = np.empty(shape + all_states[index].shape)
+        state_shape = ()
+        for index in np.ndindex(all_states.shape):
+            if all_states[index] is not None:
+                state_shape = all_states[index].shape
+                break
+        ret_states = np.empty(shape + state_shape)
 
         for index, arr in np.ndenumerate(all_states):
-            ret_states[index] = arr
+            ret_states[index] = arr if arr is not None else np.nan
 
         if not (coords_obj_array or fields_obj_array):
             ret_states = np.squeeze(ret_states, axis=0)  # artificial leading dim for non-object arrays
