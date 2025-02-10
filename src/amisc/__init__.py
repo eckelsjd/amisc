@@ -110,7 +110,7 @@ from amisc.system import System
 from amisc.utils import to_model_dataset, to_surrogate_dataset
 from amisc.variable import Variable, VariableList
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 __all__ = ['System', 'Component', 'Variable', 'VariableList', 'FileLoader', 'YamlLoader',
            'to_model_dataset', 'to_surrogate_dataset']
 

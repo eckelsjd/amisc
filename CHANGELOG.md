@@ -1,3 +1,10 @@
+## v0.7.3 (2025-02-10)
+
+### Fix
+
+- fixes #45 typo in call_model
+- handle None/nan samples during compression
+
 ## v0.7.2 (2025-02-03)
 
 ### Fix
