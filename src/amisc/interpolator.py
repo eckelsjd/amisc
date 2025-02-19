@@ -7,9 +7,11 @@ Includes:
 - `Interpolator`: Abstract class providing basic structure of an interpolator
 - `Lagrange`: Concrete implementation for tensor-product barycentric Lagrange interpolation
 - `Linear`: Concrete implementation for linear regression using `sklearn`
+- `GPR`: Concrete implementation for Gaussian process regression using `sklearn`
 - `InterpolatorState`: Interface for a dataclass that stores the internal state of an interpolator
 - `LagrangeState`: The internal state for a barycentric Lagrange polynomial interpolator
 - `LinearState`: The internal state for a linear interpolator (using sklearn)
+- `GPRState`: The internal state for a Gaussian process regression interpolator (using sklearn)
 """
 from __future__ import annotations
 
@@ -21,12 +23,14 @@ from dataclasses import dataclass, field
 import numpy as np
 from sklearn import linear_model, preprocessing
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import PolynomialFeatures
+from sklearn.preprocessing import PolynomialFeatures, MinMaxScaler
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C, WhiteKernel, PairwiseKernel
 
 from amisc.serialize import Base64Serializable, Serializable, StringSerializable
 from amisc.typing import Dataset, MultiIndex
 
-__all__ = ["InterpolatorState", "LagrangeState", "LinearState", "Interpolator", "Lagrange", "Linear"]
+__all__ = ["InterpolatorState", "LagrangeState", "LinearState", "GPRState", "Interpolator", "Lagrange", "Linear", "GPR"]
 
 
 class InterpolatorState(Serializable, ABC):
@@ -74,6 +78,28 @@ class LinearState(InterpolatorState, Base64Serializable):
                     np.allclose(self.regressor['poly'].powers_, other.regressor['poly'].powers_) and
                     np.allclose(self.regressor['linear'].coef_, other.regressor['linear'].coef_) and
                     np.allclose(self.regressor['linear'].intercept_, other.regressor['linear'].intercept_))
+        else:
+            return False
+
+
+@dataclass
+class GPRState(InterpolatorState, Base64Serializable):
+    """The internal state for a Gaussian Process Regressor interpolator (using sklearn).
+
+    :ivar x_vars: the input variables in order
+    :ivar y_vars: the output variables in order
+    :ivar regressor: the sklearn regressor object, a pipeline that consists of a `MinMaxScaler` and a
+                     `GaussianProcessRegressor`.
+    """
+    x_vars: list[str] = field(default_factory=list)
+    y_vars: list[str] = field(default_factory=list)
+    regressor: Pipeline = None
+
+    def __eq__(self, other):
+        if isinstance(other, GPRState):
+            return (self.x_vars == other.x_vars and self.y_vars == other.y_vars and
+                    np.allclose(self.regressor['gpr'].kernel_.k1.metric, other.regressor['gpr'].kernel_.k1.metric) and
+                    np.allclose(self.regressor['gpr'].kernel_.k2.noise_level, other.regressor['gpr'].kernel_.k2.noise_level))
         else:
             return False
 
@@ -149,6 +175,8 @@ class Interpolator(Serializable, ABC):
                 return Lagrange(**config)
             case 'linear':
                 return Linear(**config)
+            case 'gpr':
+                return GPR(**config)
             case other:
                 raise NotImplementedError(f"Unknown interpolator method: {other}")
 
@@ -593,4 +621,82 @@ class Linear(Interpolator, StringSerializable):
         raise NotImplementedError
 
     def hessian(self, x: Dataset, state: LinearState, training_data: tuple[Dataset, Dataset]):
+        raise NotImplementedError
+
+
+@dataclass
+class GPR(Interpolator, StringSerializable):
+    """Implementation of Gaussian Process Regression using `sklearn`. The `GaussianProcessInterpolator` uses a pipeline of
+    `MinMaxScaler` and a `GaussianProcessRegressor` to approximate the input-output mapping.
+    MinMaxScaler scales the input dimensions to [0,1] before passing them to the regressor.
+
+    : ivar kernel_type: the kernel type to use for building the covariance matrix. (Defaults to RBF)
+    """
+
+    kernel_type: str = 'rbf'  # Defaults to RBF Kernel
+
+    def __post_init__(self):
+
+        if self.kernel_type not in ['additive_chi2', 'chi2', 'linear', 'poly', 'polynomial', 'rbf', 'laplacian',
+                                    'sigmoid', 'cosine']:
+            raise ValueError(f"Metric {self.kernel_type} not found in sklearn.metrics.pairwise")
+
+    def refine(self, beta: MultiIndex, training_data: tuple[Dataset, Dataset],
+               old_state: GPRState, input_domains: dict[str, tuple]) -> InterpolatorState:
+        """Train a new gaussian process regression model.
+
+        :param beta: refinement level indices (Not used for 'GPR')
+        :param training_data: a tuple of dictionaries containing the new training data (`xtrain`, `ytrain`)
+        :param old_state: the old regressor state to refine (only used to get the order of input/output variables)
+        :param input_domains: (not used for `GPR`)
+        :returns: the new linear state
+        """
+        xtrain, ytrain = training_data
+
+        # Get order of variables for inputs and outputs
+        if old_state is not None:
+            x_vars = old_state.x_vars
+            y_vars = old_state.y_vars
+        else:
+            x_vars = list(xtrain.keys())
+            y_vars = list(ytrain.keys())
+
+        # Convert to (N, xdim) and (N, ydim) arrays
+        x_arr = np.concatenate([xtrain[var][..., np.newaxis] for var in x_vars], axis=-1)
+        y_arr = np.concatenate([ytrain[var][..., np.newaxis] for var in y_vars], axis=-1)
+
+        self.kernel = PairwiseKernel(metric=self.kernel_type, gamma=1) + WhiteKernel(noise_level=1e-4,
+                                                                                     noise_level_bounds=(1e-10, 1e-6))
+
+        gp = GaussianProcessRegressor(kernel=self.kernel, n_restarts_optimizer=15, random_state=42)
+        pipe = [('scaler', MinMaxScaler()), ('gpr', gp)]
+        regressor = Pipeline(pipe)
+
+        regressor.fit(x_arr, y_arr)
+
+        return GPRState(regressor=regressor, x_vars=x_vars, y_vars=y_vars)
+
+    def predict(self, x: Dataset, state: GPRState, training_data: tuple[Dataset, Dataset]):
+        """Predict the output of the model at points `x` using the Gaussian Process Regressor provided in `state`.
+
+        :param x: the input Dataset `dict` mapping input variables to prediction locations
+        :param state: the state containing the Gaussian Process Regressor to use
+        :param training_data: not used for `GaussianProcessInterpolator` (since the regressor is already trained in `state`)
+        """
+
+        # Convert to (N, xdim) array for sklearn
+        x_arr = np.concatenate([x[var][..., np.newaxis] for var in state.x_vars], axis=-1)
+        loop_shape = x_arr.shape[:-1]
+        x_arr = x_arr.reshape((-1, x_arr.shape[-1]))
+
+        y_arr = state.regressor.predict(x_arr)
+        y_arr = y_arr.reshape(loop_shape + (len(state.y_vars),))  # (..., ydim)
+
+        # Unpack the outputs back into a Dataset
+        return {var: y_arr[..., i] for i, var in enumerate(state.y_vars)}
+
+    def gradient(self, x: Dataset, state: GPRState, training_data: tuple[Dataset, Dataset]):
+        raise NotImplementedError
+
+    def hessian(self, x: Dataset, state: GPRState, training_data: tuple[Dataset, Dataset]):
         raise NotImplementedError
