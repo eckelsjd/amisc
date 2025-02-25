@@ -15,7 +15,7 @@ from uqtils import approx_hess, approx_jac, ax_default
 from amisc import YamlLoader
 from amisc.component import Component, IndexSet, MiscTree, ModelKwargs, StringKwargs
 from amisc.compression import SVD
-from amisc.interpolator import Interpolator, InterpolatorState, LagrangeState
+from amisc.interpolator import Interpolator, InterpolatorState, LagrangeState, Linear
 from amisc.serialize import Base64Serializable, Serializable, StringSerializable
 from amisc.training import TrainingData
 from amisc.typing import LATENT_STR_ID
@@ -392,6 +392,52 @@ def test_sparse_grid(plots=False):
         fig, ax = plt.subplots()
         ax.plot(xg, yt, '-r', linewidth=2, label='Model')
         ax.plot(xg, y_surr, '--k', linewidth=1.5, label='MISC surrogate')
+        ax_default(ax, r'$x$', r'$f(x)$', legend=True)
+        plt.show()
+
+
+def test_polynomial_regression(plots=False):
+    """Test refining data and surrogate fidelity using polynomial regression."""
+    # Use x^3 on (0, 1)
+    def model(inputs):
+        return {'y': inputs['x'] ** 3}
+
+    x = Variable(distribution='U(0, 1)')
+    comp = Component(model, x, 'y', data_fidelity=(2,), surrogate_fidelity=(2,), vectorized=True,
+                     interpolator=Linear(regressor='RidgeCV', regressor_opts={'alphas': np.logspace(-3, 3, 10)}))
+    Ik = [((), (0, 0)), ((), (0, 1)), ((), (1, 0)), ((), (2, 0)), ((), (1, 1)), ((), (0, 2)), ((), (1, 2)),
+          ((), (2, 1)), ((), (2, 2))]
+    for alpha, beta in Ik:
+        comp.activate_index(alpha, beta)
+    xg = np.linspace(0, 1, 100)
+    yt = comp.predict({'x': xg}, use_model='best')['y']
+    ysurr = comp.predict({'x': xg})['y']
+    assert relative_error(ysurr, yt) < 0.1
+
+    # Plot results for each fidelity of the MISC surrogate
+    if plots:
+        fig, axs = plt.subplots(3, 3, sharey='row', sharex='col')
+        for beta0 in range(3):
+            for beta1 in range(3):
+                ax = axs[2 - beta1, beta0]
+                xi, yi = comp.training_data.get((), (beta0, beta1))
+                y_interp = comp.interpolator.predict({'x': xg}, comp.misc_states[(), (beta0, beta1)], (xi, yi))
+                s = rf'$\hat{{f}}_{{{beta0}, {beta1}}}(x)$'
+                ax.plot(xg, y_interp['y'], '--k', label=r'{}'.format(s), linewidth=1.5)
+                ax.plot(xg, yt, '-r', label=r'$f(x)$', linewidth=2)
+                ax.plot(xi['x'], yi['y'], 'or')
+                ax_default(ax, r'$x$' if beta0 == 0 else '', r'$f(x)$' if beta1 == 0 else '', legend=True)
+
+        fig.text(0.5, 0.02, r'Increasing data fidelity ($\beta_0$) $\rightarrow$', ha='center', fontweight='bold')
+        fig.text(0.02, 0.5, r'Increasing surrogate fidelity ($\beta_1$) $\rightarrow$', va='center', fontweight='bold',
+                 rotation='vertical')
+        fig.set_size_inches(3 * 3, 3 * 3)
+        fig.tight_layout(pad=3, w_pad=1, h_pad=1)
+        plt.show()
+
+        fig, ax = plt.subplots()
+        ax.plot(xg, yt, '-r', linewidth=2, label='Model')
+        ax.plot(xg, ysurr, '--k', linewidth=1.5, label='MISC surrogate')
         ax_default(ax, r'$x$', r'$f(x)$', legend=True)
         plt.show()
 

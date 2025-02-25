@@ -12,6 +12,7 @@ from uqtils import ax_default
 
 from amisc import Component, System, Variable
 from amisc.compression import SVD
+from amisc.interpolator import Interpolator
 from amisc.utils import relative_error
 
 
@@ -419,39 +420,50 @@ def test_fire_sat(tmp_path, plots=False):
     xt = {var: arr[use_idx] for var, arr in xt.items()}
     yt = {var: arr[use_idx] for var, arr in yt.items()}
 
-    # with ProcessPoolExecutor(max_workers=4) as executor:
-    executor=None
-    surr.fit(targets=targs, max_iter=10, max_tol=1e-3, runtime_hr=4/12, test_set=(xt, yt), executor=executor,
-             plot_interval=4, estimate_bounds=True)
+    # Test multiple interpolators on the Power component
+    interpolators = {'lagrange': {},
+                     'linear': {'regressor': 'RidgeCV', 'regressor_opts': {'alphas': np.logspace(-5, 4, 10).tolist()}}
+                     }
+    surrogate_fidelities = {'lagrange': (), 'linear': (2,)}
 
-    ysurr = surr.predict(xt, targets=targs)
-    for var in yt:
-        l2_error = relative_error(ysurr[var], yt[var])
-        assert np.nanmax(l2_error) < 0.2
+    for interpolator, config in interpolators.items():
+        surr.logger.info(f'Running "{interpolator}" interpolator...')
+        surr.clear()
+        surr['Power'].interpolator = Interpolator.from_dict(dict(method=interpolator, **config))
+        surr['Power'].surrogate_fidelity = surrogate_fidelities[interpolator]
+        surr.fit(targets=targs, max_iter=10, max_tol=1e-3, runtime_hr=4/12, test_set=(xt, yt),
+                 plot_interval=4, estimate_bounds=True)
 
-    # Plot 1d slices
-    slice_idx = ['H', 'Po', 'Cd']
-    try:
-        surr.plot_slice(slice_idx, targs, show_model=['best', 'worst'], save_dir=surr.root_dir,
-                        random_walk=True, num_steps=15)
-    except np.linalg.LinAlgError:
-        print('Its alright. Sometimes the random walks are wacky and FPI wont converge.')
+        ysurr = surr.predict(xt, targets=targs)
+        for var in yt:
+            l2_error = relative_error(ysurr[var], yt[var])
+            assert np.nanmax(l2_error) < 0.2
 
-    # Plot allocation bar charts
-    surr.plot_allocation()
+        # Plot 1d slices
+        slice_idx = ['H', 'Po', 'Cd']
+        try:
+            fig, ax = surr.plot_slice(slice_idx, targs, show_model=['best', 'worst'], save_dir=surr.root_dir,
+                                      random_walk=True, num_steps=15)
+            fig.suptitle(f'{interpolator} interpolator')
+        except np.linalg.LinAlgError:
+            print('Its alright. Sometimes the random walks are wacky and FPI wont converge.')
 
-    if plots:
-        # Plot error histograms
-        fig, ax = plt.subplots(1, 3)
-        kwargs = {'bins': 20, 'edgecolor': 'black', 'density': False, 'linewidth': 1.2}
-        for i, var in enumerate(targs):
-            ax[i].hist(yt[var], color='r', label='Truth', **kwargs)
-            ax[i].hist(ysurr[var], color='b', alpha=0.4, label='Surrogate', **kwargs)
-            ax_default(ax[i], surr.outputs()[var].get_tex(symbol=False, units=True), '', legend=True)
+        # Plot allocation bar charts
+        surr.plot_allocation()
 
-        fig.set_size_inches(9, 3)
-        fig.tight_layout()
-        plt.show()
+        if plots:
+            # Plot error histograms
+            fig, ax = plt.subplots(1, 3)
+            kwargs = {'bins': 20, 'edgecolor': 'black', 'density': False, 'linewidth': 1.2}
+            for i, var in enumerate(targs):
+                ax[i].hist(yt[var], color='r', label='Truth', **kwargs)
+                ax[i].hist(ysurr[var], color='b', alpha=0.4, label='Surrogate', **kwargs)
+                ax_default(ax[i], surr.outputs()[var].get_tex(symbol=False, units=True), '', legend=True)
+
+            fig.suptitle(f'{interpolator} interpolator')
+            fig.set_size_inches(9, 3)
+            fig.tight_layout()
+            plt.show()
 
 
 def test_turbojet_cycle(tmp_path):
