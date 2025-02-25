@@ -1207,6 +1207,13 @@ class Component(BaseModel, Serializable):
             weight_fcns = self.inputs.get_pdfs()
 
         for a, b in indices:
+            if ((a, b[:len(self.data_fidelity)] + (0,) * len(self.surrogate_fidelity)) in
+                    self.active_set.union(self.candidate_set)):
+                # Don't refine training data if only updating surrogate fidelity indices
+                # Training data is the same for all surrogate fidelity indices, given constant data fidelity
+                design_list.append([])
+                continue
+
             design_coords, design_pts = self.training_data.refine(a, b[:len(self.data_fidelity)],
                                                                   domains, weight_fcns)
             design_pts, fc = to_model_dataset(design_pts, self.inputs, del_latent=True, **field_coords)
@@ -1247,29 +1254,35 @@ class Component(BaseModel, Serializable):
         for i, (a, b) in enumerate(indices):
             num_train_pts = len(design_list[i])
             end_idx = start_idx + num_train_pts  # Ensure loop dim of 1 gets its own axis (might have been squeezed)
-            yi_dict = {var: arr[np.newaxis, ...] if len(alpha_list) == 1 and arr.shape[0] != 1 else
-                       arr[start_idx:end_idx, ...] for var, arr in model_outputs.items()}
 
-            # Check for errors and store
-            err_coords = []
-            err_list = []
-            for idx in list(errors.keys()):
-                if idx < end_idx:
-                    err_info = errors.pop(idx)
-                    err_info['index'] = idx - start_idx
-                    err_coords.append(design_list[i][idx - start_idx])
-                    err_list.append(err_info)
-            if len(err_list) > 0:
-                self.logger.warning(f"Model errors occurred while adding candidate ({a}, {b}) for component "
-                                    f"{self.name}. Leaving NaN values in training data...")
-                self.training_data.set_errors(a, b[:len(self.data_fidelity)], err_coords, err_list)
+            if num_train_pts > 0:
+                yi_dict = {var: arr[np.newaxis, ...] if len(alpha_list) == 1 and arr.shape[0] != 1 else
+                           arr[start_idx:end_idx, ...] for var, arr in model_outputs.items()}
 
-            # Compress field quantities and normalize
-            yi_dict, y_vars = to_surrogate_dataset(yi_dict, self.outputs, del_fields=False, **field_coords)
+                # Check for errors and store
+                err_coords = []
+                err_list = []
+                for idx in list(errors.keys()):
+                    if idx < end_idx:
+                        err_info = errors.pop(idx)
+                        err_info['index'] = idx - start_idx
+                        err_coords.append(design_list[i][idx - start_idx])
+                        err_list.append(err_info)
+                if len(err_list) > 0:
+                    self.logger.warning(f"Model errors occurred while adding candidate ({a}, {b}) for component "
+                                        f"{self.name}. Leaving NaN values in training data...")
+                    self.training_data.set_errors(a, b[:len(self.data_fidelity)], err_coords, err_list)
 
-            # Store training data, computational cost, and new interpolator state
-            self.training_data.set(a, b[:len(self.data_fidelity)], design_list[i], yi_dict)
-            self.training_data.impute_missing_data(a, b[:len(self.data_fidelity)])
+                # Compress field quantities and normalize
+                yi_dict, y_vars = to_surrogate_dataset(yi_dict, self.outputs, del_fields=False, **field_coords)
+
+                # Store training data, computational cost, and new interpolator state
+                self.training_data.set(a, b[:len(self.data_fidelity)], design_list[i], yi_dict)
+                self.training_data.impute_missing_data(a, b[:len(self.data_fidelity)])
+
+            else:
+                y_vars = self._surrogate_outputs()
+
             self.misc_costs[a, b] = num_train_pts
             self.misc_states[a, b] = self.interpolator.refine(b[len(self.data_fidelity):],
                                                               self.training_data.get(a, b[:len(self.data_fidelity)],

@@ -6,8 +6,10 @@ Includes:
 
 - `Interpolator`: Abstract class providing basic structure of an interpolator
 - `Lagrange`: Concrete implementation for tensor-product barycentric Lagrange interpolation
+- `Linear`: Concrete implementation for linear regression using `sklearn`
 - `InterpolatorState`: Interface for a dataclass that stores the internal state of an interpolator
 - `LagrangeState`: The internal state for a barycentric Lagrange polynomial interpolator
+- `LinearState`: The internal state for a linear interpolator (using sklearn)
 """
 from __future__ import annotations
 
@@ -17,11 +19,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 import numpy as np
+from sklearn import linear_model
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import PolynomialFeatures
 
 from amisc.serialize import Base64Serializable, Serializable, StringSerializable
 from amisc.typing import Dataset, MultiIndex
 
-__all__ = ["InterpolatorState", "LagrangeState", "Interpolator", "Lagrange"]
+__all__ = ["InterpolatorState", "LagrangeState", "LinearState", "Interpolator", "Lagrange", "Linear"]
 
 
 class InterpolatorState(Serializable, ABC):
@@ -50,6 +55,29 @@ class LagrangeState(InterpolatorState, Base64Serializable):
             return False
 
 
+@dataclass
+class LinearState(InterpolatorState, Base64Serializable):
+    """The internal state for a linear interpolator (using sklearn).
+
+    :ivar x_vars: the input variables in order
+    :ivar y_vars: the output variables in order
+    :ivar regressor: the sklearn regressor object, a pipeline that consists of a `PolynomialFeatures` and a model from
+                     `sklearn.linear_model`, i.e. Ridge, Lasso, etc.
+    """
+    x_vars: list[str] = field(default_factory=list)
+    y_vars: list[str] = field(default_factory=list)
+    regressor: Pipeline = None
+
+    def __eq__(self, other):
+        if isinstance(other, LinearState):
+            return (self.x_vars == other.x_vars and self.y_vars == other.y_vars and
+                    np.allclose(self.regressor['poly'].powers_, other.regressor['poly'].powers_) and
+                    np.allclose(self.regressor['linear'].coef_, other.regressor['linear'].coef_) and
+                    np.allclose(self.regressor['linear'].intercept_, other.regressor['linear'].intercept_))
+        else:
+            return False
+
+
 class Interpolator(Serializable, ABC):
     """Interface for an interpolator object that approximates a model. An interpolator should:
 
@@ -58,7 +86,7 @@ class Interpolator(Serializable, ABC):
     - `gradient` - compute the grdient/Jacobian at new points (if you want)
     - `hessian` - compute the 2nd derivative/Hessian at new points (if you want)
 
-    Currently, only the `Lagrange` interpolator is supported and can be constructed from a configuration `dict`
+    Currently, `Lagrange` and `Linear` interpolators are supported and can be constructed from a configuration `dict`
     via `Interpolator.from_dict()`.
     """
 
@@ -119,6 +147,8 @@ class Interpolator(Serializable, ABC):
         match method:
             case 'lagrange':
                 return Lagrange(**config)
+            case 'linear':
+                return Linear(**config)
             case other:
                 raise NotImplementedError(f"Unknown interpolator method: {other}")
 
@@ -464,3 +494,88 @@ class Lagrange(Interpolator, StringSerializable):
                 hess_ret[var] = np.squeeze(hess_ret[var], axis=-3)  # for scalars: (..., xdim, xdim) partial derivatives
             start_idx = end_idx
         return hess_ret
+
+
+@dataclass
+class Linear(Interpolator, StringSerializable):
+    """Implementation of linear regression using `sklearn`. The `Linear` interpolator uses a pipeline of
+    `PolynomialFeatures` and a linear model from `sklearn.linear_model` to approximate the input-output mapping
+    with a linear combination of polynomial features. Defaults to Ridge regression (L2 regularization) with
+    polynomials of degree 1 (i.e. normal linear regression).
+
+    :ivar regressor: the scikit-learn linear model to use (e.g. 'Ridge', 'Lasso', 'ElasticNet', etc.).
+    :ivar regressor_opts: options to pass to the regressor constructor
+                          (see [scikit-learn](https://scikit-learn.org/stable/) documentation).
+    :ivar polynomial_opts: options to pass to the `PolynomialFeatures` constructor (e.g. 'degree', 'include_bias').
+    """
+    regressor: str = 'Ridge'
+    regressor_opts: dict = field(default_factory=dict)
+    polynomial_opts: dict = field(default_factory=lambda: {'degree': 1, 'include_bias': False})
+
+    def __post_init__(self):
+        try:
+            getattr(linear_model, self.regressor)
+        except AttributeError:
+            raise ImportError(f"Regressor '{self.regressor}' not found in sklearn.linear_model")
+
+    def refine(self, beta: MultiIndex, training_data: tuple[Dataset, Dataset],
+               old_state: LinearState, input_domains: dict[str, tuple]) -> InterpolatorState:
+        """Train a new linear regression model.
+
+        :param beta: if not empty, then the first element is the number of degrees to add to the polynomial features.
+                     For example, if `beta=(1,)`, then the polynomial degree will be increased by 1. If the degree
+                     is already set to 1 in `polynomial_opts` (default), then the new degree will be 2.
+        :param training_data: a tuple of dictionaries containing the new training data (`xtrain`, `ytrain`)
+        :param old_state: the old linear state to refine (only used to get the order of input/output variables)
+        :param input_domains: (not used for `Linear`)
+        :returns: the new linear state
+        """
+        polynomial_opts = self.polynomial_opts.copy()
+        degree = polynomial_opts.pop('degree', 1)
+        if beta != ():
+            degree += beta[0]
+
+        regressor = Pipeline([('poly', PolynomialFeatures(degree=degree, **polynomial_opts)),
+                              ('linear', getattr(linear_model, self.regressor)(**self.regressor_opts))])
+
+        xtrain, ytrain = training_data
+
+        # Get order of variables for inputs and outputs
+        if old_state is not None:
+            x_vars = old_state.x_vars
+            y_vars = old_state.y_vars
+        else:
+            x_vars = list(xtrain.keys())
+            y_vars = list(ytrain.keys())
+
+        # Convert to (N, xdim) and (N, ydim) arrays
+        x_arr = np.concatenate([xtrain[var][..., np.newaxis] for var in x_vars], axis=-1)
+        y_arr = np.concatenate([ytrain[var][..., np.newaxis] for var in y_vars], axis=-1)
+
+        regressor.fit(x_arr, y_arr)
+
+        return LinearState(regressor=regressor, x_vars=x_vars, y_vars=y_vars)
+
+    def predict(self, x: Dataset, state: LinearState, training_data: tuple[Dataset, Dataset]):
+        """Predict the output of the model at points `x` using the linear regressor provided in `state`.
+
+        :param x: the input Dataset `dict` mapping input variables to prediction locations
+        :param state: the state containing the linear regressor to use
+        :param training_data: not used for `Linear` (since the regressor is already trained in `state`)
+        """
+        # Convert to (N, xdim) array for sklearn
+        x_arr = np.concatenate([x[var][..., np.newaxis] for var in state.x_vars], axis=-1)
+        loop_shape = x_arr.shape[:-1]
+        x_arr = x_arr.reshape((-1, x_arr.shape[-1]))
+
+        y_arr = state.regressor.predict(x_arr)
+        y_arr = y_arr.reshape(loop_shape + (len(state.y_vars),))  # (..., ydim)
+
+        # Unpack the outputs back into a Dataset
+        return {var: y_arr[..., i] for i, var in enumerate(state.y_vars)}
+
+    def gradient(self, x: Dataset, state: LinearState, training_data: tuple[Dataset, Dataset]):
+        raise NotImplementedError
+
+    def hessian(self, x: Dataset, state: LinearState, training_data: tuple[Dataset, Dataset]):
+        raise NotImplementedError

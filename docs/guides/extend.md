@@ -20,7 +20,7 @@ from amisc.transform import Transform
 
 class CustomTransform(Transform):
     """A transform that adds 1."""
-    
+
     def _transform(self, values, inverse=False):
         return values - 1 if inverse else values + 1
 ```
@@ -150,13 +150,13 @@ class CustomInterpolatorState(InterpolatorState):
     pass
 ```
 
-The `Lagrange` polynomial interpolation class is the only available method currently. The state of a `Lagrange` polynomial includes the 1d grids and barycentric weights for each input dimension. See [Lagrange][amisc.interpolator.Lagrange] for more details.
+Currently, the available methods are `Lagrange` polynomial interpolation and `Linear` regression. The state of a `Lagrange` polynomial includes the 1d grids and barycentric weights for each input dimension. The state of a `Linear` regression includes the underlying [scikit-learn](https://scikit-learn.org/stable/) linear model. See [Lagrange][amisc.interpolator.Lagrange] and [Linear][amisc.interpolator.Linear] for more details. Note that linear regression also includes options for polynomial features.
 
 ## Model keyword arguments
 The `ModelKwarg` interface provides a dataclass for passing extra options to the underlying component models. The default is a simple `dict` that gets passed as a set of `key=value` pairs. The primary reason for overriding this class is if you have complicated arguments that require custom serialization. See the [serialization](#serialization) section below.
 
 ## Serialization
-The [Serializable][amisc.serialize.Serializable] interface defines the `serialize` and `deserialize` methods for converting `amisc` objects to/from built-in Python types (such as `strings`, `floats`, and `dicts`). 
+The [Serializable][amisc.serialize.Serializable] interface defines the `serialize` and `deserialize` methods for converting `amisc` objects to/from built-in Python types (such as `strings`, `floats`, and `dicts`).
 
 !!! Note "Important"
     All custom objects implementing any of the interfaces above must also implement the `serialize` and `deserialize` mixin methods to allow saving and loading the custom objects from file.
@@ -185,7 +185,7 @@ However, more generally, you may define a custom `FileLoader` if you prefer to w
 
     class JSONLoader(FileLoader):
         """Save and load amisc objects from JSON"""
-        
+
         def load(self, file)
             """Load an amisc.System object (for example)"""
             with open(file, 'r') as fd:

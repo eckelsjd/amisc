@@ -853,7 +853,7 @@ class System(BaseModel, Serializable):
                 comp.activate_index(alpha_star, beta_star, model_dir=model_dir, executor=executor,
                                     weight_fcns=weight_fcns)
                 num_evals = comp.get_cost(alpha_star, beta_star)
-                cost_star = comp.model_costs.get(alpha_star, 1.) * num_evals  # Cpu time (s)
+                cost_star = max(1., comp.model_costs.get(alpha_star, 1.) * num_evals)  # Cpu time (s)
                 err_star = np.nan
                 return {'component': comp.name, 'alpha': alpha_star, 'beta': beta_star, 'num_evals': int(num_evals),
                         'added_cost': float(cost_star), 'added_error': float(err_star)}
@@ -907,7 +907,7 @@ class System(BaseModel, Serializable):
 
                     delta_error = np.nanmax([np.nanmax(error[var]) for var in error])  # Max error over all target QoIs
                     num_evals = comp.get_cost(alpha, beta)
-                    delta_work = comp.model_costs.get(alpha, 1.) * num_evals  # Cpu time (s)
+                    delta_work = max(1., comp.model_costs.get(alpha, 1.) * num_evals)  # Cpu time (s)
                     error_indicator = delta_error / delta_work
 
                     self.logger.info(f"Candidate multi-index: {(alpha, beta)}. Relative error: {delta_error}. "

@@ -18,9 +18,10 @@ As such, the primary top-level object that users of the `amisc` package will int
 Variables additionally use `Transform`, `Distribution`, and `Compression` interfaces to manage normalization, PDFs,
 and field quantity compression, respectively.
 
-Currently, only Lagrange polynomial interpolation is implemented as the underlying surrogate method with a
-sparse grid data structure. SVD is also the only currently implemented method for compression. However, interfaces
-are provided for `Interpolator`, `TrainingData`, and `Compression` to allow for easy extension to other methods.
+Currently, only Lagrange polynomial interpolation and Linear regression are implemented as the underlying surrogate
+methods with a sparse grid data structure. SVD is also the only currently implemented method for compression. However,
+interfaces are provided for `Interpolator`, `TrainingData`, and `Compression` to allow for easy extension to other
+methods.
 
 Here is a class diagram summary of this workflow:
 

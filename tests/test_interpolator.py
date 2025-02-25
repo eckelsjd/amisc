@@ -1,12 +1,13 @@
-"""Test interpolation classes. Currently, only barycentric Lagrange interpolation is supported."""
+"""Test interpolation classes. Currently, only Lagrange interpolation and Linear regression are supported."""
 import itertools
 
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.preprocessing import PolynomialFeatures
 from uqtils import approx_hess, approx_jac, ax_default
 
 from amisc.examples.models import nonlinear_wave, tanh_func
-from amisc.interpolator import Lagrange
+from amisc.interpolator import Lagrange, Linear
 from amisc.training import SparseGrid
 from amisc.utils import relative_error
 from amisc.variable import Variable
@@ -224,3 +225,121 @@ def test_interp_jacobian_and_hessian():
     hess_interp = interp.hessian(xi_test, new_state, training_data)
     hess_interp_vec = np.concatenate([np.expand_dims(hess_interp[var], axis=-3) for var in ['y1', 'y2']], axis=-3)
     assert np.allclose(hess_truth, hess_interp_vec, rtol=1e-1, atol=3e-1)
+
+
+def test_sklearn_linear():
+    """Test linear regression classes with sklearn."""
+    # Test simple ridge (no noise)
+    num_inputs = 4
+    num_outputs = 3
+    num_train = 50
+    num_test = 20
+    noise_std = 0.0
+    true_coeff = np.random.rand(num_inputs + 1, num_outputs) * 2 - 1  # includes intercept term (num_inputs + 1)
+
+    def linear_model(inputs, noise_std=0.0):
+        """Compute a linear model."""
+        x_mat = np.concatenate([inputs[var][..., np.newaxis] for var in inputs], axis=-1)
+        y_mat = np.dot(x_mat, true_coeff[:-1, :]) + true_coeff[-1, :]
+        if noise_std >= 0:
+            y_mat += np.random.randn(*y_mat.shape) * noise_std
+
+        return {f'y{i}': y_mat[..., i] for i in range(num_outputs)}
+
+    xtrain = {f'x{i}': np.random.rand(num_train) * 2 - 1 for i in range(num_inputs)}
+    ytrain = linear_model(xtrain, noise_std=noise_std)
+
+    interp = Linear(regressor='Ridge', regressor_opts={'alpha': 0.0})
+    state = interp.refine((), (xtrain, ytrain), None, {})
+
+    # 1d plot for quick comparisons (only for xdim=1, ydim=2)
+    # fig, ax = plt.subplots()
+    # xlin = np.linspace(-1, 1, 100)
+    # ypred = interp.predict({'x0': xlin}, state, ())
+    # ax.scatter(xtrain['x0'], ytrain['y0'], color='k')
+    # ax.scatter(xtrain['x0'], ytrain['y1'], color='r')
+    # ax.plot(xlin, true_coeff[0, 0] * xlin + true_coeff[1, 0], '-k')
+    # ax.plot(xlin, ypred['y0'], '--b')
+    # ax.plot(xlin, true_coeff[0, 1] * xlin + true_coeff[1, 1], '-r')
+    # ax.plot(xlin, ypred['y1'], '--g')
+    # plt.show()
+
+    xtest = {f'x{i}': np.random.rand(num_test) for i in range(num_inputs)}
+    ytest = linear_model(xtest, noise_std=noise_std)
+    ypred = interp.predict(xtest, state, ())
+
+    # Should exactly fit linear model with no noise
+    assert relative_error(state.regressor['linear'].coef_.T, true_coeff[:-1, :]) < 1e-8
+    assert relative_error(state.regressor['linear'].intercept_, true_coeff[-1, :]) < 1e-8
+    assert all([relative_error(ypred[var], ytest[var]) < 1e-8 for var in ypred])
+
+    # Test other linear regressions with noise
+    regressors = {'Lasso': {'alpha': 0.001},
+                  'ElasticNet': {'alpha': 0.001, 'l1_ratio': 0.3},
+                  'Lars': {'eps': 1e-10}}
+    noise_std = 0.02
+    ytrain = linear_model(xtrain, noise_std=noise_std)
+
+    for regressor, opts in regressors.items():
+        interp = Linear(regressor=regressor, regressor_opts=opts)
+        state = interp.refine((), (xtrain, ytrain), None, {})
+
+        ypred = interp.predict(xtest, state, ())
+        err = {var: relative_error(ypred[var], ytest[var]) for var in ypred}
+        assert all([err[var] < 0.05 for var in err])
+
+
+def test_sklearn_polynomial():
+    """Test sklearn polynomial regression (and also cross-validation for hyperparameter tuning)."""
+    num_train = 100
+    num_test = (20, 2)
+    num_inputs = 3
+    polynomial_opts = {'degree': 3, 'include_bias': False}
+
+    # Generate random polynomial coefficients
+    feat = PolynomialFeatures(**polynomial_opts)
+    feat.fit(np.random.rand(num_train, num_inputs))
+    powers = feat.powers_  # (num_features, num_inputs) -- gives input powers for each polynomial feature
+    true_coeff = np.random.rand(powers.shape[0]) * 2 - 1
+    zero_ind = np.random.randint(0, powers.shape[0], size=powers.shape[0] // 2)  # zero half the coefficients
+    true_coeff[zero_ind] = 0
+    true_intercept = np.random.rand() * 2 - 1
+
+    def polynomial_model(inputs, noise_std=0.0):
+        """Compute a linear model with polynomial features."""
+        x_mat = np.concatenate([inputs[var][..., np.newaxis] for var in inputs], axis=-1)
+        y_mat = np.zeros(x_mat.shape[:-1])
+
+        for i, feature in enumerate(powers):
+            monomial = np.ones(x_mat.shape[:-1]) * true_coeff[i]
+            for j, power in enumerate(feature):
+                monomial *= x_mat[..., j] ** power
+
+            y_mat += monomial
+
+        y_mat += true_intercept
+
+        if noise_std >= 0:
+            y_mat += np.random.randn(*y_mat.shape) * noise_std
+
+        return {'y': y_mat}
+
+    xtrain = {f'x{i}': np.random.rand(num_train) * 2 - 1 for i in range(num_inputs)}
+    ytrain = polynomial_model(xtrain, noise_std=0.02)
+
+    interp = Linear(regressor='RidgeCV', regressor_opts={'alphas': np.logspace(-4, 2, 7)},
+                    polynomial_opts=polynomial_opts)
+    state = interp.refine((), (xtrain, ytrain), None, {})
+
+    xtest = {f'x{i}': np.random.rand(*num_test) * 2 - 1 for i in range(num_inputs)}
+    ytest = polynomial_model(xtest, noise_std=0.0)
+    ypred = interp.predict(xtest, state, ())
+
+    coeff_err = relative_error(state.regressor['linear'].coef_, true_coeff)
+    intercept_err = relative_error(state.regressor['linear'].intercept_, true_intercept)
+    err = relative_error(ypred['y'], ytest['y'])
+
+    tol = 0.09
+    assert coeff_err < tol, f'Error in polynomial coefficients: {coeff_err} > {tol}'
+    assert intercept_err < tol, f'Error in polynomial intercept: {intercept_err} > {tol}'
+    assert err < tol, f'Error in polynomial prediction: {err} > {tol}'
