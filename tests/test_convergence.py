@@ -48,7 +48,8 @@ def test_curved_with_noise():
 
     noise_std = 2
     linear_opts = {'regressor': 'RidgeCV', 'regressor_opts': {'alphas': np.logspace(-8, -1, 9).tolist()},
-                   'polynomial_opts': {'degree': 3}}
+                   'polynomial_opts': {'degree': 3},
+                   'scaler': 'MinMaxScaler', 'scaler_opts': {'feature_range': (-1, 1)}}
     x1 = Variable(distribution='U(0, 1)')
     x2 = Variable(distribution='U(0, 1)')
     x3 = Variable(distribution='U(0, 1)')
