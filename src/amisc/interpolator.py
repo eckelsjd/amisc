@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 import numpy as np
-from sklearn import linear_model
+from sklearn import linear_model, preprocessing
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import PolynomialFeatures
 
@@ -504,12 +504,17 @@ class Linear(Interpolator, StringSerializable):
     polynomials of degree 1 (i.e. normal linear regression).
 
     :ivar regressor: the scikit-learn linear model to use (e.g. 'Ridge', 'Lasso', 'ElasticNet', etc.).
+    :ivar scaler: the scikit-learn preprocessing scaler to use (e.g. 'MinMaxScaler', 'StandardScaler', etc.). If None,
+                  no scaling is applied (default).
     :ivar regressor_opts: options to pass to the regressor constructor
                           (see [scikit-learn](https://scikit-learn.org/stable/) documentation).
+    :ivar scaler_opts: options to pass to the scaler constructor
     :ivar polynomial_opts: options to pass to the `PolynomialFeatures` constructor (e.g. 'degree', 'include_bias').
     """
     regressor: str = 'Ridge'
+    scaler: str = None
     regressor_opts: dict = field(default_factory=dict)
+    scaler_opts: dict = field(default_factory=dict)
     polynomial_opts: dict = field(default_factory=lambda: {'degree': 1, 'include_bias': False})
 
     def __post_init__(self):
@@ -517,6 +522,12 @@ class Linear(Interpolator, StringSerializable):
             getattr(linear_model, self.regressor)
         except AttributeError:
             raise ImportError(f"Regressor '{self.regressor}' not found in sklearn.linear_model")
+
+        if self.scaler is not None:
+            try:
+                getattr(preprocessing, self.scaler)
+            except AttributeError:
+                raise ImportError(f"Scaler '{self.scaler}' not found in sklearn.preprocessing")
 
     def refine(self, beta: MultiIndex, training_data: tuple[Dataset, Dataset],
                old_state: LinearState, input_domains: dict[str, tuple]) -> InterpolatorState:
@@ -535,8 +546,12 @@ class Linear(Interpolator, StringSerializable):
         if beta != ():
             degree += beta[0]
 
-        regressor = Pipeline([('poly', PolynomialFeatures(degree=degree, **polynomial_opts)),
-                              ('linear', getattr(linear_model, self.regressor)(**self.regressor_opts))])
+        pipe = []
+        if self.scaler is not None:
+            pipe.append(('scaler', getattr(preprocessing, self.scaler)(**self.scaler_opts)))
+        pipe.extend([('poly', PolynomialFeatures(degree=degree, **polynomial_opts)),
+                     ('linear', getattr(linear_model, self.regressor)(**self.regressor_opts))])
+        regressor = Pipeline(pipe)
 
         xtrain, ytrain = training_data
 
