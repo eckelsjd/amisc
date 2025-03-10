@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <title>Coverage for src/amisc/training.py: 89%</title>
+    <title>Coverage for src/amisc/training.py: 91%</title>
     <link rel="icon" sizes="32x32" href="favicon_32_cb_58284776.png">
     <link rel="stylesheet" href="style_cb_8e611ae1.css" type="text/css">
     <script src="coverage_html_cb_6fb7b396.js" defer></script>
@@ -12,7 +12,7 @@
     <div class="content">
         <h1>
             <span class="text">Coverage for </span><b>src/amisc/training.py</b>:
-            <span class="pc_cov">89%</span>
+            <span class="pc_cov">91%</span>
         </h1>
         <aside id="help_panel_wrapper">
             <input id="help_panel_state" type="checkbox">
@@ -55,8 +55,8 @@
         </aside>
         <h2>
             <span class="text">265 statements &nbsp;</span>
-            <button type="button" class="run button_toggle_run" value="run" data-shortcut="r" title="Toggle lines run">235<span class="text"> run</span></button>
-            <button type="button" class="mis show_mis button_toggle_mis" value="mis" data-shortcut="m" title="Toggle lines missing">30<span class="text"> missing</span></button>
+            <button type="button" class="run button_toggle_run" value="run" data-shortcut="r" title="Toggle lines run">241<span class="text"> run</span></button>
+            <button type="button" class="mis show_mis button_toggle_mis" value="mis" data-shortcut="m" title="Toggle lines missing">24<span class="text"> missing</span></button>
             <button type="button" class="exc show_exc button_toggle_exc" value="exc" data-shortcut="x" title="Toggle lines excluded">0<span class="text"> excluded</span></button>
         </h2>
         <p class="text">
@@ -65,7 +65,7 @@
             <a id="nextFileLink" class="nav" href="z_806a84536edbb98e_transform_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.6.1">coverage.py v7.6.1</a>,
-            created at 2025-02-10 17:34 +0000
+            created at 2025-03-10 15:12 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -253,12 +253,12 @@
     <p class="pln"><span class="n"><a id="t171" href="#t171">171</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t172" href="#t172">172</a></span><span class="t">    <span class="key">def</span> <span class="nam">clear</span><span class="op">(</span><span class="nam">self</span><span class="op">)</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t173" href="#t173">173</a></span><span class="t">        <span class="str">"""Clear all training data."""</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t174" href="#t174">174</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">betas</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t175" href="#t175">175</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">x_grids</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t176" href="#t176">176</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">yi_map</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t177" href="#t177">177</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">yi_nan_map</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t178" href="#t178">178</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">error_map</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t179" href="#t179">179</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">latent_size</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t174" href="#t174">174</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">betas</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t175" href="#t175">175</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">x_grids</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t176" href="#t176">176</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">yi_map</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t177" href="#t177">177</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">yi_nan_map</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t178" href="#t178">178</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">error_map</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t179" href="#t179">179</a></span><span class="t">        <span class="nam">self</span><span class="op">.</span><span class="nam">latent_size</span><span class="op">.</span><span class="nam">clear</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t180" href="#t180">180</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t181" href="#t181">181</a></span><span class="t">    <span class="key">def</span> <span class="nam">get_by_coord</span><span class="op">(</span><span class="nam">self</span><span class="op">,</span> <span class="nam">alpha</span><span class="op">:</span> <span class="nam">MultiIndex</span><span class="op">,</span> <span class="nam">coords</span><span class="op">:</span> <span class="nam">list</span><span class="op">,</span> <span class="nam">y_vars</span><span class="op">:</span> <span class="nam">list</span> <span class="op">=</span> <span class="key">None</span><span class="op">,</span> <span class="nam">skip_nan</span><span class="op">:</span> <span class="nam">bool</span> <span class="op">=</span> <span class="key">False</span><span class="op">)</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t182" href="#t182">182</a></span><span class="t">        <span class="str">"""Get training data from the sparse grid for a given `alpha` and list of grid coordinates. Try to replace</span>&nbsp;</span><span class="r"></span></p>
@@ -607,7 +607,7 @@
             <a class="nav" href="z_806a84536edbb98e_transform_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.6.1">coverage.py v7.6.1</a>,
-            created at 2025-02-10 17:34 +0000
+            created at 2025-03-10 15:12 +0000
         </p>
     </div>
 </footer>
