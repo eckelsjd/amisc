@@ -7,7 +7,7 @@ from sklearn.preprocessing import PolynomialFeatures
 from uqtils import approx_hess, approx_jac, ax_default
 
 from amisc.examples.models import nonlinear_wave, tanh_func
-from amisc.interpolator import Lagrange, Linear, GPR
+from amisc.interpolator import GPR, Lagrange, Linear
 from amisc.training import SparseGrid
 from amisc.utils import relative_error
 from amisc.variable import Variable
@@ -346,7 +346,7 @@ def test_sklearn_polynomial():
 
 
 def test_GPR_1d(plots=False):
-    """Test GPR interpoation for a 1D function."""
+    """Test GPR interpolation for a 1D function."""
     num_train = 50
     num_test = 20
     noise_std = 0.5
@@ -421,22 +421,19 @@ def test_GPR_2d(plots=False):
         test_x1 = np.linspace(-5, 10, num_test)
         test_x2 = np.linspace(0, 15, num_test)
         X1, X2 = np.meshgrid(test_x1, test_x2)
-        test_X = np.array([X1.flatten(), X2.flatten()]).T
         true_Y = model({'x1': X1.flatten(), 'x2': X2.flatten()}, noise_std=0)['y']
         pred_Y = interp.predict({'x1': X1.flatten(), 'x2': X2.flatten()}, state, ())['y']
 
         import matplotlib.colors as mcolors
         norm = mcolors.Normalize(vmin=min(true_Y.min(), pred_Y.min()), vmax=max(true_Y.max(), pred_Y.max()))
         fig, axs = plt.subplots(1, 2)
-        contour1 = axs[0].contourf(X1, X2, true_Y.reshape(X1.shape), levels=10, cmap='viridis', norm=norm)
+        axs[0].contourf(X1, X2, true_Y.reshape(X1.shape), levels=10, cmap='viridis', norm=norm)
         axs[0].set_title('True Function')
         axs[0].set_xlabel('x1')
         axs[0].set_ylabel('x2', rotation=0)
         axs[0].set_xlim(-5.1, 10.1)
         axs[0].set_ylim(-0.1, 15.1)
-        contour2 = axs[1].contourf(X1, X2, pred_Y.reshape(X1.shape), levels=10, cmap='viridis', norm=norm)
-        # axs[1].scatter(xtrain['x1'], xtrain['x2'], c=ytrain['y'], cmap='viridis', norm=norm, edgecolors='white', label='Training data')
-        axs[1].set_title('Predicted Function')
+        contour2 = axs[1].contourf(X1, X2, pred_Y.reshape(X1.shape), levels=10, cmap='viridis', norm=norm) 
         axs[1].set_xlabel('x1')
         axs[1].set_ylabel('x2', rotation=0)
         axs[1].set_xlim(-5.1, 10.1)

@@ -17,18 +17,24 @@ from __future__ import annotations
 
 import copy
 import itertools
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 import numpy as np
 from sklearn import linear_model, preprocessing
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import PolynomialFeatures, MinMaxScaler
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C, WhiteKernel, PairwiseKernel
+from sklearn.gaussian_process.kernels import PairwiseKernel, WhiteKernel
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, PolynomialFeatures
 
 from amisc.serialize import Base64Serializable, Serializable, StringSerializable
 from amisc.typing import Dataset, MultiIndex
+
+warnings.filterwarnings("ignore", module="sklearn")
+
+
+
 
 __all__ = ["InterpolatorState", "LagrangeState", "LinearState", "GPRState", "Interpolator", "Lagrange", "Linear", "GPR"]
 
@@ -98,8 +104,10 @@ class GPRState(InterpolatorState, Base64Serializable):
     def __eq__(self, other):
         if isinstance(other, GPRState):
             return (self.x_vars == other.x_vars and self.y_vars == other.y_vars and
-                    np.allclose(self.regressor['gpr'].kernel_.k1.metric, other.regressor['gpr'].kernel_.k1.metric) and
-                    np.allclose(self.regressor['gpr'].kernel_.k2.noise_level, other.regressor['gpr'].kernel_.k2.noise_level))
+                    np.allclose(self.regressor['gpr'].kernel_.k1.metric, 
+                                other.regressor['gpr'].kernel_.k1.metric) and
+                    np.allclose(self.regressor['gpr'].kernel_.k2.noise_level, 
+                                other.regressor['gpr'].kernel_.k2.noise_level))
         else:
             return False
 
@@ -626,8 +634,8 @@ class Linear(Interpolator, StringSerializable):
 
 @dataclass
 class GPR(Interpolator, StringSerializable):
-    """Implementation of Gaussian Process Regression using `sklearn`. The `GaussianProcessInterpolator` uses a pipeline of
-    `MinMaxScaler` and a `GaussianProcessRegressor` to approximate the input-output mapping.
+    """Implementation of Gaussian Process Regression using `sklearn`. The `GaussianProcessInterpolator` uses a pipeline 
+    of `MinMaxScaler` and a `GaussianProcessRegressor` to approximate the input-output mapping.
     MinMaxScaler scales the input dimensions to [0,1] before passing them to the regressor.
 
     : ivar kernel_type: the kernel type to use for building the covariance matrix. (Defaults to RBF)
@@ -649,7 +657,7 @@ class GPR(Interpolator, StringSerializable):
         :param training_data: a tuple of dictionaries containing the new training data (`xtrain`, `ytrain`)
         :param old_state: the old regressor state to refine (only used to get the order of input/output variables)
         :param input_domains: (not used for `GPR`)
-        :returns: the new linear state
+        :returns: the new GPR state
         """
         xtrain, ytrain = training_data
 
@@ -681,7 +689,7 @@ class GPR(Interpolator, StringSerializable):
 
         :param x: the input Dataset `dict` mapping input variables to prediction locations
         :param state: the state containing the Gaussian Process Regressor to use
-        :param training_data: not used for `GaussianProcessInterpolator` (since the regressor is already trained in `state`)
+        :param training_data: not used for `GPR` (since the regressor is already trained in `state`)
         """
 
         # Convert to (N, xdim) array for sklearn
