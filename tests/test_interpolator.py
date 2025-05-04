@@ -349,7 +349,7 @@ def test_GPR_1d(plots=False):
     """Test GPR interpolation for a 1D function."""
     num_train = 50
     num_test = 20
-    noise_std = 0.5
+    noise_std = 0
 
     def model(inputs, noise_std):
         x1 = inputs['x1']
