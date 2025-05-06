@@ -228,16 +228,7 @@ As one last note, if your model returns field quantity data, this will be stored
 ## Specifying a surrogate method
 The `Component.interpolator` attribute provides the underlying surrogate "interpolation" method, i.e. the specific mathematical relationship that approximates the model's outputs as a function of its inputs. In this sense, we use the terms "interpolator" and "surrogate" interchangeably to mean the underlying approximation method -- the `Component.interpolator` does not necessarily have to "interpolate" the output by passing through all the training data directly. The naming convention mostly arises from the usage of polynomial interpolation in sparse grids.
 
-Currently, the available methods are [Lagrange][amisc.interpolator.Lagrange] polynomial interpolation, which is set by default, [Linear][amisc.interpolator.Linear] regression, and [GPR][amisc.interpolator.GPR]. Multivariate Lagrange polynomials are formed by a tensor-product of univariate Lagrange polynomials in each input dimension, and integrate well with the `SparseGrid` data structure. Lagrange polynomials work well up to an input dimension of around 12-15 for sufficiently smooth functions. More details on how they work can be found in the [theory](../theory/polynomials.md) section. Linear regression is implemented through the [scikit-learn](https://scikit-learn.org/stable/) library, and may optionally include polynomial features. Gaussian Process Regression is also implemented through the [scikit-learn](https://scikit-learn.org/stable/). Currently, the kernels supported for [GPR][amisc.interpolator.GPR] are:
-
-- Chi Squared
-- Additive Chi Squared
-- Linear 
-- Polynomial
-- RBF
-- Laplacian
-- Sigmoid
-- Cosine 
+Currently, the available methods are [Lagrange][amisc.interpolator.Lagrange] polynomial interpolation, which is set by default, [Linear][amisc.interpolator.Linear] regression, and [GPR][amisc.interpolator.GPR]. Multivariate Lagrange polynomials are formed by a tensor-product of univariate Lagrange polynomials in each input dimension, and integrate well with the `SparseGrid` data structure. Lagrange polynomials work well up to an input dimension of around 12-15 for sufficiently smooth functions. More details on how they work can be found in the [theory](../theory/polynomials.md) section. Linear regression and Gaussian Process Regressions are implemented through the [scikit-learn](https://scikit-learn.org/stable/) library. Linear Regression may optionally include polynomial features while Gaussian Process Regression may optionally include scalers.  
 
 You may configure the interpolation method via:
 ```python

@@ -17,24 +17,18 @@ from __future__ import annotations
 
 import copy
 import itertools
-import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 import numpy as np
 from sklearn import linear_model, preprocessing
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import PairwiseKernel, WhiteKernel
+from sklearn.gaussian_process import GaussianProcessRegressor, kernels
+from sklearn.gaussian_process.kernels import WhiteKernel
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import MinMaxScaler, PolynomialFeatures
+from sklearn.preprocessing import PolynomialFeatures
 
 from amisc.serialize import Base64Serializable, Serializable, StringSerializable
 from amisc.typing import Dataset, MultiIndex
-
-warnings.filterwarnings("ignore", module="sklearn")
-
-
-
 
 __all__ = ["InterpolatorState", "LagrangeState", "LinearState", "GPRState", "Interpolator", "Lagrange", "Linear", "GPR"]
 
@@ -104,8 +98,8 @@ class GPRState(InterpolatorState, Base64Serializable):
     def __eq__(self, other):
         if isinstance(other, GPRState):
             return (self.x_vars == other.x_vars and self.y_vars == other.y_vars and
-                    np.allclose(self.regressor['gpr'].kernel_.k1.metric, 
-                                other.regressor['gpr'].kernel_.k1.metric) and
+                    np.allclose(self.regressor['gpr'].kernel_.k1, 
+                                other.regressor['gpr'].kernel_.k1) and
                     np.allclose(self.regressor['gpr'].kernel_.k2.noise_level, 
                                 other.regressor['gpr'].kernel_.k2.noise_level))
         else:
@@ -635,19 +629,35 @@ class Linear(Interpolator, StringSerializable):
 @dataclass
 class GPR(Interpolator, StringSerializable):
     """Implementation of Gaussian Process Regression using `sklearn`. The `GaussianProcessInterpolator` uses a pipeline 
-    of `MinMaxScaler` and a `GaussianProcessRegressor` to approximate the input-output mapping.
-    MinMaxScaler scales the input dimensions to [0,1] before passing them to the regressor.
+    of a scaler  and a `GaussianProcessRegressor` to approximate the input-output mapping.
 
-    : ivar kernel_type: the kernel type to use for building the covariance matrix. (Defaults to RBF)
+    : ivar kernel: the kernel  to use for building the covariance matrix. (eg: 'RBF', 'Matern','PairwiseKernel', etc.)
+    :ivar kernel_opts: Hyperparameters for the kernel chosen.
+    :ivar scaler: the scikit-learn preprocessing scaler to use (e.g. 'MinMaxScaler', 'StandardScaler', etc.). If None,
+                    MinMaxScaler is used (default).
+    :ivar regressor_opts: options to pass to the regressor constructor
+                          (see [scikit-learn](https://scikit-learn.org/stable/) documentation).
+    :ivar scaler_opts: options to pass to the scaler constructor
     """
 
-    kernel_type: str = 'rbf'  # Defaults to RBF Kernel
+    kernel: str = 'PairwiseKernel'
+    kernel_opts: dict = field(default_factory=lambda: {'gamma': 1.0, 'metric': 'poly'})
+    scaler : str = 'MinMaxScaler'
+    regressor_opts: dict = field(default_factory = lambda: {'n_restarts_optimizer': 15, 'random_state': 42}) 
+    scaler_opts: dict = field(default_factory=lambda: {'feature_range': (0, 1), 'copy': True, 'clip': False})
 
     def __post_init__(self):
-
-        if self.kernel_type not in ['additive_chi2', 'chi2', 'linear', 'poly', 'polynomial', 'rbf', 'laplacian',
-                                    'sigmoid', 'cosine']:
-            raise ValueError(f"Metric {self.kernel_type} not found in sklearn.metrics.pairwise")
+        try:
+            getattr(kernels, self.kernel)
+        except AttributeError:
+            raise ImportError(f"Kernel '{self.kernel}' not found in sklearn.gaussian_process.kernels")
+        
+        if self.scaler is not None:
+            try:
+                getattr(preprocessing, self.scaler)
+            except AttributeError:
+                raise ImportError(f"Scaler '{self.scaler}' not found in sklearn.preprocessing")
+    
 
     def refine(self, beta: MultiIndex, training_data: tuple[Dataset, Dataset],
                old_state: GPRState, input_domains: dict[str, tuple]) -> InterpolatorState:
@@ -673,11 +683,14 @@ class GPR(Interpolator, StringSerializable):
         x_arr = np.concatenate([xtrain[var][..., np.newaxis] for var in x_vars], axis=-1)
         y_arr = np.concatenate([ytrain[var][..., np.newaxis] for var in y_vars], axis=-1)
 
-        self.kernel = PairwiseKernel(metric=self.kernel_type, gamma=1) + WhiteKernel(noise_level=1e-4,
-                                                                                     noise_level_bounds=(1e-10, 1e-6))
+        gp_kernel = getattr(kernels, self.kernel)(**self.kernel_opts) + WhiteKernel(1e-10, (1e-10,1e-2))
 
-        gp = GaussianProcessRegressor(kernel=self.kernel, n_restarts_optimizer=15, random_state=42)
-        pipe = [('scaler', MinMaxScaler()), ('gpr', gp)]
+        gp = GaussianProcessRegressor(kernel = gp_kernel, **self.regressor_opts)
+        pipe = []
+        if self.scaler is not None:
+            pipe.append(('scaler', getattr(preprocessing, self.scaler)(**self.scaler_opts)))
+        pipe.extend([('gpr', gp)])
+
         regressor = Pipeline(pipe)
 
         regressor.fit(x_arr, y_arr)

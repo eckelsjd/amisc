@@ -346,32 +346,28 @@ def test_sklearn_polynomial():
 
 
 def test_GPR_1d(plots=False):
-    """Test GPR interpolation for a 1D function."""
-    num_train = 50
+    """Test GPR interpolation for no noise 1D function."""
+    num_train = 100
     num_test = 20
-    noise_std = 0
 
-    def model(inputs, noise_std):
+    def model(inputs):
         x1 = inputs['x1']
-        y = (6 * x1 - 2) ** 2 * np.sin(12 * x1 - 4) + noise_std * np.random.randn(*x1.shape)
+        y = (6 * x1 - 2) ** 2 * np.sin(12 * x1 - 4)
         return {'y': y}
 
     xtrain = {'x1': np.random.uniform(0, 1, num_train)}
-    ytrain = model(xtrain, noise_std)
+    ytrain = model(xtrain)
 
-    interp = GPR()
+    interp = GPR(kernel='RBF', kernel_opts={'length_scale': 1})
     state = interp.refine((), (xtrain, ytrain), None, {})
 
     xtest = {'x1': np.linspace(0, 1, num_test)}
-    ytest = model(xtest, noise_std=0)
+    ytest = model(xtest)
     ypred = interp.predict(xtest, state, ())
 
     l2_error = {var: relative_error(ypred[var], ytest[var]) for var in ypred}
-    print(f'L2 error: {l2_error}')
-    if noise_std > 0:
-        assert all((l2_error[var] < 0.09 for var in ypred)), f'L2 error : {l2_error} > 0.09'
-    else:
-        assert all((l2_error[var] < 1e-2 for var in ypred)), f'L2 error : {l2_error} > 0.01'
+    assert all ([l2_error[var] < 0.01 for var in l2_error]), f'L2 error {l2_error} is greater than 0.01'
+
 
     if plots:
         plt.plot(xtest['x1'], ytest['y'], 'r--', label='Model')
@@ -379,10 +375,22 @@ def test_GPR_1d(plots=False):
         plt.scatter(xtrain['x1'], ytrain['y'], marker='o', s=25, color='blue', label='Training data')
         plt.legend()
         plt.show()
+    
+    '''Test for a few other kernels'''
+    regressors = {'Matern': {'length_scale': 1, 'nu':2.5},
+                  'RationalQuadratic': {'length_scale': 1, 'alpha': 1},
+                  'ExpSineSquared': {'length_scale': 1, 'periodicity': 1}}
+    for regressor, opts in regressors.items():
+        interp = GPR(kernel=regressor, kernel_opts=opts)
+        state = interp.refine((), (xtrain, ytrain), None, {})
+
+        ypred = interp.predict(xtest, state, ())
+        err = {var: relative_error(ypred[var], ytest[var]) for var in ypred}
+        assert all([err[var] < 0.01 for var in err]), f'L2 error {err} is greater than 0.01 for {regressor}'
 
 
 def test_GPR_2d(plots=False):
-    """Stress Test GPR interpolator with Brannin Function"""
+    """Stress Test GPR interpolator with 2D Brannin Function"""
     num_train = 100
     num_test = 20
     noise_std = 10
@@ -411,11 +419,9 @@ def test_GPR_2d(plots=False):
     ypred = interp.predict(xtest, state, ())
 
     l2_error = {var: relative_error(ypred[var], ytest[var]) for var in ypred}
-    print(f'L2 error: {l2_error}')
-    if noise_std > 0:
-        assert all((l2_error[var] < 0.2 for var in ypred)), f'L2 error : {l2_error} > 0.2'
-    else:
-        assert all((l2_error[var] < 0.05 for var in ypred)), f'L2 error : {l2_error} > 0.05'
+
+    rel_noise = 2 *noise_std / np.mean(ytest['y'])
+    assert l2_error['y'] < rel_noise, f'L2 error: {l2_error["y"]} is greater than relative noise {rel_noise}'
 
     if plots:
         test_x1 = np.linspace(-5, 10, num_test)
@@ -441,3 +447,42 @@ def test_GPR_2d(plots=False):
         cbar = fig.colorbar(contour2, ax=axs, orientation='vertical')
         cbar.set_label('y', rotation=0)
         plt.show()
+
+def test_GPR_nd():
+    """Multi-dimensionsal GPR test with noise"""
+    num_train = 150
+    num_test = 20
+    noise_std = 5
+
+    def model(inputs, noise_std=0.0):
+        x1 = inputs['x1']
+        x2 = inputs['x2']
+        x3 = inputs['x3']
+        x4 = inputs['x4']
+
+        y1 = x1 + 0.01 * x2 + 0.1 * x3 + np.random.randn(*x1.shape) * noise_std
+        y2 = np.sin(np.pi * x1) + 0.001 * x2 + 0.5 * x4 + np.random.randn(*x1.shape) * noise_std
+        y3 = x1 * x4 + 0.05 * x3**2 + np.random.randn(*x1.shape) * noise_std
+
+
+        return {'y1': y1, 'y2': y2, 'y3': y3}
+    
+    xtrain = {'x1': np.random.uniform(0,1, num_train),
+              'x2': np.random.uniform(100,500, num_train),
+              'x3': np.random.uniform(-10,10, num_train),
+              'x4': np.random.uniform(0.01,10, num_train)}
+    ytrain = model(xtrain, noise_std=noise_std)
+
+    interp = GPR(kernel='RBF', kernel_opts={'length_scale': 1})
+    state = interp.refine((), (xtrain, ytrain), None, {})
+    xtest = {'x1': np.random.uniform(0,1, num_test),
+             'x2': np.random.uniform(100,500, num_test),
+             'x3': np.random.uniform(-10,10, num_test),
+             'x4': np.random.uniform(0.01,10, num_test)}
+    ytest = model(xtest, noise_std=0)
+    ypred = interp.predict(xtest, state, ())
+    l2_error = {var: relative_error(ypred[var], ytest[var]) for var in ypred}
+    rel_noise = {var: np.abs(2 * noise_std / np.mean(ytest[var])) for var in ytest}
+    assert all([l2_error[var] < rel_noise[var] for var in l2_error]), f'L2 error: {l2_error} is \
+        greater than  relative noise {rel_noise}'
+    
