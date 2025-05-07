@@ -423,9 +423,9 @@ def test_fire_sat(tmp_path, plots=False):
     # Test multiple interpolators on the Power component
     interpolators = {'lagrange': {},
                      'linear': {'regressor': 'RidgeCV', 'regressor_opts': {'alphas': np.logspace(-5, 4, 10).tolist()}},
-                     'GPR' :{}
+                     'GPR': {}
                      }
-    surrogate_fidelities = {'lagrange': (), 'linear': (2,), 'GPR': (2,)}
+    surrogate_fidelities = {'lagrange': (), 'linear': (2,), 'GPR': ()}
 
     for interpolator, config in interpolators.items():
         surr.logger.info(f'Running "{interpolator}" interpolator...')

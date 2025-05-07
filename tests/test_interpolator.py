@@ -347,18 +347,18 @@ def test_sklearn_polynomial():
 
 def test_GPR_1d(plots=False):
     """Test GPR interpolation for no noise 1D function."""
-    num_train = 100
-    num_test = 20
+    num_train = 30
+    num_test = 40
 
     def model(inputs):
         x1 = inputs['x1']
         y = (6 * x1 - 2) ** 2 * np.sin(12 * x1 - 4)
         return {'y': y}
 
-    xtrain = {'x1': np.random.uniform(0, 1, num_train)}
+    xtrain = {'x1': np.linspace(0, 1, num_train)}
     ytrain = model(xtrain)
 
-    interp = GPR(kernel='RBF', kernel_opts={'length_scale': 1})
+    interp = GPR(kernel='RBF', kernel_opts={'length_scale': 0.1, 'length_scale_bounds': 'fixed'})
     state = interp.refine((), (xtrain, ytrain), None, {})
 
     xtest = {'x1': np.linspace(0, 1, num_test)}
@@ -366,8 +366,7 @@ def test_GPR_1d(plots=False):
     ypred = interp.predict(xtest, state, ())
 
     l2_error = {var: relative_error(ypred[var], ytest[var]) for var in ypred}
-    assert all ([l2_error[var] < 0.01 for var in l2_error]), f'L2 error {l2_error} is greater than 0.01'
-
+    assert all([l2_error[var] < 0.01 for var in l2_error]), f'L2 error {l2_error} is greater than 0.01'
 
     if plots:
         plt.plot(xtest['x1'], ytest['y'], 'r--', label='Model')
@@ -375,9 +374,9 @@ def test_GPR_1d(plots=False):
         plt.scatter(xtrain['x1'], ytrain['y'], marker='o', s=25, color='blue', label='Training data')
         plt.legend()
         plt.show()
-    
-    '''Test for a few other kernels'''
-    regressors = {'Matern': {'length_scale': 1, 'nu':2.5},
+
+    # Test for a few other kernels
+    regressors = {'Matern': {'length_scale': 0.1, 'nu': 2.5},
                   'RationalQuadratic': {'length_scale': 1, 'alpha': 1},
                   'ExpSineSquared': {'length_scale': 1, 'periodicity': 1}}
     for regressor, opts in regressors.items():
@@ -390,27 +389,34 @@ def test_GPR_1d(plots=False):
 
 
 def test_GPR_2d(plots=False):
-    """Stress Test GPR interpolator with 2D Brannin Function"""
-    num_train = 100
-    num_test = 20
-    noise_std = 10
+    """Test GPR interpolator with 2D Branin Function (https://www.sfu.ca/~ssurjano/branin.html)"""
+    num_train = 150
+    num_test = 30
+    noise_std = 8
 
     def model(inputs, noise_std):
         """Branin function."""
         x1 = inputs['x1']
         x2 = inputs['x2']
+        input_shape = np.atleast_1d(x1).shape
         a = 1
         b = 5.1 / (4 * np.pi ** 2)
         c = 5 / np.pi
         r = 6
         s = 10
         t = 1 / (8 * np.pi)
-        y = a * (x2 - b * x1 ** 2 + c * x1 - r) ** 2 + s * (1 - t) * np.cos(x1) + s + noise_std * np.random.randn()
+        y = (a * (x2 - b * x1 ** 2 + c * x1 - r) ** 2 + s * (1 - t) * np.cos(x1) + s +
+             noise_std * np.random.randn(*input_shape))
         return {'y': y}
 
     xtrain = {'x1': np.random.uniform(-5, 10, num_train), 'x2': np.random.uniform(0, 15, num_train)}
     ytrain = model(xtrain, noise_std)
-    interp = GPR()
+    interp = GPR(kernel=['Sum',
+                         ['Product',
+                          ['ConstantKernel', {'constant_value': 100, 'constant_value_bounds': (1000, 100000)}],
+                          ['RBF', {'length_scale': 5, 'length_scale_bounds': (1, 10)}]],
+                         ['WhiteKernel', {'noise_level': noise_std, 'noise_level_bounds': (0.1 * noise_std,
+                                                                                           10 * noise_std)}]])
 
     state = interp.refine((), (xtrain, ytrain), None, {})
     xtest = {'x1': np.random.uniform(-5, 10, num_test), 'x2': np.random.uniform(0, 15, num_test)}
@@ -419,40 +425,43 @@ def test_GPR_2d(plots=False):
     ypred = interp.predict(xtest, state, ())
 
     l2_error = {var: relative_error(ypred[var], ytest[var]) for var in ypred}
-
-    rel_noise = 2 *noise_std / np.mean(ytest['y'])
+    rel_noise = 2 * noise_std / np.percentile(ytrain['y'], 75)  # pretty skewed so use percentile
     assert l2_error['y'] < rel_noise, f'L2 error: {l2_error["y"]} is greater than relative noise {rel_noise}'
 
     if plots:
         test_x1 = np.linspace(-5, 10, num_test)
         test_x2 = np.linspace(0, 15, num_test)
         X1, X2 = np.meshgrid(test_x1, test_x2)
-        true_Y = model({'x1': X1.flatten(), 'x2': X2.flatten()}, noise_std=0)['y']
-        pred_Y = interp.predict({'x1': X1.flatten(), 'x2': X2.flatten()}, state, ())['y']
+        true_Y = model({'x1': X1, 'x2': X2}, noise_std=0)['y']
+        pred_Y = interp.predict({'x1': X1, 'x2': X2}, state, ())['y']
 
         import matplotlib.colors as mcolors
         norm = mcolors.Normalize(vmin=min(true_Y.min(), pred_Y.min()), vmax=max(true_Y.max(), pred_Y.max()))
-        fig, axs = plt.subplots(1, 2)
-        axs[0].contourf(X1, X2, true_Y.reshape(X1.shape), levels=10, cmap='viridis', norm=norm)
+        fig, axs = plt.subplots(1, 2, figsize=(11, 5), layout='tight')
+        axs[0].contourf(X1, X2, true_Y, levels=10, cmap='viridis', norm=norm)
         axs[0].set_title('True Function')
         axs[0].set_xlabel('x1')
         axs[0].set_ylabel('x2', rotation=0)
         axs[0].set_xlim(-5.1, 10.1)
         axs[0].set_ylim(-0.1, 15.1)
-        contour2 = axs[1].contourf(X1, X2, pred_Y.reshape(X1.shape), levels=10, cmap='viridis', norm=norm) 
+        contour2 = axs[1].contourf(X1, X2, pred_Y, levels=10, cmap='viridis', norm=norm)
+        axs[1].scatter(xtrain['x1'], xtrain['x2'], c=ytrain['y'], marker='o', s=25, cmap='viridis',
+                       norm=norm, alpha=1, linewidths=2, edgecolors='black')
         axs[1].set_xlabel('x1')
         axs[1].set_ylabel('x2', rotation=0)
         axs[1].set_xlim(-5.1, 10.1)
         axs[1].set_ylim(-0.1, 15.1)
-        cbar = fig.colorbar(contour2, ax=axs, orientation='vertical')
+        axs[1].set_title('GPR surrogate')
+        cbar = fig.colorbar(contour2, ax=axs[1], orientation='vertical')
         cbar.set_label('y', rotation=0)
         plt.show()
+
 
 def test_GPR_nd():
     """Multi-dimensionsal GPR test with noise"""
     num_train = 150
-    num_test = 20
-    noise_std = 5
+    num_test = 30
+    noise_std = 0.1
 
     def model(inputs, noise_std=0.0):
         x1 = inputs['x1']
@@ -464,25 +473,23 @@ def test_GPR_nd():
         y2 = np.sin(np.pi * x1) + 0.001 * x2 + 0.5 * x4 + np.random.randn(*x1.shape) * noise_std
         y3 = x1 * x4 + 0.05 * x3**2 + np.random.randn(*x1.shape) * noise_std
 
-
         return {'y1': y1, 'y2': y2, 'y3': y3}
-    
-    xtrain = {'x1': np.random.uniform(0,1, num_train),
-              'x2': np.random.uniform(100,500, num_train),
-              'x3': np.random.uniform(-10,10, num_train),
-              'x4': np.random.uniform(0.01,10, num_train)}
+
+    xtrain = {'x1': np.random.uniform(0, 1, num_train),
+              'x2': np.random.uniform(100, 500, num_train),
+              'x3': np.random.uniform(-10, 10, num_train),
+              'x4': np.random.uniform(0.01, 0.1, num_train)}
     ytrain = model(xtrain, noise_std=noise_std)
 
-    interp = GPR(kernel='RBF', kernel_opts={'length_scale': 1})
+    interp = GPR(kernel=['Sum', ['RBF', {'length_scale': [0.1, 10, 1, 0.1]}], ['WhiteKernel']])
     state = interp.refine((), (xtrain, ytrain), None, {})
-    xtest = {'x1': np.random.uniform(0,1, num_test),
-             'x2': np.random.uniform(100,500, num_test),
-             'x3': np.random.uniform(-10,10, num_test),
-             'x4': np.random.uniform(0.01,10, num_test)}
+    xtest = {'x1': np.random.uniform(0, 1, num_test),
+             'x2': np.random.uniform(100, 500, num_test),
+             'x3': np.random.uniform(-10, 10, num_test),
+             'x4': np.random.uniform(0.01, 0.1, num_test)}
     ytest = model(xtest, noise_std=0)
     ypred = interp.predict(xtest, state, ())
     l2_error = {var: relative_error(ypred[var], ytest[var]) for var in ypred}
     rel_noise = {var: np.abs(2 * noise_std / np.mean(ytest[var])) for var in ytest}
     assert all([l2_error[var] < rel_noise[var] for var in l2_error]), f'L2 error: {l2_error} is \
         greater than  relative noise {rel_noise}'
-    

@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 import numpy as np
 from sklearn import linear_model, preprocessing
 from sklearn.gaussian_process import GaussianProcessRegressor, kernels
-from sklearn.gaussian_process.kernels import WhiteKernel
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import PolynomialFeatures
 
@@ -88,7 +87,7 @@ class GPRState(InterpolatorState, Base64Serializable):
 
     :ivar x_vars: the input variables in order
     :ivar y_vars: the output variables in order
-    :ivar regressor: the sklearn regressor object, a pipeline that consists of a `MinMaxScaler` and a
+    :ivar regressor: the sklearn regressor object, a pipeline that consists of a preprocessing scaler and a
                      `GaussianProcessRegressor`.
     """
     x_vars: list[str] = field(default_factory=list)
@@ -98,10 +97,9 @@ class GPRState(InterpolatorState, Base64Serializable):
     def __eq__(self, other):
         if isinstance(other, GPRState):
             return (self.x_vars == other.x_vars and self.y_vars == other.y_vars and
-                    np.allclose(self.regressor['gpr'].kernel_.k1, 
-                                other.regressor['gpr'].kernel_.k1) and
-                    np.allclose(self.regressor['gpr'].kernel_.k2.noise_level, 
-                                other.regressor['gpr'].kernel_.k2.noise_level))
+                    len(self.regressor.steps) == len(other.regressor.steps) and
+                    self.regressor['gpr'].alpha == other.regressor['gpr'].alpha and
+                    self.regressor['gpr'].kernel_ == other.regressor['gpr'].kernel_)
         else:
             return False
 
@@ -114,8 +112,8 @@ class Interpolator(Serializable, ABC):
     - `gradient` - compute the grdient/Jacobian at new points (if you want)
     - `hessian` - compute the 2nd derivative/Hessian at new points (if you want)
 
-    Currently, `Lagrange` and `Linear` interpolators are supported and can be constructed from a configuration `dict`
-    via `Interpolator.from_dict()`.
+    Currently, `Lagrange`, `Linear`, and `GPR` interpolators are supported and can be constructed from a configuration
+    `dict` via `Interpolator.from_dict()`.
     """
 
     @abstractmethod
@@ -170,17 +168,27 @@ class Interpolator(Serializable, ABC):
 
     @classmethod
     def from_dict(cls, config: dict) -> Interpolator:
-        """Create an `Interpolator` object from a `dict` config. Only `method='lagrange'` is supported for now."""
-        method = config.pop('method', 'lagrange').lower()
-        match method:
+        """Create an `Interpolator` object from a `dict` config. Available methods are `lagrange`, `linear`, and `gpr`.
+        Will attempt to find the method if not listed.
+
+        :param config: a `dict` containing the configuration for the interpolator, with the `method` key specifying the
+                       name of the interpolator method to use, and the rest of the keys are options for the method
+        """
+        method = config.pop('method', 'lagrange')
+        match method.lower():
             case 'lagrange':
                 return Lagrange(**config)
             case 'linear':
                 return Linear(**config)
             case 'gpr':
                 return GPR(**config)
-            case other:
-                raise NotImplementedError(f"Unknown interpolator method: {other}")
+            case _:
+                import amisc.interpolator
+
+                if hasattr(amisc.interpolator, method):
+                    return getattr(amisc.interpolator, method)(**config)
+
+                raise NotImplementedError(f"Unknown interpolator method: {method}")
 
 
 @dataclass
@@ -628,36 +636,75 @@ class Linear(Interpolator, StringSerializable):
 
 @dataclass
 class GPR(Interpolator, StringSerializable):
-    """Implementation of Gaussian Process Regression using `sklearn`. The `GaussianProcessInterpolator` uses a pipeline 
-    of a scaler  and a `GaussianProcessRegressor` to approximate the input-output mapping.
+    """Implementation of Gaussian Process Regression using `sklearn`. The `GPR` uses a pipeline
+    of a scaler and a `GaussianProcessRegressor` to approximate the input-output mapping.
 
-    : ivar kernel: the kernel  to use for building the covariance matrix. (eg: 'RBF', 'Matern','PairwiseKernel', etc.)
-    :ivar kernel_opts: Hyperparameters for the kernel chosen.
     :ivar scaler: the scikit-learn preprocessing scaler to use (e.g. 'MinMaxScaler', 'StandardScaler', etc.). If None,
-                    MinMaxScaler is used (default).
-    :ivar regressor_opts: options to pass to the regressor constructor
-                          (see [scikit-learn](https://scikit-learn.org/stable/) documentation).
+                  no scaling is applied (default).
+    :ivar kernel: the kernel to use for building the covariance matrix (e.g. 'RBF', 'Matern', 'PairwiseKernel', etc.).
+                  If a string is provided, then the specified kernel is used with the given `kernel_opts`.
+                  If a list is provided, then kernel operators ('Sum', 'Product', 'Exponentiation') can be used to
+                  combine multiple kernels. The first element of the list should be the kernel or operator name, and
+                  the remaining elements should be the arguments. Dicts are accepted as **kwargs. For example:
+                  `['Sum', ['RBF', {'length_scale': 1.0}], ['Matern', {'length_scale': 1.0}]]` will create a sum of
+                  an RBF and a Matern kernel with the specified length scales.
     :ivar scaler_opts: options to pass to the scaler constructor
+    :ivar kernel_opts: options to pass to the kernel constructor (ignored if kernel is a list, where opts are already
+                       specified for combinations of kernels).
+    :ivar regressor_opts: options to pass to the `GaussianProcessRegressor` constructor
+                          (see [scikit-learn](https://scikit-learn.org/stable/) documentation).
     """
+    scaler: str = None
+    kernel: str | list = 'RBF'
+    scaler_opts: dict = field(default_factory=dict)
+    kernel_opts: dict = field(default_factory=dict)
+    regressor_opts: dict = field(default_factory=lambda: {'n_restarts_optimizer': 5})
 
-    kernel: str = 'PairwiseKernel'
-    kernel_opts: dict = field(default_factory=lambda: {'gamma': 1.0, 'metric': 'poly'})
-    scaler : str = 'MinMaxScaler'
-    regressor_opts: dict = field(default_factory = lambda: {'n_restarts_optimizer': 15, 'random_state': 42}) 
-    scaler_opts: dict = field(default_factory=lambda: {'feature_range': (0, 1), 'copy': True, 'clip': False})
+    def _construct_kernel(self, kernel_list):
+        """Build a scikit-learn kernel from a list of kernels (e.g. RBF, Matern, etc.) and kernel operators
+        (Sum, Product, Exponentiation).
+
+        !!! Example
+            `['Sum', ['RBF'], ['Matern', {'length_scale': 1.0}]]` will become `RBF() + Matern(length_scale=1.0)`
+
+        :param kernel_list: list of kernel/operator names and arguments. Kwarg options can be passed as dicts.
+        :returns: the scikit-learn kernel object
+        """
+        # Base case for single items (just return as is)
+        if not isinstance(kernel_list, list):
+            return kernel_list
+
+        name = kernel_list[0]
+        args = [self._construct_kernel(ele) for ele in kernel_list[1:]]
+
+        # Base case for passing a single dict of kwargs
+        if len(args) == 1 and isinstance(args[0], dict):
+            return getattr(kernels, name)(**args[0])
+
+        # Base case for passing a list of args
+        return getattr(kernels, name)(*args)
+
+    def _validate_kernel(self, kernel_list):
+        """Make sure all requested kernels are available in scikit-learn."""
+        if not isinstance(kernel_list, list):
+            return
+
+        name = kernel_list[0]
+
+        if not hasattr(kernels, name):
+            raise ImportError(f"Kernel '{name}' not found in sklearn.gaussian_process.kernels")
+
+        for ele in kernel_list[1:]:
+            self._validate_kernel(ele)
 
     def __post_init__(self):
-        try:
-            getattr(kernels, self.kernel)
-        except AttributeError:
-            raise ImportError(f"Kernel '{self.kernel}' not found in sklearn.gaussian_process.kernels")
-        
+        self._validate_kernel(self.kernel if isinstance(self.kernel, list) else [self.kernel, self.kernel_opts])
+
         if self.scaler is not None:
             try:
                 getattr(preprocessing, self.scaler)
             except AttributeError:
                 raise ImportError(f"Scaler '{self.scaler}' not found in sklearn.preprocessing")
-    
 
     def refine(self, beta: MultiIndex, training_data: tuple[Dataset, Dataset],
                old_state: GPRState, input_domains: dict[str, tuple]) -> InterpolatorState:
@@ -669,6 +716,15 @@ class GPR(Interpolator, StringSerializable):
         :param input_domains: (not used for `GPR`)
         :returns: the new GPR state
         """
+        gp_kernel = self._construct_kernel(self.kernel if isinstance(self.kernel, list)
+                                           else [self.kernel, self.kernel_opts])
+        gp = GaussianProcessRegressor(kernel=gp_kernel, **self.regressor_opts)
+        pipe = []
+        if self.scaler is not None:
+            pipe.append(('scaler', getattr(preprocessing, self.scaler)(**self.scaler_opts)))
+        pipe.append(('gpr', gp))
+        regressor = Pipeline(pipe)
+
         xtrain, ytrain = training_data
 
         # Get order of variables for inputs and outputs
@@ -683,16 +739,6 @@ class GPR(Interpolator, StringSerializable):
         x_arr = np.concatenate([xtrain[var][..., np.newaxis] for var in x_vars], axis=-1)
         y_arr = np.concatenate([ytrain[var][..., np.newaxis] for var in y_vars], axis=-1)
 
-        gp_kernel = getattr(kernels, self.kernel)(**self.kernel_opts) + WhiteKernel(1e-10, (1e-10,1e-2))
-
-        gp = GaussianProcessRegressor(kernel = gp_kernel, **self.regressor_opts)
-        pipe = []
-        if self.scaler is not None:
-            pipe.append(('scaler', getattr(preprocessing, self.scaler)(**self.scaler_opts)))
-        pipe.extend([('gpr', gp)])
-
-        regressor = Pipeline(pipe)
-
         regressor.fit(x_arr, y_arr)
 
         return GPRState(regressor=regressor, x_vars=x_vars, y_vars=y_vars)
@@ -704,7 +750,6 @@ class GPR(Interpolator, StringSerializable):
         :param state: the state containing the Gaussian Process Regressor to use
         :param training_data: not used for `GPR` (since the regressor is already trained in `state`)
         """
-
         # Convert to (N, xdim) array for sklearn
         x_arr = np.concatenate([x[var][..., np.newaxis] for var in state.x_vars], axis=-1)
         loop_shape = x_arr.shape[:-1]
