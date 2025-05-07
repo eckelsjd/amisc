@@ -423,7 +423,9 @@ def test_fire_sat(tmp_path, plots=False):
     # Test multiple interpolators on the Power component
     interpolators = {'lagrange': {},
                      'linear': {'regressor': 'RidgeCV', 'regressor_opts': {'alphas': np.logspace(-5, 4, 10).tolist()}},
-                     'GPR': {}
+                     'GPR': {'scaler': 'MinMaxScaler', 'kernel': ['Product',
+                                                                  ['ConstantKernel'],
+                                                                  ['PairwiseKernel', {'metric': 'poly'}]]}
                      }
     surrogate_fidelities = {'lagrange': (), 'linear': (2,), 'GPR': ()}
 
