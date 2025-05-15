@@ -4,6 +4,7 @@ MISC evaluation with sparse grids.
 import itertools
 import time
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -408,7 +409,8 @@ def test_polynomial_regression(plots=False):
     Ik = [((), (0, 0)), ((), (0, 1)), ((), (1, 0)), ((), (2, 0)), ((), (1, 1)), ((), (0, 2)), ((), (1, 2)),
           ((), (2, 1)), ((), (2, 2))]
     for alpha, beta in Ik:
-        comp.activate_index(alpha, beta)
+        with warnings.catch_warnings(action='ignore', category=RuntimeWarning):
+            comp.activate_index(alpha, beta)
     xg = np.linspace(0, 1, 100)
     yt = comp.predict({'x': xg}, use_model='best')['y']
     ysurr = comp.predict({'x': xg})['y']

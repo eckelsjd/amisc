@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import fsolve
 from scipy.stats import gaussian_kde
+from sklearn.exceptions import ConvergenceWarning
 from uqtils import ax_default
 
 from amisc import Component, System, Variable
@@ -423,9 +424,7 @@ def test_fire_sat(tmp_path, plots=False):
     # Test multiple interpolators on the Power component
     interpolators = {'lagrange': {},
                      'linear': {'regressor': 'RidgeCV', 'regressor_opts': {'alphas': np.logspace(-5, 4, 10).tolist()}},
-                     'GPR': {'scaler': 'MinMaxScaler', 'kernel': ['Product',
-                                                                  ['ConstantKernel'],
-                                                                  ['PairwiseKernel', {'metric': 'poly'}]]}
+                     'GPR': {'scaler': 'MinMaxScaler', 'kernel': 'PairwiseKernel', 'kernel_opts': {'metric': 'poly'}}
                      }
     surrogate_fidelities = {'lagrange': (), 'linear': (2,), 'GPR': ()}
 
@@ -434,8 +433,10 @@ def test_fire_sat(tmp_path, plots=False):
         surr.clear()
         surr['Power'].interpolator = Interpolator.from_dict(dict(method=interpolator, **config))
         surr['Power'].surrogate_fidelity = surrogate_fidelities[interpolator]
-        surr.fit(targets=targs, max_iter=10, max_tol=1e-3, runtime_hr=4/12, test_set=(xt, yt),
-                 plot_interval=4, estimate_bounds=True)
+
+        with warnings.catch_warnings(action='ignore', category=(RuntimeWarning, ConvergenceWarning)):
+            surr.fit(targets=targs, max_iter=10, max_tol=1e-3, runtime_hr=4/12, test_set=(xt, yt),
+                     plot_interval=4, estimate_bounds=True)
 
         ysurr = surr.predict(xt, targets=targs)
         for var in yt:

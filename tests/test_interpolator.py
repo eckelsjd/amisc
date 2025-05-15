@@ -377,8 +377,9 @@ def test_GPR_1d(plots=False):
 
     # Test for a few other kernels
     regressors = {'Matern': {'length_scale': 0.1, 'nu': 2.5},
-                  'RationalQuadratic': {'length_scale': 1, 'alpha': 1},
-                  'ExpSineSquared': {'length_scale': 1, 'periodicity': 1}}
+                  'RationalQuadratic': {'length_scale': 1, 'alpha': 1, 'alpha_bounds': 'fixed'},
+                  'ExpSineSquared': {'length_scale': 1e-3, 'length_scale_bounds': 'fixed',
+                                         'periodicity': 1000, 'periodicity_bounds': 'fixed'}}
     for regressor, opts in regressors.items():
         interp = GPR(kernel=regressor, kernel_opts=opts)
         state = interp.refine((), (xtrain, ytrain), None, {})
