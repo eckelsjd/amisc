@@ -1,3 +1,11 @@
+## v0.8.0 (2025-05-15)
+
+### Feat
+
+- adds GPR for interpolation
+- adds scaler opt for linear regression
+- adds linear regression Interpolator
+
 ## v0.7.3 (2025-02-10)
 
 ### Fix
