@@ -150,7 +150,7 @@ class CustomInterpolatorState(InterpolatorState):
     pass
 ```
 
-Currently, the available methods are `Lagrange` polynomial interpolation and `Linear` regression. The state of a `Lagrange` polynomial includes the 1d grids and barycentric weights for each input dimension. The state of a `Linear` regression includes the underlying [scikit-learn](https://scikit-learn.org/stable/) linear model. See [Lagrange][amisc.interpolator.Lagrange] and [Linear][amisc.interpolator.Linear] for more details. Note that linear regression also includes options for polynomial features.
+Currently, the available methods are `Lagrange` polynomial interpolation, `Linear` regression, and Gaussian process regression `GPR`. The state of a `Lagrange` polynomial includes the 1d grids and barycentric weights for each input dimension. The state of a `Linear` regression or `GPR` includes the underlying [scikit-learn](https://scikit-learn.org/stable/) regression model. See [Lagrange][amisc.interpolator.Lagrange], [Linear][amisc.interpolator.Linear], and [GPR][amisc.interpolator.GPR] for more details. Note that linear regression also includes options for polynomial features, and GPR includes options for the kernel function.
 
 ## Model keyword arguments
 The `ModelKwarg` interface provides a dataclass for passing extra options to the underlying component models. The default is a simple `dict` that gets passed as a set of `key=value` pairs. The primary reason for overriding this class is if you have complicated arguments that require custom serialization. See the [serialization](#serialization) section below.

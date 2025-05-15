@@ -1514,7 +1514,7 @@ class Component(BaseModel, Serializable):
                     if len(value) > 0:
                         d[key] = {str(k): int(v) for k, v in value.items()}
                 elif key in ComponentSerializers.__annotations__.keys():
-                    if key in ['training_data', 'interpolator'] and not self.has_surrogate:
+                    if key in ['training_data'] and not self.has_surrogate:
                         continue
                     else:
                         d[key] = value.serialize(*serialize_args.get(key, ()), **serialize_kwargs.get(key, {}))

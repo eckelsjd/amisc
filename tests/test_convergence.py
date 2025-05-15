@@ -1,4 +1,5 @@
 """Test convergence of `System.fit` to a few smooth analytical models."""
+import warnings
 from pathlib import Path
 from typing import Literal
 
@@ -60,7 +61,8 @@ def test_curved_with_noise():
     xt = system.sample_inputs(1000)
     yt = curved_func(xt)
 
-    system.fit(max_iter=50, max_tol=1e-4)
+    with warnings.catch_warnings(action='ignore', category=RuntimeWarning):
+        system.fit(max_iter=50, max_tol=1e-4)
     ysurr = system.predict(xt)
     l2_error = relative_error(ysurr['y'], yt['y'])
     rel_noise = 2 * noise_std / np.mean(yt['y'])
