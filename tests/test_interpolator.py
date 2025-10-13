@@ -1,12 +1,15 @@
 """Test interpolation classes. Currently, only Lagrange interpolation and Linear regression are supported."""
 import itertools
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.preprocessing import PolynomialFeatures
 from uqtils import approx_hess, approx_jac, ax_default
 
 from amisc.examples.models import nonlinear_wave, tanh_func
+from amisc.interpolator import GPR, Lagrange, Linear
 from amisc.interpolator import GPR, Lagrange, Linear
 from amisc.training import SparseGrid
 from amisc.utils import relative_error
@@ -291,6 +294,7 @@ def test_sklearn_linear():
 
 def test_sklearn_polynomial():
     """Test sklearn polynomial regression (and also cross-validation for hyperparameter tuning)."""
+    rng = np.random.default_rng(42)
     num_train = 100
     num_test = (20, 2)
     num_inputs = 3
@@ -298,12 +302,12 @@ def test_sklearn_polynomial():
 
     # Generate random polynomial coefficients
     feat = PolynomialFeatures(**polynomial_opts)
-    feat.fit(np.random.rand(num_train, num_inputs))
+    feat.fit(rng.random((num_train, num_inputs)))
     powers = feat.powers_  # (num_features, num_inputs) -- gives input powers for each polynomial feature
-    true_coeff = np.random.rand(powers.shape[0]) * 2 - 1
-    zero_ind = np.random.randint(0, powers.shape[0], size=powers.shape[0] // 2)  # zero half the coefficients
+    true_coeff = rng.random(powers.shape[0]) * 2 - 1
+    zero_ind = rng.integers(0, powers.shape[0], size=powers.shape[0] // 2)  # zero half the coefficients
     true_coeff[zero_ind] = 0
-    true_intercept = np.random.rand() * 2 - 1
+    true_intercept = rng.random() * 2 - 1
 
     def polynomial_model(inputs, noise_std=0.0):
         """Compute a linear model with polynomial features."""
@@ -324,14 +328,14 @@ def test_sklearn_polynomial():
 
         return {'y': y_mat}
 
-    xtrain = {f'x{i}': np.random.rand(num_train) * 2 - 1 for i in range(num_inputs)}
+    xtrain = {f'x{i}': rng.random(num_train) * 2 - 1 for i in range(num_inputs)}
     ytrain = polynomial_model(xtrain, noise_std=0.02)
 
     interp = Linear(regressor='RidgeCV', regressor_opts={'alphas': np.logspace(-4, 2, 7)},
                     polynomial_opts=polynomial_opts)
     state = interp.refine((), (xtrain, ytrain), None, {})
 
-    xtest = {f'x{i}': np.random.rand(*num_test) * 2 - 1 for i in range(num_inputs)}
+    xtest = {f'x{i}': rng.random(num_test) * 2 - 1 for i in range(num_inputs)}
     ytest = polynomial_model(xtest, noise_std=0.0)
     ypred = interp.predict(xtest, state, ())
 
