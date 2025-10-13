@@ -1,15 +1,12 @@
 """Test interpolation classes. Currently, only Lagrange interpolation and Linear regression are supported."""
 import itertools
-import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.exceptions import ConvergenceWarning
 from sklearn.preprocessing import PolynomialFeatures
 from uqtils import approx_hess, approx_jac, ax_default
 
 from amisc.examples.models import nonlinear_wave, tanh_func
-from amisc.interpolator import GPR, Lagrange, Linear
 from amisc.interpolator import GPR, Lagrange, Linear
 from amisc.training import SparseGrid
 from amisc.utils import relative_error
