@@ -2,9 +2,12 @@
 import itertools
 
 import numpy as np
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF
+from sklearn.gaussian_process.kernels import ConstantKernel as C
 
 from amisc.compression import SVD
-from amisc.training import SparseGrid
+from amisc.training import SparseGrid, UncertaintySampling
 from amisc.utils import to_model_dataset
 from amisc.variable import Variable, VariableList
 
@@ -45,6 +48,54 @@ def test_sparse_grid():
         x_pts, y_pts = grid.get_by_coord(alpha, design_list[i])
         assert all([np.allclose(design_pts[i][var], x_pts[var]) for var in x_vars])
         assert all([np.allclose(y_list[i][var], y_pts[var]) for var in y_vars])
+
+def test_uncertainty_sampling():
+    """Test the `SparseGrid` data structure `get`, `set`, and `refine` methods."""
+    def simple_model(inputs):
+        y1 = inputs['x1']
+        y2 = 10 ** (inputs['x2'])
+        y3 = inputs['x3'] - 5
+        return {'y1': y1, 'y2': y2, 'y3': y3}
+
+    x_vars = VariableList([Variable('x1', distribution='U(0, 1)', norm='linear(2, 2)'),
+                           Variable('x2', distribution='LU(1e-3, 1e-1)', norm='log10'),
+                           Variable('x3', distribution='LN(0, 1)', norm='log10')])
+    y_vars = VariableList(['y1', 'y2', 'y3'])
+    domains = x_vars.get_domains(norm=True)
+    weight_fcns = x_vars.get_pdfs(norm=True)
+    variance_criterions = ['global', 'local']
+    for variance_criterion in variance_criterions:
+        grid = UncertaintySampling(collocation_rule='leja', knots_per_level=2, variance_criterion=variance_criterion)
+
+        beta_list = list(itertools.product(*[range(3) for _ in range(len(x_vars))]))
+        alpha_list = [()] * len(beta_list)
+        design_list = []
+        design_pts = []
+        y_list = []
+
+        # Initialize GP model for uncertainty sampling
+        kernel = C(1.0, (1e-3, 1e3)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2))
+        gp_model = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=5, random_state=42)
+        x_train = np.array([0.5, 0.01, 0.5]).reshape(1, -1)
+        y_train = np.concatenate(
+            [simple_model({'x1': x_train[:, 0], 'x2': x_train[:, 1], 'x3': x_train[:, 2]})[var] for var in y_vars]
+            ).reshape(1, -1)
+        gp_model.fit(x_train, y_train)
+
+        # Refine the sparse grid
+        for alpha, beta in zip(alpha_list, beta_list):
+            new_idx, new_pts = grid.refine(alpha, beta, domains, gp_model, weight_fcns)
+            new_y = simple_model(new_pts)
+            design_list.append(new_idx)
+            design_pts.append(new_pts)
+            y_list.append(new_y)
+            grid.set(alpha, beta, new_idx, new_y)
+
+        # Extract data from sparse grid and check values
+        for i, (alpha, beta) in enumerate(zip(alpha_list, beta_list)):
+            x_pts, y_pts = grid.get_by_coord(alpha, design_list[i])
+            assert all([np.allclose(design_pts[i][var], x_pts[var]) for var in x_vars])
+            assert all([np.allclose(y_list[i][var], y_pts[var]) for var in y_vars])
 
 
 def test_imputer():

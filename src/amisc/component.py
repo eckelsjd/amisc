@@ -40,9 +40,9 @@ import yaml
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 from typing_extensions import TypedDict
 
-from amisc.interpolator import Interpolator, InterpolatorState, Lagrange
+from amisc.interpolator import GPR, Interpolator, InterpolatorState, Lagrange
 from amisc.serialize import PickleSerializable, Serializable, StringSerializable, YamlSerializable
-from amisc.training import SparseGrid, TrainingData
+from amisc.training import SparseGrid, TrainingData, UncertaintySampling
 from amisc.typing import COORDS_STR_ID, LATENT_STR_ID, Dataset, MultiIndex
 from amisc.utils import (
     _get_yaml_path,
@@ -1213,8 +1213,17 @@ class Component(BaseModel, Serializable):
                 # Training data is the same for all surrogate fidelity indices, given constant data fidelity
                 design_list.append([])
                 continue
-
-            design_coords, design_pts = self.training_data.refine(a, b[:len(self.data_fidelity)],
+            if isinstance(self.interpolator, GPR) and isinstance(self.training_data, UncertaintySampling):
+                states = list(self.misc_states)
+                match_state = [tup for tup in states if tup[0] == a]
+                if match_state:
+                    best_state = max(match_state, key=lambda x: sum(x[1]))[2].regressor.named_steps['gpr']
+                else: 
+                    best_state = None
+                design_coords, design_pts = self.training_data.refine(a, b[:len(self.data_fidelity)],
+                                                                  domains,best_state, weight_fcns)
+            else:
+                design_coords, design_pts = self.training_data.refine(a, b[:len(self.data_fidelity)],
                                                                   domains, weight_fcns)
             design_pts, fc = to_model_dataset(design_pts, self.inputs, del_latent=True, **field_coords)
 
@@ -1301,7 +1310,6 @@ class Component(BaseModel, Serializable):
             # Only for initial index which didn't come from the candidate set
             self.update_misc_coeff(IndexSet(s), index_set='test')
         self.active_set.update(s)
-
         self.update_misc_coeff(neighbors, index_set='test')  # neighbors will only ever pass through here once
         self.candidate_set.update(neighbors)
 

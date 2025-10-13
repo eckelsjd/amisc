@@ -717,7 +717,8 @@ class GPR(Interpolator, StringSerializable):
         :returns: the new GPR state
         """
         gp_kernel = self._construct_kernel(self.kernel if isinstance(self.kernel, list)
-                                           else [self.kernel, self.kernel_opts])
+                                            else [self.kernel, self.kernel_opts])
+
         gp = GaussianProcessRegressor(kernel=gp_kernel, **self.regressor_opts)
         pipe = []
         if self.scaler is not None:
