@@ -117,7 +117,7 @@ class Variable(BaseModel, Serializable):
             tex = rf'{tex}$'
         return tex
 
-    @field_validator('compression')
+    @field_validator('compression', mode='plain')
     @classmethod
     def _validate_compression(cls, compression: str | dict | Compression, info: ValidationInfo) -> Compression | None:
         if compression is None:
