@@ -405,15 +405,14 @@ def format_inputs(inputs: Dataset, var_shape: dict = None) -> tuple[Dataset, tup
 def format_outputs(outputs: Dataset, loop_shape: tuple[int, ...]) -> Dataset:
     """Reshape all outputs to the common loop shape. Loop shape is as obtained from a call to `format_inputs`.
     Assumes that all outputs are the same along the first dimension. This first dimension gets reshaped back into
-    the `loop_shape`. Singleton outputs are squeezed along the last dimension. A singleton loop shape is squeezed
-    along the first dimension.
+    the `loop_shape`.
 
     !!! Example
         ```python
         outputs = {'x': np.random.rand(10, 1, 5), 'y': np.random.rand(10, 1), 'z': np.random.rand(10, 20, 3)}
         loop_shape = (2, 5)
         fmt_outputs = format_outputs(outputs, loop_shape)
-        # Output: {'x': np.ndarray(2, 5, 1, 5), 'y': np.ndarray(2, 5), 'z': np.ndarray(200, 3)}, (2, 5, 20, 3)
+        # Output: {'x': np.ndarray(2, 5, 1, 5), 'y': np.ndarray(2, 5, 1), 'z': np.ndarray(2, 5, 20, 3)}
         ```
 
     :param outputs: `dict` of output arrays
@@ -423,13 +422,7 @@ def format_outputs(outputs: Dataset, loop_shape: tuple[int, ...]) -> Dataset:
     output_dict = {}
     for key, val in outputs.items():
         val = np.atleast_1d(val)
-        output_shape = val.shape[1:]  # Assumes (N, ...) output shape to start with
-        val = val.reshape(loop_shape + output_shape)
-        if output_shape == (1,):
-            val = np.atleast_1d(np.squeeze(val, axis=-1))  # Squeeze singleton outputs
-        if loop_shape == (1,):
-            val = np.atleast_1d(np.squeeze(val, axis=0))  # Squeeze singleton loop dimensions
-        output_dict[key] = val
+        output_dict[key] = val.reshape(loop_shape + val.shape[1:])  # Assumes (N, ...) output shape to start with
     return output_dict
 
 
