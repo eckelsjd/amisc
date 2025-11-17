@@ -976,7 +976,9 @@ class Component(BaseModel, Serializable):
                                     break
                             elif key == var:
                                 if output_dict.get(key) is None:
-                                    output_dict.setdefault(key, np.full((N, *np.atleast_1d(val).shape), np.nan))
+                                    _val = np.atleast_1d(val)
+                                    _extra_shape = () if len(_val.shape) == 1 and _val.shape[0] == 1 else _val.shape
+                                    output_dict.setdefault(key, np.full((N, *_extra_shape), np.nan))
                                 output_dict[key][i, ...] = np.atleast_1d(val)
                                 is_component_var = True
                                 break
