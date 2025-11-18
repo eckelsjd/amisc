@@ -305,7 +305,7 @@ class SparseGrid(TrainingData, PickleSerializable):
                 self.yi_nan_map[alpha][coord] = copy.deepcopy(y_impute)
 
     def refine(self, alpha: MultiIndex, beta: MultiIndex, input_domains: dict, 
-               misc_states: list, weight_fcns: dict = None):
+               misc_states: list = None, weight_fcns: dict = None):
         """Refine the sparse grid for a given `alpha` and `beta` pair and given collocation rules. Return any new
         grid points that do not have model evaluations saved yet.
 
@@ -313,6 +313,9 @@ class SparseGrid(TrainingData, PickleSerializable):
             The `beta` multi-index is used to determine the number of collocation points in each input dimension. The
             length of `beta` should therefore match the number of variables in `x_vars`.
         """
+        if misc_states is None:
+            self.collocation_rule = 'leja'
+        
         weight_fcns = weight_fcns or {}
         if self.collocation_rule == 'uncertainty':
             match_state = [tup for tup in misc_states if tup[0] == alpha]
