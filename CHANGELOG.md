@@ -1,3 +1,10 @@
+## v0.8.1 (2025-11-18)
+
+### Fix
+
+- fixes #58 loop dim of (1,) gets squeezed for field qtys
+- fixes #53 compression validation
+
 ## v0.8.0 (2025-05-15)
 
 ### Feat
