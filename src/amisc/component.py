@@ -1217,7 +1217,7 @@ class Component(BaseModel, Serializable):
                 continue
 
             design_coords, design_pts = self.training_data.refine(a, b[:len(self.data_fidelity)],
-                                                                  domains, weight_fcns)
+                                                                  domains, list(self.misc_states),weight_fcns)
             design_pts, fc = to_model_dataset(design_pts, self.inputs, del_latent=True, **field_coords)
 
             # Remove duplicate (alpha, coords) pairs -- so you don't evaluate the model twice for the same input
